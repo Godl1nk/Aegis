@@ -235,7 +235,7 @@ if AUTH_ENABLED:
         forwarding headers. A bare ``client.host in ('127.0.0.1','::1')`` check is
         unsafe behind a Cloudflare tunnel / reverse proxy: those connect from
         loopback, so a remote visitor would otherwise inherit local trust and
-        slip past LOCALHOST_BYPASS or spoof the internal-tool path. Odysseus's own
+        slip past LOCALHOST_BYPASS or spoof the internal-tool path. Aegis's own
         in-process agent loopback calls carry none of these headers, so they still
         qualify."""
         host = request.client.host if request.client else None

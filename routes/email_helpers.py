@@ -1293,7 +1293,7 @@ class SendEmailRequest(BaseModel):
     attachments: Optional[List[str]] = None
     # Which account to send from. None = default account.
     account_id: Optional[str] = None
-    # Internal marker for Odysseus-generated mail (e.g. reminder, scheduled).
+    # Internal marker for Aegis-generated mail (e.g. reminder, scheduled).
     odysseus_kind: Optional[str] = None
     # If true, /send waits for SMTP + Sent append and returns the sent UID.
     wait_for_delivery: bool = False

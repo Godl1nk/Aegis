@@ -615,13 +615,18 @@ def setup_email_routes():
                 # All emails NOT marked as answered/done (read or unread).
                 status, data = _imap_uid_search(conn, f"(UNANSWERED{from_clause})")
             elif filter_ == "reminders":
-                # Prefer the Odysseus marker header, but include the subject
-                # fallback too. The fallback uses a distinct Odysseus prefix
-                # so ordinary emails containing "Reminder" don't get mixed in.
+                # Prefer the Aegis marker header, but include the subject
+                # fallback too. Keep the old Odysseus subject for renamed
+                # installs where providers stripped custom headers.
                 status, data = _imap_uid_search(
                     conn,
-                    f'(OR HEADER X-Odysseus-Kind "reminder" SUBJECT "Reminder (Odysseus):"{from_clause})',
+                    f'(OR HEADER X-Odysseus-Kind "reminder" SUBJECT "Reminder (Aegis):"{from_clause})',
                 )
+                old_status, old_data = _imap_uid_search(conn, f'(SUBJECT "Reminder (Odysseus):"{from_clause})')
+                if old_status == "OK" and old_data and old_data[0]:
+                    merged = set((data[0] if data and data[0] else b"").split())
+                    merged.update(old_data[0].split())
+                    data = [b" ".join(sorted(merged, key=lambda x: int(x) if x.isdigit() else 0))]
             elif filter_ == "pending_30d":
                 # "What's pending in the last month" — UNANSWERED + delivered
                 # within the last 30 days. SINCE takes a DD-Mon-YYYY date.
@@ -1721,7 +1726,7 @@ def setup_email_routes():
         permanent: bool = Query(False),
         owner: str = Depends(require_owner),
     ):
-        """Delete email messages stamped as Odysseus reminders."""
+        """Delete email messages stamped as Aegis reminders."""
         if account_id:
             _assert_owns_account(account_id, owner)
         deleted = 0
@@ -1760,11 +1765,13 @@ def setup_email_routes():
                         # explicit kind header, and subject fallback catches
                         # clients/providers that stripped custom headers.
                         uids.update(_search_uids(conn, f'(HEADER X-Odysseus-Kind {_search_quote("reminder")})'))
+                        uids.update(_search_uids(conn, f'(SUBJECT {_search_quote("Reminder (Aegis):")})'))
                         uids.update(_search_uids(conn, f'(SUBJECT {_search_quote("Reminder (Odysseus):")})'))
                         for addr in own_addrs:
                             addr_q = _search_quote(addr)
+                            uids.update(_search_uids(conn, f'(FROM {addr_q} SUBJECT {_search_quote("Reminder (Aegis):")})'))
                             uids.update(_search_uids(conn, f'(FROM {addr_q} SUBJECT {_search_quote("Reminder (Odysseus):")})'))
-                            # Legacy reminders created before the Odysseus
+                            # Legacy reminders created before the distinct
                             # prefix still came from this mailbox as
                             # "Reminder: ..."; include them in Clear without
                             # sweeping unrelated external reminder emails.

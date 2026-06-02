@@ -182,7 +182,7 @@ const ADV_KEYS = [
   { key: 'aiBubbleBg',         css: '--ai-bubble-bg',      label: 'AI Chat Bubble',   group: 'Chat Bubbles' },
   { key: 'bubbleBorder',       css: '--bubble-border',     label: 'Border Chat Bubble', group: 'Chat Bubbles' },
   { key: 'sidebarBg',          css: '--sidebar-bg',        label: 'Sidebar Bg',       group: 'Sidebar' },
-  { key: 'brandColor',         css: '--brand-color',       label: 'Odysseus Logo',    group: 'Sidebar' },
+  { key: 'brandColor',         css: '--brand-color',       label: 'Aegis Logo',    group: 'Sidebar' },
   { key: 'hamburgerColor',     css: '--hamburger-color',   label: 'Hamburger Menu',   group: 'Sidebar' },
   { key: 'inputBg',            css: '--input-bg',          label: 'Input Bg',         group: 'Chat Input / Prompt Area' },
   { key: 'inputBorder',        css: '--input-border',      label: 'Input Border',     group: 'Chat Input / Prompt Area' },
@@ -284,12 +284,12 @@ export function applyColors(colors) {
   }
 
   // Update favicon to match theme accent color
-  _updateFavicon(colors.red || '#e06c75');
+  _updateFavicon((colors.advanced && colors.advanced.brandColor) || colors.red || '#e06c75');
 }
 
 // Per-route SVG shape registry — kept in sync with the inline favicon
 // script in index.html so a theme change keeps the route icon, not the
-// default boat. Returns the inner SVG markup colored with `fg`.
+// default Aegis logo. Returns the inner SVG markup colored with `fg`.
 const _ROUTE_FAVICON_SHAPES = {
   '/calendar':
     "<rect x='4' y='6' width='24' height='22' rx='2' fill='none' stroke='__C__' stroke-width='2.5'/>" +
@@ -332,7 +332,7 @@ function _updateFavicon(fg) {
   if (routeShape) {
     svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>${routeShape.split('__C__').join(fg)}</svg>`;
   } else {
-    svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 4L16 22L6 22Z' fill='${fg}'/><path d='M16 8L16 22L24 22Z' fill='${fg}' opacity='0.6'/><path d='M4 24Q10 20 16 24Q22 28 28 24' stroke='${fg}' stroke-width='2.5' fill='none' stroke-linecap='round'/></svg>`;
+    svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><filter id='g' x='-40%' y='-40%' width='180%' height='180%'><feGaussianBlur stdDeviation='1.4' result='b'/><feMerge><feMergeNode in='b'/><feMergeNode in='SourceGraphic'/></feMerge></filter></defs><rect width='32' height='32' rx='7' fill='#0b0d14'/><g fill='none' stroke='${fg}' stroke-linecap='round' stroke-linejoin='round'><path opacity='.28' stroke-width='1.35' d='M16 2v5m0 23v-5M2 16h6m22 0h-6M5 7h5v4m17 14h-5v-4M27 7h-5v4M5 25h5v-4'/><path opacity='.18' stroke-width='3' filter='url(#g)' d='M16 2v5m0 23v-5M2 16h6m22 0h-6'/><rect x='8.5' y='8.5' width='15' height='15' rx='2.6' fill='#0f1520' stroke-width='1.2'/><path d='M16 10.8 21 13v3.7c0 3.3-2.15 5.35-5 6.3-2.85-.95-5-3-5-6.3V13l5-2.2Z' fill='${fg}' opacity='.16' stroke-width='.95'/><path opacity='.62' stroke-width='.85' d='M13 15h3v-2m-3 5h5v-3m-1 6v-3h3'/><circle cx='16' cy='16' r='2.1' fill='${fg}' opacity='.75' filter='url(#g)'/><circle cx='16' cy='16' r='.75' fill='#fff' opacity='.8'/></g></svg>`;
   }
   const href = 'data:image/svg+xml,' + encodeURIComponent(svg);
   let link = document.querySelector("link[rel='icon']");
@@ -349,7 +349,7 @@ function _updateFavicon(fg) {
     apple.rel = 'apple-touch-icon';
     document.head.appendChild(apple);
   }
-  apple.href = href;
+  apple.href = '/static/aegis-icon-180.png';
 }
 
 // Cache of discovered custom fonts: { "Family Name": [ {file, url, format} ] }

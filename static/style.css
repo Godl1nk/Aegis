@@ -1,5 +1,5 @@
 /* ============================================ */
-/* Odysseus UI — Consolidated Stylesheet        */
+/* Aegis UI — Consolidated Stylesheet        */
 /* ============================================ */
 
 
@@ -544,6 +544,14 @@ body.bg-pattern-sparkles {
       align-items: center;
       flex-shrink: 0;
       min-height: 24px;
+      gap: 6px;
+    }
+    .sidebar-brand-icon {
+      width: 21px;
+      height: 21px;
+      color: var(--brand-color, var(--red));
+      flex: 0 0 auto;
+      margin-left: -9px;
     }
     .sidebar-brand-title {
       font-size: 1rem;
@@ -554,7 +562,7 @@ body.bg-pattern-sparkles {
       user-select: none;
       position: relative;
       top: 0;
-      left: -10px;
+      left: 0;
     }
     .sidebar-sep {
       display: none;
@@ -1814,6 +1822,28 @@ body.bg-pattern-sparkles {
       margin-right: 0.4rem;
       vertical-align: -0.15em;
       color: var(--brand-color, var(--red));
+    }
+    .aegis-logo .aegis-trace {
+      opacity: 0.55;
+      stroke-width: 1.15;
+      stroke-dasharray: 8 7;
+      animation: aegis-trace-flow 2.8s linear infinite;
+    }
+    .aegis-logo .aegis-core {
+      filter: drop-shadow(0 0 5px color-mix(in srgb, currentColor 70%, transparent));
+      transform-origin: 16px 16px;
+      animation: aegis-core-pulse 1.8s ease-in-out infinite;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .aegis-logo .aegis-core,
+      .aegis-logo .aegis-trace { animation: none; }
+    }
+    @keyframes aegis-core-pulse {
+      0%, 100% { opacity: 0.62; transform: scale(0.92); }
+      50% { opacity: 1; transform: scale(1.08); }
+    }
+    @keyframes aegis-trace-flow {
+      to { stroke-dashoffset: -30; }
     }
     #welcome-screen .welcome-sub {
       font-size:0.85rem;
@@ -20804,7 +20834,7 @@ body.gallery-selecting .gallery-dl-btn,
 
 /* Welcome name — left-to-right wipe with a touch of horizontal stretch.
    Fires on initial render via the .welcome-name rule; restarts on Nobody⇄
-   Odysseus toggle via JS reflow trick. */
+   Aegis toggle via JS reflow trick. */
 .welcome-name {
   transform-origin: left center;
   animation: welcome-name-reveal 0.55s cubic-bezier(0.34, 1.32, 0.55, 1) both;

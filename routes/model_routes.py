@@ -59,7 +59,7 @@ def _docker_host_gateway_reachable() -> bool:
 def _rewrite_loopback_for_docker(base_url: str) -> str:
     """Rewrite a loopback model-endpoint URL to ``host.docker.internal`` when
     running in Docker. A URL like ``http://localhost:1234/v1`` (the LM Studio
-    default) otherwise targets the Odysseus container itself, so the probe gets
+    default) otherwise targets the Aegis container itself, so the probe gets
     a connection error and the endpoint is rejected with a misleading "No
     models found for that provider/key". The Ollama paths already handle this;
     this extends the same fix to OpenAI-compatible local servers."""
@@ -441,7 +441,7 @@ def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> 
                 return {
                     "reachable": False,
                     "status_code": r.status_code,
-                    "error": "That is Odysseus, not a model server. Use the Ollama URL, usually http://host.docker.internal:11434/v1 in Docker.",
+                    "error": "That is Aegis, not a model server. Use the Ollama URL, usually http://host.docker.internal:11434/v1 in Docker.",
                 }
             return {"reachable": False, "status_code": r.status_code, "error": f"HTTP {r.status_code} redirect"}
         if r.status_code < 400:

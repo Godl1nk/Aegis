@@ -1,4 +1,4 @@
-# Contributing to Odysseus
+# Contributing to Aegis
 
 Thanks for helping. The project is moving quickly, so the best contributions are focused, easy to review, and easy to test.
 
@@ -14,8 +14,8 @@ Thanks for helping. The project is moving quickly, so the best contributions are
 Docker is the recommended path for normal testing:
 
 ```bash
-git clone https://github.com/pewdiepie-archdaemon/odysseus.git
-cd odysseus
+git clone https://github.com/Godl1nk/Aegis.git
+cd Aegis
 cp .env.example .env
 docker compose up -d --build
 ```
