@@ -399,7 +399,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "action_name": {"type": "string", "enum": [
                         "tidy_sessions", "tidy_documents", "consolidate_memory", "tidy_research",
                         "summarize_emails", "draft_email_replies", "extract_email_events",
-                        "classify_events", "mark_email_boundaries", "learn_sender_signatures",
+                        "classify_events", "learn_sender_signatures",
                         "test_skills", "audit_skills", "check_email_urgency"
                     ],
                                     "description": "Built-in action (for task_type=action)"},
@@ -442,7 +442,8 @@ FUNCTION_TOOL_SCHEMAS = [
                     "end": {"type": "string", "description": "list_events range end (ISO datetime); defaults to +14 days"},
                     "event_type": {"type": "string", "description": "Tag / category for the event. Common values: work, personal, health, travel, meal, social, admin, other. Aliases accepted: tag, category, type."},
                     "importance": {"type": "string", "enum": ["low", "normal", "high", "critical"], "description": "Priority level (defaults to 'normal')"},
-                    "reminder_minutes": {"type": "integer", "description": "For create_event: create an Aegis reminder this many minutes before the event, e.g. 5 for 'reminder 5 min before'."}
+                    "reminder_minutes": {"type": "integer", "description": "For create_event: create an Aegis reminder this many minutes before the event, e.g. 5 for 'reminder 5 min before'."},
+                    "rrule": {"type": "string", "description": "Recurrence rule in iCalendar RRULE format, e.g. 'FREQ=WEEKLY;BYDAY=MO' for weekly on Monday. Use with create_event or update_event."}
                 },
                 "required": ["action"]
             }
@@ -1072,6 +1073,14 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
     except (json.JSONDecodeError, TypeError):
         logger.error(f"Failed to parse function call arguments for {name}: {arguments}")
         return None
+
+    # Some models emit valid JSON that isn't an object (e.g. a bare array
+    # ["ls -la"], string, or number) as the function arguments. Every branch
+    # below assumes a dict and calls args.get(...), so a non-dict would raise
+    # AttributeError and abort the whole agent stream. Coerce to {} instead.
+    if not isinstance(args, dict):
+        logger.warning(f"Non-object function call arguments for {name}: {args!r}; treating as empty")
+        args = {}
 
     tool_type = _TOOL_NAME_MAP.get(name, name)
 
