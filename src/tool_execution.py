@@ -666,9 +666,9 @@ async def _direct_fallback(
                 output = output[:MAX_OUTPUT_CHARS] + "\n\n[...truncated]"
             return {"output": output, "exit_code": 0}
 
-        # manage_memory / generate_image still live as MCP servers
-        # (mcp_servers/{memory,image_gen}_server.py); the MCP path above
-        # handles them.
+        # manage_memory still lives as an MCP server; generate_image has a
+        # direct dispatcher path below so native function calls keep
+        # session/owner/gallery behavior.
     except Exception as e:
         return {"error": f"{tool}: {e}", "exit_code": 1}
 
@@ -788,10 +788,17 @@ async def execute_tool_block(
             logger.info(f"Tool executed: {desc} -> bg job {rec['id']}")
             return desc, result
 
+    if tool == "generate_image":
+        from src.ai_interaction import do_generate_image
+        first_line = content.split(chr(10))[0][:80]
+        desc = f"generate_image: {first_line}"
+        result = await do_generate_image(content, session_id=session_id, owner=owner)
+        if "exit_code" not in result:
+            result["exit_code"] = 1 if result.get("error") else 0
     # Route MCP-extracted tools through the MCP manager. Forward
     # the progress callback so long-running subprocess tools
     # (bash, python) can stream `tool_progress` events to the UI.
-    if tool in _MCP_TOOL_MAP:
+    elif tool in _MCP_TOOL_MAP:
         first_line = content.split(chr(10))[0][:80]
         desc = f"{tool}: {first_line}"
         result = await _call_mcp_tool(tool, content, progress_cb=progress_cb)

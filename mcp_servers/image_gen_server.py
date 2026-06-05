@@ -29,7 +29,7 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     "prompt": {"type": "string", "description": "Image description prompt"},
-                    "model": {"type": "string", "description": "Model name (auto-detects if omitted)"},
+                    "model": {"type": "string", "description": "Model name (auto-detects if omitted or set to auto)"},
                     "size": {"type": "string", "description": "Image size (default 1024x1024)"},
                     "quality": {"type": "string", "description": "Quality: low, medium, high, auto (default medium)"},
                 },
@@ -46,6 +46,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     prompt = arguments.get("prompt", "")
     model_spec = arguments.get("model", "")
+    if isinstance(model_spec, str) and model_spec.strip().lower() == "auto":
+        model_spec = ""
     size = arguments.get("size", "1024x1024")
     quality = arguments.get("quality", "medium")
 
@@ -82,6 +84,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         url, model_id, headers = _resolve_model(model_spec)
 
         is_gpt_image = "gpt-image" in model_id.lower()
+        is_dalle = "dall-e" in model_id.lower()
         base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
         images_url = base_url + "/images/generations"
 
@@ -89,12 +92,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         valid_dalle3_sizes = {"1024x1024", "1024x1792", "1792x1024"}
         if is_gpt_image and size not in valid_gpt_sizes:
             size = "1024x1024"
-        elif not is_gpt_image and size not in valid_dalle3_sizes:
+        elif is_dalle and size not in valid_dalle3_sizes:
             size = "1024x1024"
 
         payload = {"model": model_id, "prompt": prompt, "n": 1, "size": size}
         if is_gpt_image:
-            payload["quality"] = quality if quality in ("low", "medium", "high", "auto") else "medium"
+            if quality in ("low", "medium", "high", "auto"):
+                payload["quality"] = quality
+            else:
+                payload["quality"] = "medium"
+                quality = "medium"
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)) as client:
             resp = await client.post(images_url, json=payload, headers=headers)
@@ -106,7 +113,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     error_text = err_json.get("error", {}).get("message", error_text) if isinstance(err_json.get("error"), dict) else str(err_json.get("error", error_text))
                 except Exception:
                     pass
-                return [TextContent(type="text", text=f"Error: Image generation failed ({resp.status_code}): {error_text}")]
+                if not error_text:
+                    error_text = "empty response body"
+                return [TextContent(type="text", text=f"Error: Image generation failed ({resp.status_code}) for {model_id} at {images_url}: {error_text}")]
 
             data = resp.json()
             images = data.get("data", [])
@@ -134,7 +143,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         prompt=prompt,
                         model=model_id,
                         size=size,
-                        quality=payload.get("quality", "medium"),
+                        quality=quality,
                     ))
                     db.commit()
                     db.close()

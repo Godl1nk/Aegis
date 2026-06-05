@@ -665,42 +665,111 @@ async function initTeacherModel() {
 
 /* ── Image Generation ── */
 async function initImageSettings() {
+  const epSel = el('set-imgEpSelect');
   const modelSel = el('set-imgModelSelect');
   const qualSel = el('set-imgQualitySelect');
   const msg = el('set-imgSettingsMsg');
   const enabledToggle = el('set-imgEnabledToggle');
   const configWrap = modelSel ? modelSel.closest('div[style*="flex-direction"]') : null;
-  try {
-    const modelsRes = await fetch('/api/models', { credentials: 'same-origin' });
-    const modelsData = await modelsRes.json();
-    // Inpaint-compat allowlist — image gen here is scoped to inpainting only,
-    // so DALL-E / GPT-Image-1 (no inpaint API) are excluded. Currently:
-    //   - any model with 'inpaint' in the id
-    //   - Stable Diffusion 3.5 Medium (inpaint via diffusers pipeline)
-    const _isInpaintModel = (mid) => {
-      const lower = String(mid || '').toLowerCase();
-      return lower.includes('inpaint')
-        || lower.includes('3.5-medium')
-        || lower.includes('3-5-medium')
-        || lower.includes('sd-3.5-med');
-    };
-    const imageModels = [];
-    (modelsData.items || []).forEach(item => {
-      (item.models || []).forEach(mid => {
-        if (_isInpaintModel(mid)) imageModels.push(mid);
+  var _endpoints = [];
+  if (!modelSel) return;
+
+  function isImageModel(mid) {
+    const lower = String(mid || '').toLowerCase();
+    return lower.includes('gpt-image')
+      || lower.includes('dall-e')
+      || lower.includes('chatgpt-image')
+      || lower.includes('stable-diffusion')
+      || lower.includes('sdxl')
+      || lower.includes('sd-')
+      || lower.includes('sd3')
+      || lower.includes('flux')
+      || lower.includes('pixart')
+      || lower.includes('playground')
+      || lower.includes('kandinsky');
+  }
+
+  function imageModelsForEndpoint(ep) {
+    const models = ep && Array.isArray(ep.models) ? ep.models : [];
+    const filtered = models.filter(isImageModel);
+    return filtered.length ? filtered : models;
+  }
+
+  function imageEndpoints() {
+    return _endpoints.filter(function(ep) {
+      if (!ep.is_enabled) return false;
+      return true;
+    });
+  }
+
+  function endpointById(id) {
+    return imageEndpoints().find(function(ep) { return String(ep.id) === String(id); }) || null;
+  }
+
+  function splitImageSpec(spec) {
+    spec = String(spec || '').trim();
+    if (!spec) return { model: '', endpointName: '' };
+    if (!spec.includes('@')) return { model: spec, endpointName: '' };
+    const idx = spec.lastIndexOf('@');
+    return { model: spec.slice(0, idx).trim(), endpointName: spec.slice(idx + 1).trim() };
+  }
+
+  function fillEndpoints(selectedId) {
+    if (!epSel) return;
+    while (epSel.options.length) epSel.remove(0);
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = 'Auto-detect';
+    epSel.appendChild(blank);
+    imageEndpoints().forEach(function(ep) {
+      const opt = document.createElement('option');
+      opt.value = ep.id;
+      opt.textContent = ep.name + ((ep.online || String(ep.model_type || '').toLowerCase() === 'image') ? '' : ' (offline)');
+      epSel.appendChild(opt);
+    });
+    if (selectedId && Array.from(epSel.options).some(function(o) { return String(o.value) === String(selectedId); })) epSel.value = selectedId;
+  }
+
+  function fillModels(selectedModel) {
+    while (modelSel.options.length) modelSel.remove(0);
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = 'Auto-detect';
+    modelSel.appendChild(blank);
+
+    const endpoints = epSel && epSel.value ? [endpointById(epSel.value)].filter(Boolean) : imageEndpoints();
+    const seen = new Set();
+    endpoints.forEach(function(ep) {
+      const models = imageModelsForEndpoint(ep);
+      sortModelIds(models).forEach(function(mid) {
+        const key = (ep.id || ep.name) + '::' + mid;
+        if (seen.has(key)) return;
+        seen.add(key);
+        const opt = document.createElement('option');
+        opt.value = mid;
+        opt.textContent = epSel && epSel.value ? String(mid).split('/').pop() : `${String(mid).split('/').pop()} · ${ep.name}`;
+        modelSel.appendChild(opt);
       });
     });
-    sortModelIds(imageModels).forEach(mid => { const opt = document.createElement('option'); opt.value = mid; opt.textContent = mid; modelSel.appendChild(opt); });
-    // Hardcoded fallbacks shown as "(not detected)" so users know what to
-    // download/serve to enable inpaint here.
-    ['stable-diffusion-3.5-medium', 'stable-diffusion-inpainting'].forEach(mid => {
-      if (!imageModels.includes(mid)) { const opt = document.createElement('option'); opt.value = mid; opt.textContent = mid + ' (not detected)'; modelSel.appendChild(opt); }
-    });
-  } catch (e) { console.warn('Failed to load models for image settings', e); }
+    if (selectedModel && Array.from(modelSel.options).some(function(o) { return o.value === selectedModel; })) {
+      modelSel.value = selectedModel;
+    }
+  }
+
+  try {
+    _endpoints = await _fetchModelEndpoints();
+    fillEndpoints('');
+    fillModels('');
+  } catch (e) { console.warn('Failed to load endpoints for image settings', e); }
   try {
     const settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
     const settings = await settingsRes.json();
-    if (settings.image_model) modelSel.value = settings.image_model;
+    const spec = splitImageSpec(settings.image_model || '');
+    if (epSel && spec.endpointName) {
+      const match = imageEndpoints().find(function(ep) { return String(ep.name || '').toLowerCase() === spec.endpointName.toLowerCase(); });
+      if (match) epSel.value = match.id;
+    }
+    fillModels(spec.model || '');
     if (settings.image_quality) qualSel.value = settings.image_quality;
     if (enabledToggle) enabledToggle.checked = settings.image_gen_enabled !== false;
   } catch (e) { console.warn('Failed to load settings', e); }
@@ -715,14 +784,23 @@ async function initImageSettings() {
 
   async function saveSettings() {
     try {
+      const ep = epSel && epSel.value ? endpointById(epSel.value) : null;
+      const modelSpec = modelSel.value && ep ? `${modelSel.value}@${ep.name}` : modelSel.value;
       await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_gen_enabled: enabledToggle ? enabledToggle.checked : true, image_model: modelSel.value, image_quality: qualSel.value }) });
+        body: JSON.stringify({ image_gen_enabled: enabledToggle ? enabledToggle.checked : true, image_model: modelSpec, image_quality: qualSel.value }) });
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   }
+  if (epSel) epSel.addEventListener('change', function() { fillModels(''); saveSettings(); });
   modelSel.addEventListener('change', saveSettings);
   qualSel.addEventListener('change', saveSettings);
   if (enabledToggle) enabledToggle.addEventListener('change', function() { syncImgDisabled(); saveSettings(); });
+
+  _registerAiEndpointRefresh(function(endpoints) {
+    _endpoints = endpoints;
+    fillEndpoints(epSel ? epSel.value : '');
+    fillModels(modelSel.value);
+  });
 }
 
 /* ── Vision ── */

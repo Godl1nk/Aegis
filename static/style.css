@@ -5689,6 +5689,97 @@ body.bg-pattern-sparkles {
       font-style: italic;
       text-align: center;
     }
+    .generated-image-preview-modal {
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      z-index: 10010;
+      pointer-events: auto;
+      background: rgba(0, 0, 0, 0.42);
+    }
+    .generated-image-preview-content {
+      width: min(1120px, 94vw);
+      height: min(860px, 92vh);
+      max-height: 92vh;
+      background: var(--bg);
+      overflow: hidden;
+    }
+    .generated-image-preview-content .modal-header {
+      gap: 12px;
+    }
+    .generated-image-preview-content .modal-header h4 {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .generated-image-preview-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: auto;
+    }
+    .generated-image-preview-download {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+    .generated-image-preview-body {
+      display: grid;
+      grid-template-rows: minmax(0, 1fr) auto;
+      gap: 10px;
+      padding: 12px;
+      flex: 1;
+      max-height: calc(92vh - 48px);
+      overflow: hidden;
+    }
+    .generated-image-preview-img {
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      object-fit: contain;
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.18);
+      border: 1px solid var(--border);
+    }
+    .generated-image-preview-meta {
+      color: var(--fg);
+      text-align: left;
+    }
+    .generated-image-preview-prompt {
+      font-size: 0.86rem;
+      line-height: 1.45;
+      opacity: 0.84;
+      max-height: 72px;
+      overflow: auto;
+    }
+    .generated-image-preview-details {
+      font-size: 0.72rem;
+      opacity: 0.5;
+      margin-top: 4px;
+    }
+    @media (max-width: 768px) {
+      .generated-image-preview-modal {
+        padding: 8px;
+      }
+      .generated-image-preview-content {
+        width: 100vw;
+        height: 96vh;
+        max-height: 96vh;
+      }
+      .generated-image-preview-body {
+        padding: 8px;
+        max-height: calc(96vh - 48px);
+      }
+      .generated-image-preview-download {
+        gap: 0;
+        padding: 0 10px;
+        font-size: 0;
+      }
+      .generated-image-preview-download svg {
+        margin: 0;
+      }
+    }
 
     /* Setup wizard */
     .setup-wizard { padding: 16px; max-width: 500px; }

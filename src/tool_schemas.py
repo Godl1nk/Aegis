@@ -110,6 +110,23 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "generate_image",
+            "description": "Generate a new AI image from a prompt. Use this directly for requests like generate/create/make/draw/render an image, picture, photo, art, or illustration. Do not probe servers first; model='auto' uses the configured Image Generation model.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Image description prompt"},
+                    "model": {"type": "string", "description": "Model name, model@endpoint, or auto. Defaults to auto."},
+                    "size": {"type": "string", "description": "Image size, e.g. 1024x1024. Defaults to 1024x1024."},
+                    "quality": {"type": "string", "enum": ["low", "medium", "high", "auto"], "description": "Generation quality. Defaults to high for user-facing requests."}
+                },
+                "required": ["prompt"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_document",
             "description": "Create a new document in the editor panel. Use this when the user asks to write, create, build, or generate code, scripts, programs, games, apps, or any substantial content (>15 lines) AND there is no already-open document/email draft that the request refers to. If an email compose draft is open, edit that draft instead of creating another document. NEVER put large code blocks directly in chat — use this tool instead.",
             "parameters": {
@@ -1114,6 +1131,13 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         content = args.get("path", "")
     elif tool_type == "write_file":
         content = args.get("path", "") + "\n" + args.get("content", "")
+    elif tool_type == "generate_image":
+        content = "\n".join([
+            args.get("prompt", ""),
+            args.get("model", "auto") or "auto",
+            args.get("size", "1024x1024") or "1024x1024",
+            args.get("quality", "high") or "high",
+        ])
     elif tool_type == "create_document":
         parts = [args.get("title", "Untitled")]
         if args.get("language"):

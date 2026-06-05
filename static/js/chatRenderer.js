@@ -1039,6 +1039,81 @@ document.addEventListener('click', function(e) {
 /**
  * Build a generated-image bubble element.
  */
+async function _downloadGeneratedImage(imageUrl, prompt, button) {
+  const okText = button ? button.innerHTML : '';
+  const filename = ((prompt || 'image').slice(0, 40).replace(/[^a-zA-Z0-9 ]/g, '').trim() || 'image') + '.png';
+  try {
+    const resp = await fetch(imageUrl);
+    if (!resp.ok) throw new Error(`download failed: ${resp.status}`);
+    const blob = await resp.blob();
+    const a = document.createElement('a');
+    const objectUrl = URL.createObjectURL(blob);
+    a.href = objectUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(objectUrl);
+    if (button) {
+      button.textContent = '\u2713';
+      setTimeout(() => { button.innerHTML = okText; }, 1500);
+    }
+  } catch {
+    if (button) {
+      button.textContent = '\u2717';
+      setTimeout(() => { button.innerHTML = okText; }, 1500);
+    }
+  }
+}
+
+function _openGeneratedImagePreview(imageUrl, prompt, model, size, quality) {
+  document.getElementById('generated-image-preview-modal')?.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'generated-image-preview-modal';
+  modal.className = 'modal generated-image-preview-modal';
+  modal.innerHTML = `
+    <div class="modal-content generated-image-preview-content" role="dialog" aria-label="Generated image preview">
+      <div class="modal-header">
+        <h4>${uiModule.esc((model || 'Generated image').split('/').pop())}</h4>
+        <div class="generated-image-preview-actions">
+          <button class="memory-toolbar-btn generated-image-preview-download" type="button" title="Download image" aria-label="Download image">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+            Download
+          </button>
+          <button class="close-btn generated-image-preview-close" aria-label="Close image preview">\u2716</button>
+        </div>
+      </div>
+      <div class="modal-body generated-image-preview-body">
+        <img class="generated-image-preview-img" src="${uiModule.esc(imageUrl)}" alt="${uiModule.esc(prompt || 'Generated image')}">
+        <div class="generated-image-preview-meta">
+          ${prompt ? `<div class="generated-image-preview-prompt">${uiModule.esc(prompt)}</div>` : ''}
+          <div class="generated-image-preview-details">${uiModule.esc([size, quality].filter(Boolean).join(' / '))}</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const close = () => {
+    document.removeEventListener('keydown', onKeyDown);
+    modal.remove();
+  };
+  const onKeyDown = (e) => {
+    if (e.key === 'Escape') close();
+  };
+
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) close();
+  });
+  modal.querySelector('.generated-image-preview-close')?.addEventListener('click', close);
+  modal.querySelector('.generated-image-preview-download')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    _downloadGeneratedImage(imageUrl, prompt, e.currentTarget);
+  });
+  document.addEventListener('keydown', onKeyDown);
+  document.body.appendChild(modal);
+}
+
 export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId) {
   var esc = uiModule.esc;
   const wrap = document.createElement('div');
@@ -1057,7 +1132,9 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   img.alt = prompt || 'Generated image';
   img.title = prompt || 'Generated image';
   img.src = imageUrl;
-  img.addEventListener('click', () => { window.open(img.src, '_blank'); });
+  img.addEventListener('click', () => {
+    _openGeneratedImagePreview(imageUrl, prompt, model, size, quality);
+  });
   body.appendChild(img);
 
   if (prompt) {
@@ -1093,21 +1170,9 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   dlBtn.type = 'button';
   dlBtn.title = 'Download image';
   dlBtn.textContent = '\u2913';
-  dlBtn.addEventListener('click', async (e) => {
+  dlBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    try {
-      const resp = await fetch(imageUrl);
-      const blob = await resp.blob();
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = (prompt || 'image').slice(0, 40).replace(/[^a-zA-Z0-9 ]/g, '') + '.png';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(a.href);
-      dlBtn.textContent = '\u2713';
-      setTimeout(() => { dlBtn.textContent = '\u2913'; }, 1500);
-    } catch { dlBtn.textContent = '\u2717'; setTimeout(() => { dlBtn.textContent = '\u2913'; }, 1500); }
+    _downloadGeneratedImage(imageUrl, prompt, dlBtn);
   });
   actions.appendChild(dlBtn);
 

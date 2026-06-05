@@ -1553,7 +1553,7 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
 
     Content format:
       Line 1: prompt describing the image
-      Line 2: model name (optional, default auto-detects: prefers gpt-image-1.5 > gpt-image-1)
+      Line 2: model name (optional; omit or use "auto" to use the configured image model / auto-detect)
       Line 3: size (optional, defaults to 1024x1024)
       Line 4: quality (optional, defaults to medium — options: low, medium, high, auto)
     """
@@ -1564,6 +1564,8 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
     lines = content.strip().split("\n")
     prompt = lines[0].strip() if lines else ""
     model_spec = lines[1].strip() if len(lines) > 1 and lines[1].strip() else ""
+    if model_spec.lower() == "auto":
+        model_spec = ""
     size = lines[2].strip() if len(lines) > 2 and lines[2].strip() else "1024x1024"
     quality = lines[3].strip() if len(lines) > 3 and lines[3].strip() else "medium"
 
@@ -1637,7 +1639,6 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
     # Detect if this is a GPT image model vs DALL-E vs local diffusion
     is_gpt_image = "gpt-image" in model_id.lower()
     is_dalle = "dall-e" in model_id.lower()
-    is_local_diffusion = not is_gpt_image and not is_dalle
 
     # Build the images endpoint URL from the chat completions URL
     base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
@@ -1658,12 +1659,15 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
         "size": size,
     }
 
-    # GPT image models and local diffusion support quality; DALL-E does not
-    if is_gpt_image or is_local_diffusion:
+    # GPT image models support OpenAI's quality field. Some local/proxy image
+    # backends (including llama-swap -> stable-diffusion.cpp) reject or mishandle
+    # unknown OpenAI fields, so keep local payloads minimal.
+    if is_gpt_image:
         if quality in ("low", "medium", "high", "auto"):
             payload["quality"] = quality
         else:
             payload["quality"] = "medium"
+            quality = "medium"
 
     logger.info(f"Image generation: model={model_id}, size={size}, quality={quality}, prompt={prompt[:80]}")
 
@@ -1679,7 +1683,9 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
                     error_text = err_json.get("error", {}).get("message", error_text) if isinstance(err_json.get("error"), dict) else str(err_json.get("error", error_text))
                 except Exception:
                     pass
-                return {"error": f"Image generation failed ({resp.status_code}): {error_text}"}
+                if not error_text:
+                    error_text = "empty response body"
+                return {"error": f"Image generation failed ({resp.status_code}) for {model_id} at {images_url}: {error_text}"}
 
             data = resp.json()
             images = data.get("data", [])
@@ -1702,7 +1708,7 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
                         prompt=prompt,
                         model=model_id,
                         size=size,
-                        quality=payload.get("quality", "medium"),
+                        quality=quality,
                         session_id=session_id,
                         owner=owner,
                     ))
@@ -1750,7 +1756,7 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
                 "image_prompt": prompt,
                 "image_model": model_id,
                 "image_size": size,
-                "image_quality": payload.get("quality", "medium"),
+                "image_quality": quality,
             }
 
     except httpx.TimeoutException:
