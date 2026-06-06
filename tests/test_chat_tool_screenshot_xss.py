@@ -41,7 +41,7 @@ def test_generated_image_urls_are_vetted_before_assignment_or_open():
     assert "export function safeDisplayImageSrc(raw)" in renderer
     assert "safeDisplayImageSrc(imageUrl)" in renderer
     assert "img.src = safeImageUrl" in renderer
-    assert "window.open(safeImageUrl, '_blank', 'noopener,noreferrer')" in renderer
+    assert "_openGeneratedImagePreview(safeImageUrl, prompt, model, size, quality)" in renderer
     assert "safeDisplayImageSrc," in renderer
     assert "safeDisplayImageSrc(json.image_url)" in compare
     assert "img.src = json.image_url" not in compare

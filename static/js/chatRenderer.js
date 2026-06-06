@@ -1177,6 +1177,9 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
     const caption = document.createElement('div');
     caption.className = 'generated-image-caption';
     caption.textContent = prompt;
+    caption.addEventListener('click', () => {
+      _openGeneratedImagePreview(safeImageUrl, prompt, model, size, quality);
+    });
     body.appendChild(caption);
   }
 

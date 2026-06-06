@@ -5720,6 +5720,7 @@ body.bg-pattern-sparkles {
       margin-top: 6px;
       font-style: italic;
       text-align: center;
+      cursor: zoom-in;
     }
     .generated-image-preview-modal {
       align-items: center;
