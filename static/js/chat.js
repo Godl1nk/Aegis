@@ -1800,6 +1800,10 @@ import createResearchSynapse from './researchSynapse.js';
                 continue;
               } else if (json.type === 'model_info') {
                 // Update role label with model name as soon as we know it
+                if (json.session_model_changed && sessionModule?.loadSessions) {
+                  sessionModule.loadSessions().catch(() => {});
+                  chatStream.handleUIControl({ ui_event: 'switch_model', model: json.model });
+                }
                 if (!_isBg && holder) {
                   const roleEl = holder.querySelector('.role');
                   if (roleEl) {

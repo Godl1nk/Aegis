@@ -184,7 +184,8 @@ FUNCTION_TOOL_SCHEMAS = [
                     "prompt": {"type": "string", "description": "Image description prompt"},
                     "model": {"type": "string", "description": "Model name, model@endpoint, or auto. Defaults to auto."},
                     "size": {"type": "string", "description": "Image size, e.g. 1024x1024. Defaults to 1024x1024."},
-                    "quality": {"type": "string", "enum": ["low", "medium", "high", "auto"], "description": "Generation quality. Defaults to high for user-facing requests."}
+                    "quality": {"type": "string", "enum": ["low", "medium", "high", "auto"], "description": "Generation quality. Defaults to high for user-facing requests."},
+                    "reference_image_urls": {"type": "array", "items": {"type": "string"}, "description": "Optional existing images to use as references for image-to-image/edit requests. Usually omit this; Aegis auto-adds the current uploaded image or clearly referenced previous generated image."}
                 },
                 "required": ["prompt"]
             }
@@ -1221,12 +1222,13 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
     elif tool_type == "edit_file":
         content = json.dumps(args)
     elif tool_type == "generate_image":
-        content = "\n".join([
-            args.get("prompt", ""),
-            args.get("model", "auto") or "auto",
-            args.get("size", "1024x1024") or "1024x1024",
-            args.get("quality", "high") or "high",
-        ])
+        content = json.dumps({
+            "prompt": args.get("prompt", ""),
+            "model": args.get("model", "auto") or "auto",
+            "size": args.get("size", "1024x1024") or "1024x1024",
+            "quality": args.get("quality", "high") or "high",
+            "reference_image_urls": args.get("reference_image_urls") or [],
+        })
     elif tool_type == "create_document":
         parts = [args.get("title", "Untitled")]
         if args.get("language"):

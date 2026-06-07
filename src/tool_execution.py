@@ -15,7 +15,7 @@ import os
 import pathlib
 import sys
 import time
-from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from src.tool_security import is_public_blocked_tool, owner_is_admin_or_single_user
 
@@ -1104,6 +1104,7 @@ async def execute_tool_block(
     owner: Optional[str] = None,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     workspace: Optional[str] = None,
+    image_context: Optional[List[str]] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -1212,7 +1213,12 @@ async def execute_tool_block(
         from src.ai_interaction import do_generate_image
         first_line = content.split(chr(10))[0][:80]
         desc = f"generate_image: {first_line}"
-        result = await do_generate_image(content, session_id=session_id, owner=owner)
+        result = await do_generate_image(
+            content,
+            session_id=session_id,
+            owner=owner,
+            reference_image_urls=image_context,
+        )
         if "exit_code" not in result:
             result["exit_code"] = 1 if result.get("error") else 0
     # Route MCP-extracted tools through the MCP manager. Forward

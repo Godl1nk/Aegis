@@ -8,6 +8,46 @@ import themeModule from './theme.js';
 import markdownModule from './markdown.js';
 import sessionModule from './sessions.js';
 
+function _shortModelName(model) {
+  return String(model || '').split('/').pop();
+}
+
+function _hideImageModeChip() {
+  document.getElementById('image-mode-chip')?.remove();
+}
+
+function _showImageModeChip(uiData) {
+  const prevModel = uiData.image_previous_model || uiData.previous_model;
+  if (!prevModel) return;
+  const wrap = document.getElementById('model-picker-wrap');
+  if (!wrap) return;
+  _hideImageModeChip();
+
+  const chip = document.createElement('div');
+  chip.id = 'image-mode-chip';
+  chip.className = 'image-mode-chip';
+  chip.innerHTML = '<span class="image-mode-dot"></span><span class="image-mode-label">Image mode</span><button type="button" class="image-mode-back" title="Switch back to chat model">Back to ' + uiModule.esc(_shortModelName(prevModel)) + '</button>';
+  wrap.insertAdjacentElement('afterend', chip);
+
+  chip.querySelector('.image-mode-back')?.addEventListener('click', async () => {
+    const sid = sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
+    if (!sid) return;
+    const fd = new FormData();
+    fd.append('model', prevModel);
+    if (uiData.image_previous_endpoint_url) fd.append('endpoint_url', uiData.image_previous_endpoint_url);
+    if (uiData.image_previous_endpoint_id) fd.append('endpoint_id', uiData.image_previous_endpoint_id);
+    try {
+      const res = await fetch(`/api/session/${encodeURIComponent(sid)}`, { method: 'PATCH', body: fd });
+      if (!res.ok) throw new Error(await res.text());
+      _hideImageModeChip();
+      if (sessionModule.loadSessions) await sessionModule.loadSessions();
+      if (sessionModule.updateModelPicker) sessionModule.updateModelPicker();
+    } catch {
+      uiModule.showToast('Could not switch back to chat model', 4000);
+    }
+  });
+}
+
 /**
  * Handle a ui_control SSE event — AI-driven UI manipulation.
  * Extracted from the duplicated ui_control + tool_output.ui_event handlers.
@@ -61,6 +101,11 @@ export function handleUIControl(uiData) {
     } else if (uiEvent === 'switch_model' || uiData.ui_event === 'switch_model') {
       var modelDisplay = document.querySelector('.current-model-name, #current-model');
       if (modelDisplay) modelDisplay.textContent = uiData.model;
+      if (uiData.image_previous_model) _showImageModeChip(uiData);
+      else _hideImageModeChip();
+      if (sessionModule && sessionModule.loadSessions) {
+        sessionModule.loadSessions().catch(() => {});
+      }
 
     } else if (uiEvent === 'set_theme' || uiData.ui_event === 'set_theme') {
       var tm = themeModule;

@@ -8,8 +8,10 @@ These are agent tools — the LLM writes fenced code blocks and they execute
 through the standard agent_tools.py pipeline.
 """
 
+import base64
 import json
 import logging
+import mimetypes
 import uuid
 import time
 from typing import Dict, Optional, Tuple
@@ -985,7 +987,10 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
         # Update vector index if available
         if _memory_vector and hasattr(_memory_vector, 'healthy') and _memory_vector.healthy:
             try:
-                _memory_vector.add(entry["id"], text)
+                try:
+                    _memory_vector.add(entry["id"], text, owner=owner, kind=entry.get("kind"))
+                except TypeError:
+                    _memory_vector.add(entry["id"], text)
             except Exception:
                 pass
         try:
@@ -1024,7 +1029,11 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
         # Update vector index
         if _memory_vector and hasattr(_memory_vector, 'healthy') and _memory_vector.healthy:
             try:
-                _memory_vector.add(full_id, new_text)
+                _memory_vector.remove(full_id)
+                try:
+                    _memory_vector.add(full_id, new_text, owner=owner, kind=m.get("kind"))
+                except TypeError:
+                    _memory_vector.add(full_id, new_text)
             except Exception:
                 pass
 
@@ -1048,10 +1057,14 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
                 full_id = m["id"]
                 delete_id = m["id"]
                 break
-        memories = [m for m in memories if m.get("id") != delete_id]
-        if len(memories) == original_len:
+        if len([m for m in memories if m.get("id") != delete_id]) == original_len:
             return {"error": f"Memory '{memory_id}' not found"}
-        _memory_manager.save(memories)
+        if hasattr(_memory_manager, "delete_entry"):
+            if not _memory_manager.delete_entry(delete_id, owner=owner):
+                return {"error": f"Memory '{memory_id}' not found"}
+        else:
+            memories = [m for m in memories if m.get("id") != delete_id]
+            _memory_manager.save(memories)
 
         # Remove from vector index
         if _memory_vector and full_id and hasattr(_memory_vector, 'healthy') and _memory_vector.healthy:
@@ -1548,7 +1561,199 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
 # Image generation
 # ---------------------------------------------------------------------------
 
-async def do_generate_image(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
+def _parse_image_generation_content(content: str) -> Dict:
+    raw = (content or "").strip()
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return {
+                    "prompt": str(data.get("prompt") or "").strip(),
+                    "model": str(data.get("model") or "").strip(),
+                    "size": str(data.get("size") or "1024x1024").strip(),
+                    "quality": str(data.get("quality") or "medium").strip(),
+                    "reference_image_urls": [
+                        str(u) for u in (data.get("reference_image_urls") or []) if isinstance(u, str) and u
+                    ],
+                }
+        except (TypeError, ValueError):
+            pass
+
+    lines = raw.split("\n")
+    return {
+        "prompt": lines[0].strip() if lines else "",
+        "model": lines[1].strip() if len(lines) > 1 and lines[1].strip() else "",
+        "size": lines[2].strip() if len(lines) > 2 and lines[2].strip() else "1024x1024",
+        "quality": lines[3].strip() if len(lines) > 3 and lines[3].strip() else "medium",
+        "reference_image_urls": [],
+    }
+
+
+def _image_ref_to_file(url: str, owner: Optional[str] = None):
+    """Convert trusted local/data image refs to httpx multipart file tuples."""
+    from pathlib import Path
+
+    if not isinstance(url, str) or not url:
+        return None
+
+    if url.startswith("data:image/"):
+        header, _, b64 = url.partition(",")
+        if not b64:
+            return None
+        mime = header[5:].split(";", 1)[0] or "image/png"
+        ext = mimetypes.guess_extension(mime) or ".png"
+        try:
+            return ("image", (f"reference{ext}", base64.b64decode(b64), mime))
+        except Exception:
+            return None
+
+    if url.startswith("/api/generated-image/"):
+        filename = url.rsplit("/", 1)[-1].split("?", 1)[0]
+        path = (Path("data/generated_images") / filename).resolve()
+        base = Path("data/generated_images").resolve()
+        try:
+            path.relative_to(base)
+        except ValueError:
+            return None
+        if not path.is_file():
+            return None
+        mime = mimetypes.guess_type(path.name)[0] or "image/png"
+        return ("image", (path.name, path.read_bytes(), mime))
+
+    if url.startswith("upload:"):
+        upload_id = url.split(":", 1)[1]
+        try:
+            from src.constants import BASE_DIR, UPLOAD_DIR
+            from src.upload_handler import UploadHandler
+            handler = UploadHandler(BASE_DIR, UPLOAD_DIR)
+            info = handler.resolve_upload(upload_id, owner=owner)
+        except Exception:
+            info = None
+        if not info or not str(info.get("mime") or "").startswith("image/"):
+            return None
+        path = Path(info.get("path") or "")
+        if not path.is_file():
+            return None
+        mime = info.get("mime") or mimetypes.guess_type(path.name)[0] or "image/png"
+        return ("image", (path.name, path.read_bytes(), mime))
+
+    return None
+
+
+def _adopt_image_model_for_session(
+    session_id: Optional[str],
+    url: str,
+    model_id: str,
+    headers: Optional[Dict],
+    owner: Optional[str] = None,
+) -> Dict:
+    if not session_id or not model_id:
+        return {}
+    previous: Dict = {}
+    if _session_manager:
+        try:
+            existing = _session_manager.get_session(session_id)
+            found_previous = False
+            for msg in reversed(getattr(existing, "history", []) or []):
+                if found_previous:
+                    break
+                meta = getattr(msg, "metadata", None) or {}
+                for ev in reversed(meta.get("tool_events") or []):
+                    if isinstance(ev, dict) and ev.get("image_previous_model") and ev.get("image_previous_endpoint_url"):
+                        previous = {
+                            "previous_model": ev.get("image_previous_model"),
+                            "previous_endpoint_url": ev.get("image_previous_endpoint_url"),
+                        }
+                        found_previous = True
+                        break
+        except Exception:
+            previous = {}
+    try:
+        from src.database import SessionLocal as SL2, Session as DbSess2, ModelEndpoint as DbModelEndpoint
+        from src.endpoint_resolver import normalize_base
+        from src.auth_helpers import owner_filter
+
+        def _matching_endpoint_id(db, endpoint_url: str) -> str:
+            if not endpoint_url:
+                return ""
+            try:
+                target = normalize_base(endpoint_url)
+            except Exception:
+                target = endpoint_url.rstrip("/")
+            q = db.query(DbModelEndpoint).filter(DbModelEndpoint.is_enabled == True)
+            if owner:
+                q = owner_filter(q, DbModelEndpoint, owner)
+            for ep in q.all():
+                try:
+                    if normalize_base(getattr(ep, "base_url", "") or "") == target:
+                        return getattr(ep, "id", "") or ""
+                except Exception:
+                    continue
+            return ""
+
+        def _endpoint_is_image(db, endpoint_url: str) -> bool:
+            if not endpoint_url:
+                return False
+            try:
+                target = normalize_base(endpoint_url)
+            except Exception:
+                target = endpoint_url.rstrip("/")
+            q = db.query(DbModelEndpoint).filter(DbModelEndpoint.is_enabled == True)
+            if owner:
+                q = owner_filter(q, DbModelEndpoint, owner)
+            for ep in q.all():
+                try:
+                    if normalize_base(getattr(ep, "base_url", "") or "") != target:
+                        continue
+                    if (getattr(ep, "model_type", None) or "llm") == "image":
+                        return True
+                except Exception:
+                    continue
+            return False
+
+        db2 = SL2()
+        try:
+            q = db2.query(DbSess2).filter(DbSess2.id == session_id)
+            if owner:
+                q = q.filter(DbSess2.owner == owner)
+            db_s = q.first()
+            if db_s:
+                current_is_image = str(db_s.model or "").lower().startswith(("gpt-image", "dall-e", "chatgpt-image"))
+                current_is_image = current_is_image or _endpoint_is_image(db2, db_s.endpoint_url)
+                if not previous or not current_is_image:
+                    previous = {
+                        "previous_model": db_s.model,
+                        "previous_endpoint_url": db_s.endpoint_url,
+                    }
+                if previous and not previous.get("previous_endpoint_id"):
+                    previous["previous_endpoint_id"] = _matching_endpoint_id(db2, previous.get("previous_endpoint_url") or "")
+                db_s.endpoint_url = url
+                db_s.model = model_id
+                if headers:
+                    db_s.headers = headers
+                db2.commit()
+        finally:
+            db2.close()
+
+        if _session_manager:
+            sess = _session_manager.get_session(session_id)
+            if sess and (not owner or getattr(sess, "owner", None) == owner):
+                sess.endpoint_url = url
+                sess.model = model_id
+                if headers:
+                    sess.headers = headers
+    except Exception as e:
+        logger.warning(f"Failed to adopt image model for session {session_id}: {e}")
+    return previous
+
+
+async def do_generate_image(
+    content: str,
+    session_id: Optional[str] = None,
+    owner: Optional[str] = None,
+    reference_image_urls: Optional[list] = None,
+    adopt_model: bool = True,
+) -> Dict:
     """Generate an image using an image-capable model (e.g. gpt-image-1).
 
     Content format:
@@ -1557,17 +1762,21 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
       Line 3: size (optional, defaults to 1024x1024)
       Line 4: quality (optional, defaults to medium — options: low, medium, high, auto)
     """
-    import base64
     import httpx
     from pathlib import Path
 
-    lines = content.strip().split("\n")
-    prompt = lines[0].strip() if lines else ""
-    model_spec = lines[1].strip() if len(lines) > 1 and lines[1].strip() else ""
+    parsed = _parse_image_generation_content(content)
+    prompt = parsed["prompt"]
+    model_spec = parsed["model"]
     if model_spec.lower() == "auto":
         model_spec = ""
-    size = lines[2].strip() if len(lines) > 2 and lines[2].strip() else "1024x1024"
-    quality = lines[3].strip() if len(lines) > 3 and lines[3].strip() else "medium"
+    size = parsed["size"] or "1024x1024"
+    quality = parsed["quality"] or "medium"
+    refs = list(parsed.get("reference_image_urls") or [])
+    for ref in reference_image_urls or []:
+        if isinstance(ref, str) and ref and ref not in refs:
+            refs.append(ref)
+    refs = refs[:16]
 
     if not prompt:
         return {"error": "Image prompt is required (line 1)"}
@@ -1643,6 +1852,7 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
     # Build the images endpoint URL from the chat completions URL
     base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
     images_url = base_url + "/images/generations"
+    edits_url = base_url + "/images/edits"
 
     # Validate size for cloud image models (local diffusion accepts any WxH)
     valid_gpt_sizes = {"1024x1024", "1024x1536", "1536x1024", "auto"}
@@ -1669,12 +1879,26 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
             payload["quality"] = "medium"
             quality = "medium"
 
-    logger.info(f"Image generation: model={model_id}, size={size}, quality={quality}, prompt={prompt[:80]}")
+    ref_files = [_image_ref_to_file(ref, owner=owner) for ref in refs]
+    ref_files = [item for item in ref_files if item]
+    use_edits_endpoint = bool(ref_files)
+    if use_edits_endpoint and not is_gpt_image:
+        return {"error": f"Image references require a GPT image model; configured model is '{model_id}'."}
+
+    logger.info(
+        f"Image generation: model={model_id}, size={size}, quality={quality}, "
+        f"refs={len(ref_files)}, prompt={prompt[:80]}"
+    )
 
     try:
         # GPT image models can take 30-120s+ depending on quality
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)) as client:
-            resp = await client.post(images_url, json=payload, headers=headers)
+            if use_edits_endpoint:
+                edit_data = {k: str(v) for k, v in payload.items() if k != "n"}
+                edit_data["input_fidelity"] = "high"
+                resp = await client.post(edits_url, data=edit_data, files=ref_files, headers=headers)
+            else:
+                resp = await client.post(images_url, json=payload, headers=headers)
 
             if resp.status_code != 200:
                 error_text = resp.text[:500]
@@ -1685,7 +1909,8 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
                     pass
                 if not error_text:
                     error_text = "empty response body"
-                return {"error": f"Image generation failed ({resp.status_code}) for {model_id} at {images_url}: {error_text}"}
+                endpoint = edits_url if use_edits_endpoint else images_url
+                return {"error": f"Image generation failed ({resp.status_code}) for {model_id} at {endpoint}: {error_text}"}
 
             data = resp.json()
             images = data.get("data", [])
@@ -1749,15 +1974,28 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
             else:
                 return {"error": "Image API returned unexpected format (no b64_json or url)"}
 
-            return {
-                "results": f"Generated image for: {prompt[:100]}",
+            previous_model_info = {}
+            if adopt_model:
+                previous_model_info = _adopt_image_model_for_session(session_id, url, model_id, headers, owner=owner)
+
+            ref_note = f" using {len(ref_files)} reference image(s)" if ref_files else ""
+            result = {
+                "results": f"Generated image{ref_note} for: {prompt[:100]}",
+                "ui_event": "switch_model",
                 "image_url": image_url,
                 "image_id": image_id,
                 "image_prompt": prompt,
                 "image_model": model_id,
+                "model": model_id,
+                "endpoint_url": url,
                 "image_size": size,
                 "image_quality": quality,
             }
+            if previous_model_info:
+                result["image_previous_model"] = previous_model_info.get("previous_model")
+                result["image_previous_endpoint_url"] = previous_model_info.get("previous_endpoint_url")
+                result["image_previous_endpoint_id"] = previous_model_info.get("previous_endpoint_id")
+            return result
 
     except httpx.TimeoutException:
         return {"error": "Image generation timed out (300s). The model may be overloaded — try again or use quality=low."}
