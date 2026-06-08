@@ -2672,6 +2672,21 @@ function initializeEventListeners() {
     } catch {}
   })();
 
+  // One-time migration to reset text-emojis to false (off) for existing users
+  (function migrateTextEmojisDefault() {
+    try {
+      const MIGRATION_KEY = 'aegis-emoji-migrated-v1';
+      if (!localStorage.getItem(MIGRATION_KEY)) {
+        const current = loadUIVis();
+        current['text-emojis'] = false;
+        saveUIVis(current);
+        localStorage.setItem(MIGRATION_KEY, 'true');
+      }
+    } catch (e) {
+      console.warn('Emoji migration failed:', e);
+    }
+  })();
+
   // Expose UI visibility functions for admin.js
   window.loadUIVis = loadUIVis;
   window.saveUIVis = saveUIVis;

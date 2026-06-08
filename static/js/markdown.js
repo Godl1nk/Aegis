@@ -390,7 +390,7 @@ function _useSvgEmoji() {
 export function svgifyEmoji(html, opts) {
   if (!html) return html;
   const useSvgEmoji = _useSvgEmoji();
-  const allowShortcodes = !opts || opts.shortcodes !== false;
+  const allowShortcodes = useSvgEmoji && (!opts || opts.shortcodes !== false);
   // Two reasons to walk the HTML: real Unicode emoji to turn into SVG icons,
   // or `:shortcode:` text the model emitted instead of an emoji (issue #345).
   const hasUnicode = useSvgEmoji && _EMOJI_RE.test(html);
