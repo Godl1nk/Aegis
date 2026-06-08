@@ -786,6 +786,7 @@ def setup_chat_routes(
 
             full_response = ""
             last_metrics = None
+            response_saved = False
 
             # Configured fallback chain for the default chat model. Tried in
             # order if the session's primary model fails before producing
@@ -896,6 +897,7 @@ def setup_chat_routes(
                                     do_research=do_research,
                                     incognito=incognito,
                                 )
+                                response_saved = True
                                 if _saved_id:
                                     yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
                                 run_post_response_tasks(
@@ -908,7 +910,7 @@ def setup_chat_routes(
                             _stream_set(session, status="done")
                             yield chunk
                 except (asyncio.CancelledError, GeneratorExit):
-                    if full_response:
+                    if full_response and not response_saved:
                         logger.info("Client disconnected mid-stream (chat mode) for session %s, saving partial (%d chars)", session, len(full_response))
                         _stopped_content, _stopped_md = clean_thinking_for_save(full_response, {"stopped": True, "model": sess.model})
                         sess.add_message(ChatMessage("assistant", _stopped_content, metadata=_stopped_md))
@@ -1002,6 +1004,7 @@ def setup_chat_routes(
                                     used_memories=ctx.used_memories,
                                     incognito=incognito,
                                 )
+                                response_saved = True
                                 if _saved_id:
                                     yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
                                 run_post_response_tasks(
@@ -1025,7 +1028,7 @@ def setup_chat_routes(
                     # outer finally from running and left _active_streams
                     # with a stale entry).
                     try:
-                        if full_response:
+                        if full_response and not response_saved:
                             logger.info("Client disconnected mid-stream for session %s, saving partial response (%d chars)", session, len(full_response))
                             _stopped_content2, _stopped_md2 = clean_thinking_for_save(full_response, {"stopped": True, "model": sess.model})
                             sess.add_message(ChatMessage("assistant", _stopped_content2, metadata=_stopped_md2))
