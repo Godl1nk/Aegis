@@ -2471,6 +2471,7 @@ import createResearchSynapse from './researchSynapse.js';
             }
           }
         }
+        if (_streamSawDone) break;
       }
 
       if (!_streamSawDone) {
