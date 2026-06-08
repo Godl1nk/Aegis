@@ -341,9 +341,34 @@ async def maybe_compact(
         logger.error(f"Compaction summary failed: {e}")
         return system_msgs + recent, context_length, False
 
+    # Scan for any image previous model metadata in the older messages being pruned
+    prev_model = None
+    prev_url = None
+    for msg in reversed(older):
+        meta = msg.get("metadata") or {}
+        if msg.get("role") == "system" and meta.get("compacted"):
+            if meta.get("image_previous_model") and meta.get("image_previous_endpoint_url"):
+                prev_model = meta["image_previous_model"]
+                prev_url = meta["image_previous_endpoint_url"]
+                break
+        elif msg.get("role") == "assistant":
+            for ev in reversed(meta.get("tool_events") or []):
+                if isinstance(ev, dict) and ev.get("tool") == "generate_image" and ev.get("image_previous_model"):
+                    prev_model = ev["image_previous_model"]
+                    prev_url = ev.get("image_previous_endpoint_url")
+                    break
+            if prev_model:
+                break
+
+    summary_meta = {"compacted": True}
+    if prev_model and prev_url:
+        summary_meta["image_previous_model"] = prev_model
+        summary_meta["image_previous_endpoint_url"] = prev_url
+
     summary_msg = {
         "role": "system",
         "content": f"[Conversation summary — earlier messages were compacted]\n{summary}",
+        "metadata": summary_meta,
     }
 
     compacted = system_msgs + [summary_msg] + recent
@@ -353,7 +378,14 @@ async def maybe_compact(
     # offset — session.history INCLUDES the system messages, but
     # split_point is indexed against convo_msgs which does NOT. Without
     # this, the slice drops the leading system message(s).
-    _update_session_history(session, split_point, summary, system_msg_count=len(system_msgs))
+    _update_session_history(
+        session,
+        split_point,
+        summary,
+        system_msg_count=len(system_msgs),
+        prev_model=prev_model,
+        prev_url=prev_url,
+    )
 
     new_used = estimate_tokens(compacted)
     logger.info(
@@ -365,7 +397,9 @@ async def maybe_compact(
 
 
 def _update_session_history(session, split_point: int, summary: str,
-                            system_msg_count: int = 0):
+                            system_msg_count: int = 0,
+                            prev_model: Optional[str] = None,
+                            prev_url: Optional[str] = None):
     """Update the in-memory session history after compaction.
 
     `split_point` is the index in `convo_msgs` (system-stripped). The
@@ -386,10 +420,16 @@ def _update_session_history(session, split_point: int, summary: str,
     # messages so the system prompt survives compaction.
     system_prefix = list(session.history[:system_msg_count])
     recent_history = session.history[effective_split:]
+
+    summary_meta = {"compacted": True, "summarized_count": split_point}
+    if prev_model and prev_url:
+        summary_meta["image_previous_model"] = prev_model
+        summary_meta["image_previous_endpoint_url"] = prev_url
+
     summary_msg = ChatMessage(
         role="system",
         content=f"[Conversation summary]\n{summary}",
-        metadata={"compacted": True, "summarized_count": split_point},
+        metadata=summary_meta,
     )
     new_history = system_prefix + [summary_msg] + recent_history
     try:

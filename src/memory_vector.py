@@ -10,6 +10,12 @@ import logging
 from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
+_last_store = None
+
+
+def get_memory_vector_store():
+    """Return the process-local memory vector store, if one has been initialized."""
+    return _last_store
 
 
 class MemoryVectorStore:
@@ -18,11 +24,13 @@ class MemoryVectorStore:
     COLLECTION_NAME = "odysseus_memories"
 
     def __init__(self, data_dir: str, embedding_model=None):
+        global _last_store
         self._model = embedding_model
         self._collection = None
         self._healthy = False
 
         self._initialize()
+        _last_store = self
 
     def _initialize(self):
         try:
@@ -62,7 +70,7 @@ class MemoryVectorStore:
             return 0
         return self._collection.count()
 
-    def add(self, memory_id: str, text: str):
+    def add(self, memory_id: str, text: str, owner: str = None, kind: str = None):
         """Add a single memory entry to the vector index."""
         if not self._healthy:
             return
@@ -75,7 +83,7 @@ class MemoryVectorStore:
             ids=[memory_id],
             embeddings=embeddings,
             documents=[text],
-            metadatas=[{"source": "memory"}],
+            metadatas=[{"source": "memory", "owner": owner or "", "kind": kind or ""}],
         )
 
     def remove(self, memory_id: str):
@@ -87,7 +95,40 @@ class MemoryVectorStore:
         except Exception as e:
             logger.warning(f"memory remove {memory_id}: {e}")
 
-    def search(self, query: str, k: int = 8) -> List[Dict]:
+    def clear(self):
+        """Clear all memory vectors from the backing collection."""
+        if not self._healthy:
+            return
+        from src.chroma_client import get_chroma_client
+
+        client = get_chroma_client()
+        try:
+            client.delete_collection(self.COLLECTION_NAME)
+        except Exception:
+            pass
+        self._collection = client.get_or_create_collection(
+            name=self.COLLECTION_NAME,
+            metadata={"hnsw:space": "cosine"},
+        )
+
+    def needs_metadata_rebuild(self) -> bool:
+        """True when stored vectors predate required owner/kind metadata."""
+        if not self._healthy or self._collection.count() == 0:
+            return False
+        try:
+            sample = self._collection.get(
+                limit=min(self._collection.count(), 25),
+                include=["metadatas"],
+            )
+        except Exception as e:
+            logger.warning(f"memory metadata probe failed: {e}")
+            return False
+        for metadata in sample.get("metadatas") or []:
+            if not isinstance(metadata, dict) or "owner" not in metadata or "kind" not in metadata:
+                return True
+        return False
+
+    def search(self, query: str, k: int = 8, owner: str = None) -> List[Dict]:
         """Search for the most relevant memory IDs by semantic similarity.
         Returns list of {"memory_id": str, "score": float}.
 
@@ -99,10 +140,14 @@ class MemoryVectorStore:
 
         embeddings = self._embed([query])
         actual_k = min(k, self._collection.count())
-        results = self._collection.query(
-            query_embeddings=embeddings,
-            n_results=actual_k,
-        )
+        where_filter = {"owner": owner or ""} if owner is not None else None
+        query_kwargs = {
+            "query_embeddings": embeddings,
+            "n_results": actual_k,
+        }
+        if where_filter:
+            query_kwargs["where"] = where_filter
+        results = self._collection.query(**query_kwargs)
 
         out = []
         for idx, mid in enumerate(results["ids"][0]):
@@ -113,16 +158,19 @@ class MemoryVectorStore:
             })
         return out
 
-    def find_similar(self, text: str, threshold: float = 0.92) -> Optional[str]:
+    def find_similar(self, text: str, threshold: float = 0.92, owner: str = None) -> Optional[str]:
         """Check if a near-duplicate exists. Returns memory_id if found, else None."""
         if not self._healthy or self._collection.count() == 0:
             return None
 
         embeddings = self._embed([text])
-        results = self._collection.query(
-            query_embeddings=embeddings,
-            n_results=1,
-        )
+        query_kwargs = {
+            "query_embeddings": embeddings,
+            "n_results": 1,
+        }
+        if owner is not None:
+            query_kwargs["where"] = {"owner": owner or ""}
+        results = self._collection.query(**query_kwargs)
 
         if results["ids"][0]:
             distance = results["distances"][0][0]
@@ -137,39 +185,35 @@ class MemoryVectorStore:
         if not self._healthy:
             return
 
-        from src.chroma_client import get_chroma_client
-
-        # Delete and recreate collection for a clean rebuild
-        client = get_chroma_client()
-        try:
-            client.delete_collection(self.COLLECTION_NAME)
-        except Exception:
-            pass
-        self._collection = client.get_or_create_collection(
-            name=self.COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine"},
-        )
+        self.clear()
 
         texts = []
         ids = []
+        metadatas = []
         for mem in memories:
             text = mem.get("text", "").strip()
             mid = mem.get("id", "")
             if text and mid:
                 texts.append(text)
                 ids.append(mid)
+                metadatas.append({
+                    "source": "memory",
+                    "owner": str(mem.get("owner") or ""),
+                    "kind": str(mem.get("kind") or ""),
+                })
 
         if texts:
             # Batch in chunks of 100 to avoid oversized requests
             for i in range(0, len(texts), 100):
                 batch_texts = texts[i:i + 100]
                 batch_ids = ids[i:i + 100]
+                batch_meta = metadatas[i:i + 100]
                 embeddings = self._embed(batch_texts)
                 self._collection.add(
                     ids=batch_ids,
                     embeddings=embeddings,
                     documents=batch_texts,
-                    metadatas=[{"source": "memory"}] * len(batch_ids),
+                    metadatas=batch_meta,
                 )
 
         logger.info(f"MemoryVectorStore rebuilt with {len(ids)} entries")

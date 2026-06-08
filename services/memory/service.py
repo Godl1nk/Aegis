@@ -119,7 +119,11 @@ class MemoryService:
         if len(remaining) == len(memories):
             return False
 
-        self.manager.save(remaining)
+        if hasattr(self.manager, "delete_entry"):
+            if not self.manager.delete_entry(memory_id):
+                return False
+        else:
+            self.manager.save(remaining)
         if self.vector_store and self.vector_store.healthy:
             self.vector_store.remove(memory_id)
         return True

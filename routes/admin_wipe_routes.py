@@ -21,6 +21,11 @@ from core.database import (
     Session as DbSession,
     ChatMessage as DbChatMessage,
     Memory,
+    MemoryItem,
+    MemoryObservation,
+    MemorySummaryVersion,
+    MemoryFeedback,
+    MemoryJob,
     Note,
     ScheduledTask,
     TaskRun,
@@ -39,7 +44,7 @@ logger = logging.getLogger(__name__)
 def _wipe_memory_files():
     """Blank memory.json + drop the per-owner tidy-state sidecar so the
     next audit doesn't try to diff against gone memories."""
-    for name in ("memory.json", "memory_tidy_state.json"):
+    for name in ("memory.json", "memory_tidy_state.json", "memory_v2_state.json"):
         p = os.path.join(DATA_DIR, name)
         if not os.path.exists(p):
             continue
@@ -87,8 +92,13 @@ def setup_admin_wipe_routes(session_manager):
                 return {"status": "deleted", "kind": kind, "count": count}
 
             if kind == "memory":
-                count = db.query(Memory).count()
+                count = db.query(Memory).count() + db.query(MemoryItem).count()
                 db.query(Memory).delete()
+                db.query(MemoryFeedback).delete()
+                db.query(MemorySummaryVersion).delete()
+                db.query(MemoryObservation).delete()
+                db.query(MemoryJob).delete()
+                db.query(MemoryItem).delete()
                 db.commit()
                 _wipe_memory_files()
                 # Drop the vector store too so semantic search doesn't

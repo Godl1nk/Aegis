@@ -5,6 +5,7 @@ import os
 import time
 import uuid
 import re
+from pathlib import Path
 from typing import List, Dict, Tuple
 from datetime import datetime
 
@@ -35,6 +36,21 @@ def get_text_similarity(text1: str, text2: str) -> float:
 class MemoryManager:
     def __init__(self, data_dir: str):
         self.memory_file = os.path.join(data_dir, "memory.json")
+        self._v2 = None
+        # Runtime uses src.constants.DATA_DIR (absolute). Tests and one-off
+        # tools often pass temp dirs; keep those JSON-only so they don't
+        # accidentally touch the application DB.
+        try:
+            from src.constants import DATA_DIR
+            _is_app_data_dir = Path(data_dir).resolve() == Path(DATA_DIR).resolve()
+        except Exception:
+            _is_app_data_dir = os.path.normpath(data_dir) == os.path.normpath("data")
+        if _is_app_data_dir:
+            try:
+                from src.memory_v2 import MemoryV2Store
+                self._v2 = MemoryV2Store(data_dir)
+            except Exception as e:
+                logger.warning("Memory V2 unavailable, using JSON store: %s", e)
         self.ensure_file_exists()
         
     def extract_memory_from_chat(self, chat_history: List[Dict], session_id: str = None) -> List[Dict]:
@@ -112,6 +128,11 @@ class MemoryManager:
     
     def load_all(self) -> List[Dict]:
         """Load all memory entries from JSON file (unfiltered)."""
+        if self._v2 is not None:
+            try:
+                return self._validate_entries(self._v2.load_all())
+            except Exception as e:
+                logger.warning("Memory V2 load failed, falling back to JSON: %s", e)
         if not os.path.exists(self.memory_file):
             return []
 
@@ -128,6 +149,11 @@ class MemoryManager:
 
     def load(self, owner: str = None) -> List[Dict]:
         """Load memory entries, optionally filtered by owner."""
+        if self._v2 is not None:
+            try:
+                return self._validate_entries(self._v2.load(owner=owner))
+            except Exception as e:
+                logger.warning("Memory V2 scoped load failed, falling back to JSON: %s", e)
         entries = self.load_all()
         if owner is None:
             return entries
@@ -135,6 +161,13 @@ class MemoryManager:
 
     def claim_ownerless(self, owner: str):
         """Assign all ownerless memory entries to the given owner."""
+        if self._v2 is not None:
+            try:
+                self._v2.claim_ownerless(owner)
+                return  # v2 is source of truth; JSON syncs on next save()
+            except Exception as e:
+                logger.warning("Memory V2 owner claim failed: %s", e)
+        # Fallback: JSON path (v2 unavailable or failed)
         entries = self.load_all()
         changed = False
         claimed = 0
@@ -195,7 +228,6 @@ class MemoryManager:
     
     def save(self, entries: List[Dict]):
         """Save memory entries to JSON file."""
-        # Validate entries before saving
         for entry in entries:
             if "id" not in entry:
                 entry["id"] = str(uuid.uuid4())
@@ -205,12 +237,44 @@ class MemoryManager:
                 entry["source"] = "user"
             if "category" not in entry:
                 entry["category"] = "fact"
+
+        if self._v2 is not None:
+            try:
+                self._v2.save(entries)
+            except Exception as e:
+                logger.warning("Memory V2 save failed, mirroring JSON only: %s", e)
         
         # Use atomic write
         tmp_file = self.memory_file + ".tmp"
         with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(entries, f, ensure_ascii=False, indent=2)
         os.replace(tmp_file, self.memory_file)
+
+    def delete_entry(self, memory_id: str, owner: str = None) -> bool:
+        """Delete one memory entry by id, keeping JSON and V2 in sync."""
+        entries = self.load_all()
+        target = next((e for e in entries if e.get("id") == memory_id), None)
+        if target is None:
+            return False
+        if owner is not None and target.get("owner") != owner:
+            return False
+
+        remaining = [e for e in entries if e.get("id") != memory_id]
+        if self._v2 is not None:
+            try:
+                if not self._v2.delete_item(memory_id, owner=owner):
+                    return False
+            except Exception as e:
+                logger.warning("Memory V2 delete failed: %s", e)
+                return False
+            tmp_file = self.memory_file + ".tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(remaining, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_file, self.memory_file)
+            return True
+
+        self.save(remaining)
+        return True
     
     def add_entry(self, text: str, source: str = "user", category: str = "fact", owner: str = None) -> Dict:
         """Add a new memory entry."""
@@ -224,6 +288,8 @@ class MemoryManager:
             "source": source,
             "category": category,
             "uses": 0,
+            "kind": "synthesized" if source == "dream" else "saved",
+            "status": "active",
         }
         if owner:
             entry["owner"] = owner
@@ -234,6 +300,12 @@ class MemoryManager:
         actually been injected into a chat's context (not just retrieved)."""
         if not ids:
             return
+        if self._v2 is not None:
+            try:
+                self._v2.increment_uses(ids)
+                return
+            except Exception as e:
+                logger.warning("Memory V2 usage bump failed, falling back to JSON: %s", e)
         id_set = set(ids)
         entries = self.load_all()
         changed = False

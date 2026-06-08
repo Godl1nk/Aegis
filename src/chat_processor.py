@@ -51,7 +51,7 @@ class ChatProcessor:
     # Minimum similarity score for RAG results to be injected
     RAG_SIMILARITY_THRESHOLD = 0.35
 
-    def _hybrid_retrieve(self, message: str, mem_entries: list, k: int = 5) -> list:
+    def _hybrid_retrieve(self, message: str, mem_entries: list, k: int = 5, owner: Optional[str] = None) -> list:
         """Retrieve memories relevant to the message.
 
         Uses BM25-style keyword scoring + optional vector similarity.
@@ -103,7 +103,10 @@ class ChatProcessor:
         vector_scores = {}
 
         if has_vector:
-            results = self.memory_vector.search(message, k=min(k * 3, 20))
+            try:
+                results = self.memory_vector.search(message, k=min(k * 3, 20), owner=owner)
+            except TypeError:
+                results = self.memory_vector.search(message, k=min(k * 3, 20))
             mem_by_id = {m["id"]: m for m in mem_entries}
             for r in results:
                 if r["memory_id"] in mem_by_id:
@@ -170,6 +173,8 @@ class ChatProcessor:
         agent_mode: bool = False,
         incognito: bool = False,
         use_skills: bool = True,
+        reference_saved_memories: bool = True,
+        reference_chat_history: bool = True,
     ) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], List[Dict[str, str]]]:
         """Build the context preface for LLM calls.
 
@@ -203,6 +208,17 @@ class ChatProcessor:
         self._last_used_memories = []  # track what was injected
         if use_memory:
             mem_entries = self.memory_manager.load(owner=owner)
+            filtered_entries = []
+            for memory in mem_entries:
+                is_chat_history_memory = (
+                    (memory.get("kind") or "saved") == "synthesized"
+                    or memory.get("source") == "dream"
+                )
+                if is_chat_history_memory and reference_chat_history:
+                    filtered_entries.append(memory)
+                elif not is_chat_history_memory and reference_saved_memories:
+                    filtered_entries.append(memory)
+            mem_entries = filtered_entries
 
             pinned = [m for m in mem_entries if m.get("pinned")]
             extended = [m for m in mem_entries if not m.get("pinned")]
@@ -215,12 +231,19 @@ class ChatProcessor:
                     f"Core facts about the user:\n- {pinned_text}",
                 ))
                 for m in pinned:
-                    self._last_used_memories.append({"text": m["text"], "category": m.get("category", "fact"), "type": "pinned"})
+                    self._last_used_memories.append({
+                        "id": m.get("id"),
+                        "text": m["text"],
+                        "category": m.get("category", "fact"),
+                        "type": "pinned",
+                        "kind": m.get("kind", "saved"),
+                        "source_refs": m.get("source_refs", []),
+                    })
                     if m.get("id"):
                         _used_ids.append(m["id"])
 
             if extended:
-                relevant = self._hybrid_retrieve(message, extended, k=3)
+                relevant = self._hybrid_retrieve(message, extended, k=3, owner=owner)
                 if relevant:
                     ext_text = "\n".join([f"- {m['text']}" for m in relevant])
                     preface.append(untrusted_context_message(
@@ -231,7 +254,14 @@ class ChatProcessor:
                         ),
                     ))
                     for m in relevant:
-                        self._last_used_memories.append({"text": m["text"], "category": m.get("category", "fact"), "type": "recalled"})
+                        self._last_used_memories.append({
+                            "id": m.get("id"),
+                            "text": m["text"],
+                            "category": m.get("category", "fact"),
+                            "type": "recalled",
+                            "kind": m.get("kind", "saved"),
+                            "source_refs": m.get("source_refs", []),
+                        })
                         if m.get("id"):
                             _used_ids.append(m["id"])
 

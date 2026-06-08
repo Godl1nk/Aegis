@@ -480,6 +480,8 @@ async def build_chat_context(
 
     # Memory enabled?
     mem_enabled = not incognito and not no_memory and uprefs.get("memory_enabled", True)
+    reference_saved_memories = mem_enabled and uprefs.get("reference_saved_memories", True)
+    reference_chat_history = mem_enabled and uprefs.get("reference_chat_history", True)
     # Skills injection respects its own enable toggle (mirrors memory_enabled).
     # When off, the "Available skills" index is not added to the prompt.
     skills_enabled = not incognito and uprefs.get("skills_enabled", True)
@@ -505,6 +507,8 @@ async def build_chat_context(
         session=sess,
         use_web=use_web and not skip_web,
         use_memory=mem_enabled,
+        reference_saved_memories=reference_saved_memories,
+        reference_chat_history=reference_chat_history,
         time_filter=time_filter,
         preset_system_prompt=preset.system_prompt,
         owner=user,
@@ -846,7 +850,14 @@ def run_post_response_tasks(
     # Memory extraction — only every 4th message pair to avoid excess LLM calls
     _msg_count = len(sess.history) if hasattr(sess, 'history') else 0
     _should_extract = (_msg_count >= 4) and (_msg_count % 4 == 0)
-    if not incognito and not compare_mode and _should_extract and uprefs.get("auto_memory", True):
+    if (
+        not incognito
+        and not compare_mode
+        and _should_extract
+        and uprefs.get("memory_enabled", True)
+        and uprefs.get("reference_saved_memories", True)
+        and uprefs.get("auto_memory", True)
+    ):
         from services.memory.memory_extractor import extract_and_store
         from src.task_endpoint import resolve_task_endpoint
         t_url, t_model, t_headers = resolve_task_endpoint(
@@ -855,6 +866,19 @@ def run_post_response_tasks(
         asyncio.create_task(extract_and_store(
             sess, memory_manager, memory_vector,
             t_url, t_model, t_headers,
+        ))
+
+    if (
+        not incognito
+        and not compare_mode
+        and uprefs.get("memory_enabled", True)
+        and uprefs.get("dream_memory_enabled", True)
+        and uprefs.get("reference_chat_history", True)
+        and uprefs.get("dream_source_chats", True)
+    ):
+        from services.memory.dreamer import dream_from_session
+        asyncio.create_task(dream_from_session(
+            sess, memory_manager, memory_vector, owner=owner,
         ))
 
     # Skill extraction from complex agent runs. Only when the user actually

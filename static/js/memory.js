@@ -90,6 +90,10 @@ async function syncToggles() {
   // The settings tab no longer hosts a separate "Memory in context" toggle —
   // the header toggle owns that pref directly now.
   await syncPrefToggle('memory-enabled-header-toggle', 'memory_enabled', 'Memory enabled', 'Memory disabled', false);
+  await syncPrefToggle('reference-saved-memories-toggle', 'reference_saved_memories', 'Saved memories referenced', 'Saved memories disabled', false);
+  await syncPrefToggle('reference-chat-history-toggle', 'reference_chat_history', 'Chat history referenced', 'Chat history disabled', false);
+  await syncPrefToggle('dream-memory-toggle', 'dream_memory_enabled', 'Dreaming enabled', 'Dreaming disabled', false);
+  await syncPrefToggle('dream-source-chats-toggle', 'dream_source_chats', 'Dream source: chats on', 'Dream source: chats off', false);
   // The Skills header toggle owns the `skills_enabled` pref (was never wired —
   // toggling it did nothing, so skills stayed on). Now it actually gates skill
   // injection (see chat_helpers.py: uprefs.skills_enabled).
@@ -429,7 +433,7 @@ export async function tidyMemories() {
     if ((data.removed || 0) === 0) {
       if (tidySpinner) tidySpinner.destroy();
       if (tidyBtn) { tidyBtn.disabled = false; tidyBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;margin-right:2px;"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg> Tidy'; }
-      showToast('Already clean');
+      showToast(data.error ? `Tidy skipped: ${data.error}` : 'Already clean');
       return;
     }
 
@@ -1328,6 +1332,117 @@ async function handleImportFile(file) {
   }
 }
 
+async function loadMemorySummary() {
+  const summaryEl = document.getElementById('memory-summary-text');
+  const historyEl = document.getElementById('memory-summary-history');
+  const statusEl = document.getElementById('memory-dream-status');
+  if (summaryEl) summaryEl.textContent = 'Loading...';
+  if (historyEl) historyEl.textContent = 'Loading...';
+  try {
+    const [summaryRes, historyRes, statusRes] = await Promise.all([
+      fetch(`${window.location.origin}/api/memory/summary`),
+      fetch(`${window.location.origin}/api/memory/summary/history`),
+      fetch(`${window.location.origin}/api/memory/dream/status`)
+    ]);
+    if (!summaryRes.ok) throw new Error(`summary ${summaryRes.status}`);
+    const summary = await summaryRes.json();
+    if (summaryEl) summaryEl.textContent = summary.summary || 'No summary yet.';
+
+    if (statusEl && statusRes.ok) {
+      const status = await statusRes.json();
+      const bits = [status.status || 'idle'];
+      if (status.updated_at) bits.push(new Date(status.updated_at).toLocaleString());
+      if (status.result?.items !== undefined) bits.push(`${status.result.items} items`);
+      statusEl.textContent = bits.join(' | ');
+    }
+
+    if (!historyEl || !historyRes.ok) return;
+    const history = await historyRes.json();
+    const rows = Array.isArray(history.history) ? history.history : [];
+    historyEl.innerHTML = '';
+    if (!rows.length) {
+      historyEl.textContent = 'No summary history yet.';
+      return;
+    }
+    rows.forEach(row => {
+      const item = document.createElement('div');
+      item.className = 'memory-summary-history-row';
+      const text = document.createElement('div');
+      text.className = 'memory-summary-history-text';
+      text.textContent = row.summary || '(empty)';
+      const meta = document.createElement('div');
+      meta.className = 'memory-item-meta';
+      meta.textContent = `${row.active ? 'active | ' : ''}${row.created_at ? new Date(row.created_at).toLocaleString() : ''}`;
+      item.appendChild(text);
+      item.appendChild(meta);
+      if (!row.active) {
+        const restore = document.createElement('button');
+        restore.className = 'memory-toolbar-btn';
+        restore.type = 'button';
+        restore.textContent = 'Restore';
+        restore.addEventListener('click', () => restoreMemorySummary(row.id));
+        item.appendChild(restore);
+      }
+      historyEl.appendChild(item);
+    });
+  } catch (e) {
+    console.error('Failed to load memory summary:', e);
+    if (summaryEl) summaryEl.textContent = 'Failed to load summary.';
+  }
+}
+
+async function restoreMemorySummary(summaryId) {
+  if (!summaryId) return;
+  try {
+    const res = await fetch(`${window.location.origin}/api/memory/summary/restore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ summary_id: summaryId })
+    });
+    if (!res.ok) throw new Error(`restore ${res.status}`);
+    showToast('Summary restored');
+    await loadMemorySummary();
+    await loadMemories();
+  } catch (e) {
+    console.error('Failed to restore memory summary:', e);
+    showError('Failed to restore summary');
+  }
+}
+
+async function runDreamNow() {
+  const btn = document.getElementById('memory-dream-run');
+  const sid = sessionModule && sessionModule.getCurrentSessionId ? sessionModule.getCurrentSessionId() : '';
+  if (!sid) {
+    showError('Open a chat first');
+    return;
+  }
+  const oldText = btn ? btn.textContent : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Dreaming...';
+  }
+  try {
+    const res = await fetch(`${window.location.origin}/api/memory/dream/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sid })
+    });
+    if (!res.ok) throw new Error(`dream ${res.status}`);
+    const data = await res.json();
+    showToast(data.status === 'recently_processed' ? 'Already fresh' : 'Dreaming complete');
+    await loadMemorySummary();
+    await loadMemories();
+  } catch (e) {
+    console.error('Dream run failed:', e);
+    showError('Dreaming failed');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = oldText || 'Dream now';
+    }
+  }
+}
+
 // Utility aliases (canonical implementations live in uiModule)
 var showToast = uiModule.showToast;
 var showError = uiModule.showError;
@@ -1347,6 +1462,8 @@ document.addEventListener('DOMContentLoaded', () => {
       // Lazy-load skills tab (cascade=true → play the domino-in entrance)
       if (target === 'skills') {
         import('./skills.js').then(m => { if (m.loadSkills) m.loadSkills(true); else if (m.default?.loadSkills) m.default.loadSkills(true); });
+      } else if (target === 'summary') {
+        loadMemorySummary();
       }
     });
   });
@@ -1361,6 +1478,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const tidyBtn = document.getElementById('memory-tidy-btn');
   if (tidyBtn) tidyBtn.addEventListener('click', tidyMemories);
+
+  const summaryRefresh = document.getElementById('memory-summary-refresh');
+  if (summaryRefresh) summaryRefresh.addEventListener('click', loadMemorySummary);
+
+  const dreamRun = document.getElementById('memory-dream-run');
+  if (dreamRun) dreamRun.addEventListener('click', runDreamNow);
 
   const selectBtn = document.getElementById('memory-select-btn');
   if (selectBtn) selectBtn.addEventListener('click', () => {
@@ -1411,7 +1534,8 @@ const memoryModule = {
   buildCategoryChips,
   tidyMemories,
   importMemories,
-  exportMemories
+  exportMemories,
+  loadMemorySummary
 };
 
 export default memoryModule;

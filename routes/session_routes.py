@@ -579,6 +579,16 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
 
             # Delete the session and all its messages
             if session_manager.delete_session(sid):
+                try:
+                    from src.constants import DATA_DIR
+                    from src.memory_v2 import MemoryV2Store
+                    MemoryV2Store(DATA_DIR).invalidate_source(
+                        owner=effective_user(request),
+                        source_type="chat",
+                        source_id=sid,
+                    )
+                except Exception:
+                    logger.debug("Memory V2 source invalidation skipped for session %s", sid, exc_info=True)
                 return {"status": "deleted"}
             else:
                 raise HTTPException(404, "Session not found")

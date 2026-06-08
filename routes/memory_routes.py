@@ -1,5 +1,5 @@
 # routes/memory_routes.py
-from fastapi import APIRouter, Form, HTTPException, Request, UploadFile, File
+from fastapi import APIRouter, Form, HTTPException, Request, UploadFile, File, Body
 from typing import Dict, Any, Optional, List
 import json
 import os
@@ -27,7 +27,7 @@ from src.request_models import MemoryAddRequest
 from core.database import SessionLocal
 from src.llm_core import llm_call_async
 from services.memory.memory_extractor import audit_memories
-from src.auth_helpers import get_current_user, require_user
+from src.auth_helpers import get_current_user, require_user, require_privilege
 from src.endpoint_resolver import resolve_endpoint
 from src.upload_limits import read_upload_limited
 
@@ -87,7 +87,6 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         memory_data: Optional[MemoryAddRequest] = None
     ):
         """Add a new memory entry with optional category, source, and session reference."""
-        from src.auth_helpers import require_privilege
         require_privilege(request, "can_manage_memory")
         if memory_data is None:
             form = await request.form()
@@ -114,7 +113,10 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         memory_manager.save(all_mem)
         # Sync vector index
         if memory_vector and memory_vector.healthy:
-            memory_vector.add(new_entry["id"], text)
+            try:
+                memory_vector.add(new_entry["id"], text, owner=user, kind=new_entry.get("kind"))
+            except TypeError:
+                memory_vector.add(new_entry["id"], text)
         try:
             from src.event_bus import fire_event
             fire_event("memory_added", user)
@@ -256,6 +258,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         Uses the default model from settings, or falls back to a session's model.
         Returns before and after memory counts.
         """
+        require_privilege(request, "can_manage_memory")
         from routes.model_routes import _load_settings, _normalize_base, build_chat_url
         from core.database import ModelEndpoint
         import json as _json
@@ -320,7 +323,8 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             "ok": "error" not in result,
             "before": result.get("before", 0),
             "after": result.get("after", 0),
-            "removed": result.get("before", 0) - result.get("after", 0),
+            "removed": result.get("removed", result.get("before", 0) - result.get("after", 0)),
+            "error": result.get("error"),
             # True when the audit skipped the LLM because nothing changed
             # since the last tidy. Frontend already says "Already clean"
             # for removed==0, so this is here for future use / debugging.
@@ -334,7 +338,6 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         file: UploadFile = File(...)
     ):
         """Extract memory suggestions from an uploaded file (PDF, TXT, MD, etc.)."""
-        from src.auth_helpers import require_privilege
         require_privilege(request, "can_manage_memory")
 
         endpoint_url = None
@@ -482,6 +485,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
     @router.post("/{memory_id}/pin")
     def pin_memory(request: Request, memory_id: str, pinned: bool = Form(True)):
         """Pin or unpin a memory. Pinned memories are always included in context."""
+        require_privilege(request, "can_manage_memory")
         user = _owner(request)
         all_mem = memory_manager.load_all()
         for i, memory in enumerate(all_mem):
@@ -491,6 +495,105 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 memory_manager.save(all_mem)
                 return {"ok": True, "pinned": pinned}
         raise HTTPException(404, f"Memory item {memory_id} not found")
+
+    @router.get("/summary")
+    def memory_summary(request: Request):
+        user = _owner(request)
+        v2 = getattr(memory_manager, "_v2", None)
+        if not v2:
+            memories = memory_manager.load(owner=user)
+            return {
+                "summary": "\n".join(f"- {m.get('text', '')}" for m in memories[:20]),
+                "highlights": memories[:20],
+            }
+        return v2.get_summary(user)
+
+    @router.get("/summary/history")
+    def memory_summary_history(request: Request):
+        user = _owner(request)
+        v2 = getattr(memory_manager, "_v2", None)
+        return {"history": v2.summary_history(user) if v2 else []}
+
+    @router.post("/summary/restore")
+    async def restore_memory_summary(request: Request):
+        require_privilege(request, "can_manage_memory")
+        user = _owner(request)
+        payload = {}
+        try:
+            payload = await request.json()
+        except Exception:
+            try:
+                form = await request.form()
+                payload = dict(form)
+            except Exception:
+                payload = {}
+        sid = payload.get("summary_id")
+        if not sid:
+            raise HTTPException(400, "summary_id is required")
+        v2 = getattr(memory_manager, "_v2", None)
+        if not v2 or not v2.restore_summary(user, sid):
+            raise HTTPException(404, "Summary version not found")
+        return {"ok": True}
+
+    @router.get("/sources/{response_id}")
+    def get_memory_sources(request: Request, response_id: str):
+        from services.memory.dreamer import response_memory_sources
+
+        return response_memory_sources(response_id, _owner(request))
+
+    @router.post("/sources/feedback")
+    def memory_source_feedback(request: Request, body: dict = Body(...)):
+        require_privilege(request, "can_manage_memory")
+        user = _owner(request)
+        v2 = getattr(memory_manager, "_v2", None)
+        if not v2:
+            raise HTTPException(400, "Memory V2 unavailable")
+        target_type = str(body.get("target_type") or "memory_item")
+        target_id = str(body.get("target_id") or "")
+        feedback = str(body.get("feedback") or "")
+        valid = {"relevant", "not_relevant", "corrected", "deleted", "prioritized", "deprioritized"}
+        if not target_id or feedback not in valid:
+            raise HTTPException(400, "Invalid feedback")
+        if target_type == "memory_item" and not any(m.get("id") == target_id for m in memory_manager.load(owner=user)):
+            raise HTTPException(404, "Memory source not found")
+        if target_type == "memory_item" and feedback == "deleted":
+            if not memory_manager.delete_entry(target_id, owner=user):
+                raise HTTPException(404, "Memory source not found")
+            if memory_vector and memory_vector.healthy:
+                memory_vector.remove(target_id)
+        result = v2.record_feedback(user, target_type, target_id, feedback, str(body.get("note") or ""))
+        return result
+
+    @router.get("/dream/status")
+    def dream_status(request: Request):
+        user = _owner(request)
+        v2 = getattr(memory_manager, "_v2", None)
+        return v2.job_status(user) if v2 else {"status": "unavailable"}
+
+    @router.post("/dream/run")
+    async def dream_run(request: Request):
+        require_privilege(request, "can_manage_memory")
+        user = _owner(request)
+        payload = {}
+        try:
+            payload = await request.json()
+        except Exception:
+            try:
+                form = await request.form()
+                payload = dict(form)
+            except Exception:
+                payload = {}
+        sid = payload.get("session_id") or payload.get("session")
+        if not sid:
+            raise HTTPException(400, "session_id is required")
+        try:
+            sess = session_manager.get_session(sid)
+        except KeyError:
+            raise HTTPException(404, "Session not found")
+        _assert_session_owner(sess, user)
+        from services.memory.dreamer import dream_from_session
+
+        return await dream_from_session(sess, memory_manager, memory_vector, owner=user)
 
     # Wildcard routes MUST come last — otherwise they swallow /import, /search, etc.
     @router.get("/{memory_id}")
@@ -507,6 +610,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
     @router.put("/{memory_id}")
     def update_memory(request: Request, memory_id: str, text: str = Form(...), category: str = Form(None)):
         """Update an existing memory item with new text and optional category."""
+        require_privilege(request, "can_manage_memory")
         user = _owner(request)
         all_mem = memory_manager.load_all()
         for i, memory in enumerate(all_mem):
@@ -521,7 +625,10 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 # Sync vector index (remove old, add updated)
                 if memory_vector and memory_vector.healthy:
                     memory_vector.remove(memory_id)
-                    memory_vector.add(memory_id, text.strip())
+                    try:
+                        memory_vector.add(memory_id, text.strip(), owner=user, kind=all_mem[i].get("kind"))
+                    except TypeError:
+                        memory_vector.add(memory_id, text.strip())
                 return {"ok": True, "message": "Memory updated successfully"}
 
         raise HTTPException(404, f"Memory item {memory_id} not found")
@@ -529,6 +636,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
     @router.delete("/{memory_id}")
     def delete_memory(request: Request, memory_id: str):
         """Delete a memory item by its ID."""
+        require_privilege(request, "can_manage_memory")
         user = _owner(request)
         all_mem = memory_manager.load_all()
 
@@ -538,8 +646,8 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             raise HTTPException(404, f"Memory item {memory_id} not found")
         _verify_memory_owner(target, user)
 
-        all_mem = [m for m in all_mem if m["id"] != memory_id]
-        memory_manager.save(all_mem)
+        if not memory_manager.delete_entry(memory_id, owner=user):
+            raise HTTPException(404, f"Memory item {memory_id} not found")
         # Sync vector index
         if memory_vector and memory_vector.healthy:
             memory_vector.remove(memory_id)

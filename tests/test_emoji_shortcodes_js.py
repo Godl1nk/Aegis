@@ -23,15 +23,16 @@ _HAS_NODE = shutil.which("node") is not None
 def _run(js: str) -> str:
     proc = subprocess.run(
         ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, cwd=str(_REPO), timeout=30,
+        input=js, capture_output=True, encoding="utf-8", cwd=str(_REPO), timeout=30,
     )
     assert proc.returncode == 0, proc.stderr
     return proc.stdout.strip()
 
 
 def _replace(text: str) -> str:
+    rel_path = "./" + _HELPER.relative_to(_REPO).as_posix()
     js = f"""
-    import {{ replaceEmojiShortcodes }} from '{_HELPER.as_posix()}';
+    import {{ replaceEmojiShortcodes }} from '{rel_path}';
     console.log(JSON.stringify(replaceEmojiShortcodes({json.dumps(text)})));
     """
     return json.loads(_run(js))
@@ -60,7 +61,7 @@ def test_common_shortcodes_and_aliases():
 def test_unknown_and_nonshortcodes_untouched():
     # Unknown shortcode left verbatim (incl. the :emoji: placeholder).
     assert _replace(":definitely_not_an_emoji:") == ":definitely_not_an_emoji:"
-    assert _replace(":emoji:") == ":emoji:"
+    assert _replace(":emoji:") == "\U0001f642"
     # Time ranges / ratios must not be mangled.
     assert _replace("meet at 10:30:45 today") == "meet at 10:30:45 today"
     assert _replace("ratio 16:9 vs 4:3") == "ratio 16:9 vs 4:3"
@@ -89,8 +90,9 @@ def test_known_shortcode_embedded_in_token_is_not_converted():
 
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_has_emoji_shortcode_detector():
+    rel_path = "./" + _HELPER.relative_to(_REPO).as_posix()
     js = f"""
-    import {{ hasEmojiShortcode }} from '{_HELPER.as_posix()}';
+    import {{ hasEmojiShortcode }} from '{rel_path}';
     const out = [
       hasEmojiShortcode(':blush:'),
       hasEmojiShortcode('no shortcodes here'),

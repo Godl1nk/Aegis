@@ -340,7 +340,10 @@ async def extract_and_store(
             # it does not catch failures that develop later.)
             if memory_vector and memory_vector.healthy:
                 try:
-                    existing_id = memory_vector.find_similar(fact_text, threshold=0.72)
+                    try:
+                        existing_id = memory_vector.find_similar(fact_text, threshold=0.72, owner=_owner)
+                    except TypeError:
+                        existing_id = memory_vector.find_similar(fact_text, threshold=0.72)
                 except Exception as e:
                     logger.warning(f"Memory dedup (vector) unavailable, using text fallback: {e}")
                     existing_id = None
@@ -382,7 +385,10 @@ async def extract_and_store(
             # write failure must not drop the fact or abort the remaining batch.
             if memory_vector and memory_vector.healthy:
                 try:
-                    memory_vector.add(entry["id"], fact_text)
+                    try:
+                        memory_vector.add(entry["id"], fact_text, owner=_owner, kind=entry.get("kind"))
+                    except TypeError:
+                        memory_vector.add(entry["id"], fact_text)
                 except Exception as e:
                     logger.warning(f"Memory vector add failed for {entry['id']}: {e}")
 
@@ -554,18 +560,22 @@ async def audit_memories(
             return {"before": before_count, "after": before_count, "error": "unsafe_removal"}
 
         # Merge audited entries back with other users' entries
+        final_ids = {e["id"] for e in final_entries}
+        removed_ids = [e["id"] for e in existing if e.get("id") not in final_ids]
         if owner:
             all_entries = memory_manager.load_all()
-            audited_ids = {e["id"] for e in final_entries}
             other_entries = [e for e in all_entries if e.get("owner") != owner and (e.get("owner") is not None)]
             # Also keep legacy entries that weren't part of this audit
             for e in all_entries:
-                if e.get("owner") is None and e["id"] not in audited_ids and e["id"] not in {o["id"] for o in other_entries}:
+                if e.get("owner") is None and e["id"] not in final_ids and e["id"] not in {o["id"] for o in other_entries}:
                     other_entries.append(e)
             saved_entries = final_entries + other_entries
         else:
             saved_entries = final_entries
         memory_manager.save(saved_entries)
+        if owner and removed_ids and hasattr(memory_manager, "delete_entry"):
+            for rid in removed_ids:
+                memory_manager.delete_entry(rid, owner=owner)
         logger.info(
             f"Memory audit complete: {before_count} -> {after_count} entries "
             f"({before_count - after_count} removed/merged)"
@@ -581,7 +591,7 @@ async def audit_memories(
         # if nothing has changed in the meantime.
         _save_tidy_state(memory_manager, owner, _fingerprint_entries(final_entries))
 
-        return {"before": before_count, "after": after_count}
+        return {"before": before_count, "after": after_count, "removed": len(removed_ids)}
 
     except Exception as e:
         logger.error(f"Memory audit failed: {e}")

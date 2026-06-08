@@ -162,7 +162,10 @@ class NativeMemoryProvider(MemoryProvider):
         self.memory_manager.save(memories)
 
         if self._vector_available():
-            self.memory_vector.add(entry["id"], entry["text"])
+            try:
+                self.memory_vector.add(entry["id"], entry["text"], owner=owner, kind=entry.get("kind"))
+            except TypeError:
+                self.memory_vector.add(entry["id"], entry["text"])
 
         return self._to_record(entry)
 
@@ -178,7 +181,11 @@ class NativeMemoryProvider(MemoryProvider):
 
         if self._vector_available():
             hits: List[MemorySearchHit] = []
-            for result in self.memory_vector.search(query, k=top_k):
+            try:
+                vector_results = self.memory_vector.search(query, k=top_k, owner=owner)
+            except TypeError:
+                vector_results = self.memory_vector.search(query, k=top_k)
+            for result in vector_results:
                 if not isinstance(result, dict):
                     continue
                 memory_id = result.get("memory_id")
@@ -239,7 +246,11 @@ class NativeMemoryProvider(MemoryProvider):
         if deleted_id is None:
             return False
 
-        self.memory_manager.save(remaining)
+        if hasattr(self.memory_manager, "delete_entry"):
+            if not self.memory_manager.delete_entry(deleted_id, owner=owner):
+                return False
+        else:
+            self.memory_manager.save(remaining)
         if self._vector_available():
             self.memory_vector.remove(deleted_id)
         return True

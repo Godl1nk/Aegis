@@ -251,6 +251,7 @@
         <div class="memory-tabs">
           <button class="memory-tab active" data-memory-tab="browse"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.5-3 5.7V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.3C6.2 13.5 5 11.4 5 9a7 7 0 0 1 7-7z"/><line x1="10" y1="22" x2="14" y2="22"/></svg>Memories <span id="memory-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span></button>
           <button class="memory-tab" data-memory-tab="skills"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Skills <span id="skills-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span></button>
+          <button class="memory-tab" data-memory-tab="summary"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M4 5h16"/><path d="M4 12h16"/><path d="M4 19h10"/></svg>Summary</button>
           <button class="memory-tab" data-memory-tab="add"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>Add</button>
           <button class="memory-tab" data-memory-tab="settings"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</button>
         </div>
@@ -290,6 +291,25 @@
           </div>
         </div>
         <!-- ── Add tab ── -->
+        <div class="memory-tab-panel hidden" data-memory-panel="summary">
+          <div class="admin-card memory-summary-card">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">
+              <h2 style="margin:0;padding:0;line-height:1;">Memory Summary</h2>
+              <span style="flex:1"></span>
+              <button id="memory-summary-refresh" class="memory-toolbar-btn" title="Refresh summary">Refresh</button>
+              <button id="memory-dream-run" class="memory-toolbar-btn" title="Run Dreaming synthesis for the current chat">Dream now</button>
+            </div>
+            <p class="memory-desc doclib-desc" style="margin-top:6px;">Review what Aegis currently believes is useful long-term context.</p>
+            <div id="memory-dream-status" class="memory-summary-status"></div>
+            <pre id="memory-summary-text" class="memory-summary-text"></pre>
+          </div>
+          <div class="admin-card memory-summary-card">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+              <h2 style="margin:0;padding:0;line-height:1;">Summary History</h2>
+            </div>
+            <div id="memory-summary-history" class="memory-summary-history"></div>
+          </div>
+        </div>
         <div class="memory-tab-panel hidden" data-memory-panel="add">
           <div class="admin-card">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">
@@ -391,6 +411,34 @@
               <label class="admin-switch" style="flex-shrink:0"><input type="checkbox" id="auto-memory-toggle" checked /><span class="admin-slider"></span></label>
             </div>
             <span class="admin-toggle-sub" style="display:block;margin-top:6px">Automatically extract memories from conversations.</span>
+          </div>
+          <div class="admin-card">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+              <h2 style="margin:0">Reference saved memories</h2>
+              <label class="admin-switch" style="flex-shrink:0"><input type="checkbox" id="reference-saved-memories-toggle" checked /><span class="admin-slider"></span></label>
+            </div>
+            <span class="admin-toggle-sub" style="display:block;margin-top:6px">Use memories you explicitly saved or approved in future chats.</span>
+          </div>
+          <div class="admin-card">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+              <h2 style="margin:0">Reference chat history</h2>
+              <label class="admin-switch" style="flex-shrink:0"><input type="checkbox" id="reference-chat-history-toggle" checked /><span class="admin-slider"></span></label>
+            </div>
+            <span class="admin-toggle-sub" style="display:block;margin-top:6px">Use synthesized Dreaming memories from past chats when relevant.</span>
+          </div>
+          <div class="admin-card">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+              <h2 style="margin:0">Dreaming synthesis</h2>
+              <label class="admin-switch" style="flex-shrink:0"><input type="checkbox" id="dream-memory-toggle" checked /><span class="admin-slider"></span></label>
+            </div>
+            <span class="admin-toggle-sub" style="display:block;margin-top:6px">Curate fresher memory summaries in the background from source-grounded observations.</span>
+          </div>
+          <div class="admin-card">
+            <h2 style="margin:0">Dream sources</h2>
+            <span class="admin-toggle-sub" style="display:block;margin-top:6px">Source controls for background synthesis.</span>
+            <div style="display:grid;grid-template-columns:repeat(1,minmax(0,1fr));gap:8px;margin-top:10px">
+              <label class="memory-source-check"><input type="checkbox" id="dream-source-chats-toggle" checked /> Chats</label>
+            </div>
           </div>
           <div class="admin-card">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
@@ -2282,7 +2330,7 @@
 <script type="module" src="/static/js/chatRenderer.js"></script>
 <script type="module" src="/static/js/codeRunner.js"></script>
 <script type="module" src="/static/js/chatStream.js"></script>
-<script type="module" src="/static/js/chat.js?v=20260604s"></script>
+<script type="module" src="/static/js/chat.js"></script>
 <script type="module" src="/static/js/cookbook.js"></script>
 <script src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>

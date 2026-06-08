@@ -1143,6 +1143,21 @@ function _openGeneratedImagePreview(imageUrl, prompt, model, size, quality) {
   document.body.appendChild(modal);
 }
 
+document.addEventListener('click', (e) => {
+  const link = e.target.closest?.('.generated-image-markdown-link');
+  if (!link) return;
+  const imageUrl = safeDisplayImageSrc(link.dataset.imageUrl || link.href || '');
+  if (!imageUrl) return;
+  e.preventDefault();
+  _openGeneratedImagePreview(
+    imageUrl,
+    link.dataset.imagePrompt || link.textContent || 'Generated image',
+    'Generated image',
+    '',
+    ''
+  );
+});
+
 export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId) {
   var esc = uiModule.esc;
   const wrap = document.createElement('div');

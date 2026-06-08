@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 import logging
 from datetime import datetime
@@ -14,8 +15,8 @@ from pydantic import ValidationError
 
 from core.models import ChatMessage
 from src.request_models import ChatRequest
-from src.llm_core import llm_call_async, stream_llm, stream_llm_with_fallback
-from src.agent_loop import _collect_image_context, stream_agent_loop
+from src.llm_core import llm_call_async, llm_call_async_with_fallback, stream_llm, stream_llm_with_fallback
+from src.agent_loop import stream_agent_loop
 from src import agent_runs
 from src.model_context import estimate_tokens
 from src.chat_helpers import coerce_message_and_session
@@ -123,110 +124,7 @@ def _endpoint_cache_contains_model(endpoint, model: str) -> bool:
     return wanted in {str(item).strip() for item in models}
 
 
-def _is_image_generation_session(sess, owner: str | None = None) -> bool:
-    """Whether this chat session should bypass text chat and generate images.
 
-    Model-name prefixes are explicit image models. Endpoint type is only used
-    when the current session endpoint actually matches that image endpoint, and
-    when a populated endpoint model cache includes the selected model. This
-    prevents an image endpoint on the same host from misrouting ordinary text
-    models into the image-generation path.
-    """
-    model = (getattr(sess, "model", "") or "").strip()
-    if any(model.lower().startswith(prefix) for prefix in _IMAGE_MODEL_PREFIXES):
-        return True
-
-    endpoint_url = (getattr(sess, "endpoint_url", "") or "").strip()
-    if not endpoint_url:
-        return False
-
-    db = SessionLocal()
-    try:
-        q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-        if owner:
-            from src.auth_helpers import owner_filter
-            q = owner_filter(q, ModelEndpoint, owner)
-        endpoints = q.all()
-        for endpoint in endpoints:
-            if (getattr(endpoint, "model_type", None) or "llm") != "image":
-                continue
-            if not _session_url_matches_endpoint(endpoint_url, getattr(endpoint, "base_url", "") or ""):
-                continue
-            if _endpoint_cache_contains_model(endpoint, model):
-                return True
-    except Exception:
-        return False
-    finally:
-        db.close()
-    return False
-
-
-_IMAGE_REQUEST_KEYWORDS = (
-    "image", "picture", "photo", "drawing", "illustration", "logo", "poster",
-    "draw", "variation", "variant",
-    "upscale", "background",
-)
-_IMAGE_FOLLOWUP_KEYWORDS = (
-    "fix", "change", "edit", "adjust", "modify", "redo", "make it", "turn it",
-    "words", "text", "letters", "font", "top", "bottom", "left", "right", "color",
-    "brighter", "darker", "off", "wrong", "remove", "add", "another", "variation",
-)
-
-
-def _last_image_generation_event(sess) -> dict:
-    for msg in reversed(getattr(sess, "history", []) or []):
-        if getattr(msg, "role", None) != "assistant":
-            continue
-        meta = getattr(msg, "metadata", None) or {}
-        for ev in reversed(meta.get("tool_events") or []):
-            if isinstance(ev, dict) and ev.get("tool") == "generate_image" and ev.get("image_url"):
-                return ev
-    return {}
-
-
-def _looks_like_image_turn(text: str, att_ids: list[str], sticky_image_context: bool) -> bool:
-    if att_ids:
-        return True
-    t = (text or "").lower().strip()
-    if not t:
-        return sticky_image_context
-    if any(k in t for k in ("normal chat", "chat model", "switch back", "go back")):
-        return False
-    if any(k in t for k in _IMAGE_REQUEST_KEYWORDS):
-        return True
-    return sticky_image_context and any(k in t for k in _IMAGE_FOLLOWUP_KEYWORDS)
-
-
-def _restore_previous_chat_model_if_needed(sess, session_id: str, message: str, att_ids: list[str], owner: str | None) -> bool:
-    if not _is_image_generation_session(sess, owner=owner):
-        return False
-    ev = _last_image_generation_event(sess)
-    prev_model = (ev.get("image_previous_model") or "").strip()
-    prev_url = (ev.get("image_previous_endpoint_url") or "").strip()
-    if not prev_model or not prev_url:
-        return False
-    if _looks_like_image_turn(message, att_ids, sticky_image_context=True):
-        return False
-
-    db = SessionLocal()
-    try:
-        q = db.query(DBSession).filter(DBSession.id == session_id)
-        if owner:
-            q = q.filter(DBSession.owner == owner)
-        db_s = q.first()
-        if not db_s:
-            return False
-        db_s.model = prev_model
-        db_s.endpoint_url = prev_url
-        db_s.headers = {}
-        db.commit()
-    finally:
-        db.close()
-
-    sess.model = prev_model
-    sess.endpoint_url = prev_url
-    sess.headers = {}
-    return True
 
 
 def _recover_empty_session_model(sess, session_id: str, owner: str | None = None) -> bool:
@@ -536,7 +434,7 @@ def setup_chat_routes(
             except Exception:
                 pass
 
-        _restored_chat_model = _restore_previous_chat_model_if_needed(sess, session, message, att_ids, owner)
+
 
         # ------------------------------------------------------------------ #
         # Privilege gates that must fire BEFORE any LLM work / token spend.
@@ -901,59 +799,14 @@ def setup_chat_routes(
             # Send model name early so the frontend can show it during streaming
             _model_suffix = "Research" if do_research else None
             _model_info = {"type": "model_info", "model": sess.model}
-            if _restored_chat_model:
-                _model_info["session_model_changed"] = True
             if _model_suffix:
                 _model_info["suffix"] = _model_suffix
             if ctx.preset.character_name:
                 _model_info["character_name"] = ctx.preset.character_name
             yield f'data: {json.dumps(_model_info)}\n\n'
 
-            if _is_image_generation_session(sess, owner=_user):
-                from src.settings import get_setting
-                if not get_setting("image_gen_enabled", True):
-                    yield f'data: {json.dumps({"delta": "Image generation is disabled by the administrator."})}\n\n'
-                    yield "data: [DONE]\n\n"
-                    _active_streams.pop(session, None)
-                    return
-                from src.ai_interaction import do_generate_image
-                _user_msg = message or ""
-                yield f'data: {json.dumps({"type": "tool_start", "tool": "generate_image", "command": _user_msg[:100]})}\n\n'
-                yield ": heartbeat\n\n"
-                _img_refs = _collect_image_context(ctx.messages, _user_msg)
-                _img_result = await do_generate_image(
-                    f"{_user_msg}\n{sess.model}",
-                    session,
-                    owner=_user,
-                    reference_image_urls=_img_refs,
-                    adopt_model=not incognito,
-                )
-                _img_output = _img_result.get("results", _img_result.get("error", ""))
-                _img_tool_data = {"type": "tool_output", "tool": "generate_image", "command": _user_msg[:100], "output": _img_output, "exit_code": 0 if "error" not in _img_result else 1}
-                if _img_result.get("ui_event"):
-                    _img_tool_data["ui_event"] = _img_result["ui_event"]
-                    _img_tool_data["model"] = _img_result.get("model") or _img_result.get("image_model")
-                    _img_tool_data["endpoint_url"] = _img_result.get("endpoint_url")
-                for _k in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality", "image_previous_model", "image_previous_endpoint_url", "image_previous_endpoint_id"):
-                    if _k in _img_result:
-                        _img_tool_data[_k] = _img_result[_k]
-                yield f'data: {json.dumps(_img_tool_data)}\n\n'
-                _desc = _img_result.get("results", _img_result.get("error", "Image generation complete"))
-                full_response = _desc
-                yield f'data: {json.dumps({"delta": _desc})}\n\n'
-                # Save to session history
-                if not incognito:
-                    _ev = {"round": 1, "tool": "generate_image", "command": _user_msg[:100], "output": _img_output, "exit_code": 0 if "error" not in _img_result else 1}
-                    for _ek in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality", "image_previous_model", "image_previous_endpoint_url", "image_previous_endpoint_id"):
-                        if _img_result.get(_ek):
-                            _ev[_ek] = _img_result[_ek]
-                    sess.add_message(ChatMessage("assistant", full_response, metadata={"tool_events": [_ev], "model": sess.model}))
-                    session_manager.save_sessions()
-                yield f'data: {json.dumps({"type": "metrics", "data": {"total_time": 0, "model": _img_result.get("image_model") or sess.model}})}\n\n'
-                yield "data: [DONE]\n\n"
-                _active_streams.pop(session, None)
-                return
-            elif chat_mode == "chat":
+
+            if chat_mode == "chat":
                 _chat_start = time.time()
                 _answered_by = None  # set if the selected model failed and a fallback answered
                 # ── Chat mode: call stream_llm directly, NO tools, NO document access ──
@@ -1237,7 +1090,7 @@ def setup_chat_routes(
         if rec is None:
             if agent_runs.is_active(session_id):
                 return {"status": "streaming", "detached": True}
-            raise HTTPException(404, "No active stream for this session")
+            return {"status": "idle", "active": False}
         return rec
 
     # ------------------------------------------------------------------ #

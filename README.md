@@ -418,6 +418,161 @@ static/    index.html + app.js + style.css + js/ (modular front-end)
 docs/      landing page (index.html) + preview clips
 ```
 
+### Memory Architecture
+
+Aegis memory is split into explicit user-managed memory, background synthesized
+memory, source-grounded observations, reviewable summaries, and vector search.
+The public `/api/memory` routes keep the older `memory.json`-shaped API so the
+UI, slash commands, Codex integration, and older tools do not need to know which
+backend is active.
+
+The runtime source of truth is **Memory V2** when the app is using the normal
+`data/` directory. `src/memory.py` is the compatibility facade. It exposes the
+legacy `MemoryManager` API, but stores records through `src/memory_v2.py` in the
+SQLite application database. Temporary test directories still use plain JSON so
+tests and one-off scripts do not accidentally mutate the real app database.
+
+Core tables live in `core/database.py`:
+
+| Table | Purpose |
+|---|---|
+| `memory_items` | Saved and synthesized memories shown/retrieved by the app. |
+| `memory_observations` | Source-grounded facts extracted from chats or other inputs. |
+| `memory_summary_versions` | Versioned review summaries of what Aegis knows. |
+| `memory_feedback` | Relevant/not relevant/corrected/deleted/prioritized/deprioritized signals. |
+| `memory_jobs` | Background Dreaming job state, progress, result, and errors. |
+
+`data/memory.json` is still written as a compatibility mirror. On first Memory
+V2 use, existing JSON memories are imported once into `memory_items` with their
+original IDs and metadata where possible (`owner`, `category`, `source`,
+`session_id`, `pinned`, `uses`). If the migration marker exists but the database
+has no memory rows, the importer can re-run so a partially migrated install is
+not stranded.
+
+#### Memory Types
+
+- **Saved memories** are explicit or auto-extracted long-term facts. They use
+  `kind="saved"` and are managed through the existing add/edit/delete/pin/tidy
+  flows.
+- **Synthesized memories** are background Dreaming results. They use
+  `kind="synthesized"` and `source="dream"`. Legacy `save()` calls do not archive
+  synthesized rows; Dreaming owns their lifecycle.
+- **Observations** are evidence rows, not directly injected as top-level memory
+  unless Dreaming promotes them into synthesized items.
+- **Summary versions** are review snapshots. Restoring an older summary marks
+  newer active synthesized memories as archived instead of deleting evidence.
+
+#### Dreaming Process
+
+Dreaming is implemented in `services/memory/dreamer.py`. It is intentionally
+conservative and local-first:
+
+1. A completed non-incognito chat schedules `dream_from_session()` from
+   `routes/chat_helpers.py` when memory, saved-memory reference, chat-history
+   reference, Dreaming, and chat-source toggles are enabled.
+2. The dreamer creates a `memory_jobs` row so status is visible in the Brain
+   summary UI and repeated runs can be deduplicated.
+3. Recent session messages are normalized into text. Obvious durable facts are
+   extracted with the lightweight fallback extractor. Sensitive categories are
+   ignored unless the user explicitly asked Aegis to remember/save them.
+4. Each candidate becomes a `memory_observations` row keyed by owner, source
+   type, source ID, and a stable fingerprint.
+5. New observations are promoted into synthesized `memory_items` with
+   `source_refs` pointing back to the chat and observation.
+6. Synthesized memories are embedded in ChromaDB with owner metadata.
+7. If new items were added, `memory_summary_versions` gets a new active
+   review summary.
+
+The current implementation is heuristic-first. The schema and jobs model are
+designed for richer LLM synthesis later: clustering duplicates, reconciling
+contradictions, scoring confidence, and rebuilding summaries from all sources.
+
+#### Retrieval Process
+
+Memory retrieval is planned in `routes/chat_helpers.py` and executed by
+`src/chat_processor.py`:
+
+1. Per-request gates are evaluated: incognito/Nobody mode, `no_memory`,
+   `memory_enabled`, `reference_saved_memories`, and `reference_chat_history`.
+2. If saved memories are disabled, no memory is injected.
+3. If chat history reference is disabled, synthesized Dreaming memories are
+   filtered out and only saved memories remain.
+4. Pinned memories are always injected when memory is enabled.
+5. Other memories are retrieved with hybrid ranking:
+   - ChromaDB vector search for semantic recall.
+   - Keyword/BM25-style scoring for exact and category-aware matches.
+   - A small recency tiebreaker.
+6. Injected memory IDs are usage-counted and saved in assistant message metadata
+   as `memories_used`, which powers `/api/memory/sources/{response_id}`.
+
+The memory vector store is a shared Chroma collection, but every vector carries
+`owner` and `kind` metadata. Search and near-duplicate checks accept an owner
+filter, and the caller also intersects vector hits with owner-scoped database
+rows before anything reaches the model.
+
+#### Controls And UI
+
+Memory settings are exposed in the Brain modal:
+
+- **Memory enabled**: top-level read/write gate for chat memory behavior.
+- **Reference saved memories**: controls explicit saved-memory recall.
+- **Reference chat history**: controls Dreaming/synthesized memory recall.
+- **Dreaming synthesis**: controls background synthesis.
+- **Dream sources / Chats**: controls whether chat sessions feed Dreaming.
+
+The Summary tab calls:
+
+- `GET /api/memory/summary`
+- `GET /api/memory/summary/history`
+- `POST /api/memory/summary/restore`
+- `GET /api/memory/dream/status`
+- `POST /api/memory/dream/run`
+
+Memory source feedback uses:
+
+- `GET /api/memory/sources/{response_id}`
+- `POST /api/memory/sources/feedback`
+
+All memory mutation routes require the `can_manage_memory` privilege. Read-only
+memory routes remain owner-scoped. Codex/API-token memory writes go through
+`routes/codex_routes.py`, which scope-checks the token and temporarily runs the
+normal memory route as the token owner.
+
+#### Source Lifecycle And Deletion
+
+Deleting a saved memory marks its `memory_items` row deleted and removes its
+vector immediately. Deleting a chat session invalidates related observations
+through `MemoryV2Store.invalidate_source()`, archives those observations, and
+marks synthesized memories that cite them as stale. Feedback with `deleted`
+also marks the target memory deleted and removes the vector.
+
+Memory tidy/audit runs through `services/memory/memory_extractor.py`. It is
+owner-scoped, preserves other users' memories, refuses unsafe over-deletion, and
+returns the exact number of removed rows so the UI can report the real result.
+
+#### Privacy And Incognito
+
+Nobody/incognito mode disables memory read and write for the chat turn. It also
+disables RAG injection, background auto-extraction, Dreaming, and skill
+extraction. Temporary memory suppression can also be requested per call through
+`no_memory`.
+
+Source-derived memory is always owner-scoped. Legacy ownerless rows can be
+claimed for a user during migration/auth flows; otherwise multi-user routes
+verify ownership before edit/delete/pin/source feedback.
+
+#### Operational Notes
+
+- SQLite stores the authoritative Memory V2 rows in `data/app.db`.
+- `data/memory.json` remains a compatibility mirror and import seed.
+- ChromaDB stores memory embeddings in the `odysseus_memories` collection.
+- If ChromaDB or embeddings are unavailable, keyword retrieval and SQLite/JSON
+  storage continue to work; vector add/search failures are logged and degraded.
+- Wiping memory clears legacy JSON, Memory V2 tables, migration state, and the
+  memory vector collection.
+- Python tests for this area are in `tests/test_memory_v2_retrieval.py` and
+  related `tests/test_memory_*` files.
+
 ## Data
 All user data lives in `data/` (gitignored): `app.db` (sessions, messages, documents),
 `memory.json`, `presets.json`, `uploads/`, `personal_docs/`, `chroma/`, `settings.json`.

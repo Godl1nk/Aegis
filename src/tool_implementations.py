@@ -2829,6 +2829,24 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
         return {"error": f"{method} {path} is blocked — it overwrites the whole cookbook state file. Use list_serve_presets / serve_preset / serve_model instead.", "exit_code": 1}
 
     body = args.get("body")
+    lowered_path = path.lower()
+    lowered_body = json.dumps(body, ensure_ascii=False).lower() if body is not None else ""
+    if (
+        method in ("POST", "PUT", "PATCH")
+        and (
+            "/image" in lowered_path
+            or "generate_image" in lowered_path
+            or (
+                "prompt" in lowered_body
+                and any(k in lowered_body for k in ("image", "photo", "picture", "draw", "generate"))
+            )
+        )
+    ):
+        return {
+            "error": "Don't use app_api for image generation. Use the `generate_image` tool directly with JSON args: {\"prompt\":\"...\",\"model\":\"auto\",\"size\":\"1024x1024\",\"quality\":\"high\"}.",
+            "exit_code": 1,
+        }
+
     query = args.get("query") or None
     # Pass owner so the backend impersonates the user — without this,
     # POSTs (notes, calendar, todos, ...) get owner="internal-tool"

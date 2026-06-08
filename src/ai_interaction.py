@@ -1881,38 +1881,124 @@ async def do_generate_image(
 
     ref_files = [_image_ref_to_file(ref, owner=owner) for ref in refs]
     ref_files = [item for item in ref_files if item]
+    if refs and not ref_files:
+        return {"error": "Failed to load reference image(s). The image files may have been deleted or are inaccessible."}
     use_edits_endpoint = bool(ref_files)
-    if use_edits_endpoint and not is_gpt_image:
-        return {"error": f"Image references require a GPT image model; configured model is '{model_id}'."}
 
     logger.info(
         f"Image generation: model={model_id}, size={size}, quality={quality}, "
         f"refs={len(ref_files)}, prompt={prompt[:80]}"
     )
 
+    def _local_image_backend_hint(status_code: int, error_text: str) -> str:
+        if "api.openai.com" in url or status_code < 500:
+            return ""
+        lowered = (error_text or "").lower()
+        if not any(k in lowered for k in ("no result", "no image", "empty response", "oom", "out of memory", "cuda")):
+            return ""
+        return (
+            " The local image backend did not return a final image. If its logs show sampling completed, "
+            "check the decode step too; VAE/CUDA out-of-memory is a common cause. Try a smaller size, "
+            "free VRAM, or move/tiling the VAE decode."
+        )
+
     try:
-        # GPT image models can take 30-120s+ depending on quality
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)) as client:
+        # GPT/OpenAI image models can take 30-120s+ depending on quality
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=900.0, write=30.0, pool=30.0)) as client:
             if use_edits_endpoint:
-                edit_data = {k: str(v) for k, v in payload.items() if k != "n"}
-                edit_data["input_fidelity"] = "high"
-                resp = await client.post(edits_url, data=edit_data, files=ref_files, headers=headers)
+                if is_gpt_image:
+                    edit_data = {k: str(v) for k, v in payload.items() if k != "n"}
+                    edit_data["input_fidelity"] = "high"
+                    resp = await client.post(edits_url, data=edit_data, files=ref_files, headers=headers)
+                elif "api.openai.com" in url:
+                    edit_data = {k: str(v) for k, v in payload.items() if k != "n"}
+                    resp = await client.post(edits_url, data=edit_data, files=ref_files, headers=headers)
+                else:
+                    # Self-hosted/local diffusion img2img
+                    _, (_, content_bytes, _) = ref_files[0]
+                    ref_b64 = base64.b64encode(content_bytes).decode()
+
+                    img2img_payload = {
+                        "image": ref_b64,
+                        "prompt": prompt,
+                        "model": model_id,
+                    }
+                    base_root = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
+                    base_root_no_v1 = base_root[:-3] if base_root.endswith("/v1") else base_root
+
+                    candidates = [
+                        (base_root + "/images/img2img", "json", img2img_payload),
+                        (base_root + "/images/variations", "json", img2img_payload),
+                        (base_root_no_v1 + "/sdapi/v1/img2img", "json_a1111", {
+                            "init_images": [f"data:image/png;base64,{ref_b64}"],
+                            "prompt": prompt,
+                            "denoising_strength": 0.75,
+                            "steps": 30,
+                            "override_settings": {"sd_model_checkpoint": model_id} if model_id else {},
+                        })
+                    ]
+
+                    resp = None
+                    last_err_text = ""
+                    for target_url, kind, pl in candidates:
+                        try:
+                            resp = await client.post(target_url, json=pl, headers=headers)
+                            if resp.status_code == 200:
+                                break
+                            else:
+                                last_err_text = f"{target_url} returned {resp.status_code}: {resp.text[:200]}"
+                        except Exception as e:
+                            last_err_text = f"{target_url} failed: {e}"
+                            continue
+
+                    if not resp or resp.status_code != 200:
+                        endpoint = edits_url
+                        error_text = last_err_text or (resp.text[:500] if resp else "No endpoint responded")
+                        status_code = resp.status_code if resp else 0
+                        hint = _local_image_backend_hint(status_code, error_text)
+                        return {"error": f"Image generation failed ({status_code or 'error'}) for {model_id} at local img2img: {error_text}{hint}"}
             else:
                 resp = await client.post(images_url, json=payload, headers=headers)
 
-            if resp.status_code != 200:
-                error_text = resp.text[:500]
-                try:
-                    err_json = resp.json()
-                    error_text = err_json.get("error", {}).get("message", error_text) if isinstance(err_json.get("error"), dict) else str(err_json.get("error", error_text))
-                except Exception:
-                    pass
-                if not error_text:
-                    error_text = "empty response body"
-                endpoint = edits_url if use_edits_endpoint else images_url
-                return {"error": f"Image generation failed ({resp.status_code}) for {model_id} at {endpoint}: {error_text}"}
+            if not use_edits_endpoint or is_gpt_image or "api.openai.com" in url:
+                if resp.status_code != 200:
+                    error_text = resp.text[:500]
+                    try:
+                        err_json = resp.json()
+                        error_text = err_json.get("error", {}).get("message", error_text) if isinstance(err_json.get("error"), dict) else str(err_json.get("error", error_text))
+                    except Exception:
+                        pass
+                    if not error_text:
+                        error_text = "empty response body"
+                    endpoint = edits_url if use_edits_endpoint else images_url
+                    hint = _local_image_backend_hint(resp.status_code, error_text)
+                    return {"error": f"Image generation failed ({resp.status_code}) for {model_id} at {endpoint}: {error_text}{hint}"}
 
-            data = resp.json()
+            res_json = resp.json()
+            if use_edits_endpoint and not is_gpt_image and "api.openai.com" not in url:
+                # Normalize local diffusion img2img output to OpenAI format: {"data": [{"b64_json": ...}]}
+                img_b64 = None
+                if isinstance(res_json, dict):
+                    if res_json.get("image"):
+                        img_b64 = res_json["image"]
+                    elif res_json.get("images") and isinstance(res_json["images"], list):
+                        img_b64 = res_json["images"][0]
+                        if img_b64.startswith("data:"):
+                            img_b64 = img_b64.split(",", 1)[1]
+                    elif res_json.get("data") and isinstance(res_json["data"], list):
+                        item = res_json["data"][0]
+                        img_b64 = item.get("b64_json") or item.get("url")
+
+                if img_b64:
+                    if img_b64.startswith("http"):
+                        data = {"data": [{"url": img_b64}]}
+                    else:
+                        data = {"data": [{"b64_json": img_b64}]}
+                else:
+                    return {"error": f"Local diffusion endpoint returned no valid image in response: {res_json}"}
+            else:
+                data = res_json
+
             images = data.get("data", [])
             if not images:
                 return {"error": "No images returned from API"}
@@ -1974,31 +2060,20 @@ async def do_generate_image(
             else:
                 return {"error": "Image API returned unexpected format (no b64_json or url)"}
 
-            previous_model_info = {}
-            if adopt_model:
-                previous_model_info = _adopt_image_model_for_session(session_id, url, model_id, headers, owner=owner)
-
             ref_note = f" using {len(ref_files)} reference image(s)" if ref_files else ""
             result = {
                 "results": f"Generated image{ref_note} for: {prompt[:100]}",
-                "ui_event": "switch_model",
                 "image_url": image_url,
                 "image_id": image_id,
                 "image_prompt": prompt,
                 "image_model": model_id,
-                "model": model_id,
-                "endpoint_url": url,
                 "image_size": size,
                 "image_quality": quality,
             }
-            if previous_model_info:
-                result["image_previous_model"] = previous_model_info.get("previous_model")
-                result["image_previous_endpoint_url"] = previous_model_info.get("previous_endpoint_url")
-                result["image_previous_endpoint_id"] = previous_model_info.get("previous_endpoint_id")
             return result
 
     except httpx.TimeoutException:
-        return {"error": "Image generation timed out (300s). The model may be overloaded — try again or use quality=low."}
+        return {"error": "Image generation timed out (900s). The model may be overloaded — try again or use quality=low."}
     except Exception as e:
         return {"error": f"Image generation error: {str(e)}"}
 

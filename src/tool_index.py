@@ -360,6 +360,15 @@ class ToolIndex:
                    "deep dive", "deep research", "find out about", "study up on",
                    "report on", "do research", "look up everything"}):
             {"trigger_research"},
+        # Image generation/editing intent. Keep this in keyword fallback too so
+        # image requests still expose generate_image when embeddings are down.
+        frozenset({"generate image", "generate an image", "generate a image",
+                   "create image", "create an image", "make image",
+                   "make an image", "draw", "render", "paint", "sketch",
+                   "image generation", "generate_image", "image tool",
+                   "image of", "picture of", "photo of", "logo", "poster",
+                   "illustration", "artwork", "wallpaper", "sticker"}):
+            {"generate_image", "edit_image"},
         # Settings-change intent — "change my…/set my…/use X for…/turn on…".
         frozenset({"change my", "set my", "use the voice", "change the voice",
                    "my voice", "tts voice", "search engine", "default model",

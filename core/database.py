@@ -659,6 +659,109 @@ class Memory(Base):
         Index('ix_memories_session', 'session_id', 'timestamp'),  # Composite for session-based queries
     )
 
+
+class MemoryItem(TimestampMixin, Base):
+    """Memory V2 item: explicit saved memory or synthesized dream memory."""
+    __tablename__ = "memory_items"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=True, index=True)
+    text = Column(Text, nullable=False)
+    category = Column(String, default="fact", index=True)
+    source = Column(String, default="user")
+    kind = Column(String, default="saved", index=True)  # saved | synthesized
+    status = Column(String, default="active", index=True)  # active | stale | archived | deleted
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    timestamp = Column(Integer, default=lambda: int(utcnow_naive().timestamp()))
+    uses = Column(Integer, default=0)
+    pinned = Column(Boolean, default=False)
+    priority = Column(Integer, default=0)
+    confidence = Column(String, nullable=True)
+    source_refs = Column(Text, nullable=True)  # JSON list of source descriptors
+    metadata_json = Column(Text, nullable=True)
+
+    session = relationship("Session", backref="memory_items")
+
+    __table_args__ = (
+        Index("ix_memory_items_owner_status", "owner", "status"),
+        Index("ix_memory_items_kind_status", "kind", "status"),
+    )
+
+
+class MemoryObservation(TimestampMixin, Base):
+    """Source-grounded observation used by dreaming synthesis."""
+    __tablename__ = "memory_observations"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=True, index=True)
+    text = Column(Text, nullable=False)
+    category = Column(String, default="fact", index=True)
+    source_type = Column(String, default="chat", index=True)  # chat | file | app | saved_memory
+    source_id = Column(String, nullable=True, index=True)
+    source_label = Column(String, nullable=True)
+    source_timestamp = Column(Integer, nullable=True)
+    fingerprint = Column(String, nullable=False, index=True)
+    status = Column(String, default="active", index=True)
+    confidence = Column(String, nullable=True)
+    metadata_json = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_memory_observations_owner_status", "owner", "status"),
+        Index("ix_memory_observations_fingerprint_owner", "fingerprint", "owner"),
+    )
+
+
+class MemorySummaryVersion(TimestampMixin, Base):
+    """Reviewable memory summary version for one owner."""
+    __tablename__ = "memory_summary_versions"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=True, index=True)
+    summary = Column(Text, nullable=False, default="")
+    highlights_json = Column(Text, nullable=True)
+    item_ids_json = Column(Text, nullable=True)
+    source_refs_json = Column(Text, nullable=True)
+    active = Column(Boolean, default=True, index=True)
+
+    __table_args__ = (
+        Index("ix_memory_summary_owner_active", "owner", "active"),
+    )
+
+
+class MemoryFeedback(TimestampMixin, Base):
+    """User feedback over memory items, observations, or response sources."""
+    __tablename__ = "memory_feedback"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=True, index=True)
+    target_type = Column(String, nullable=False)
+    target_id = Column(String, nullable=False, index=True)
+    feedback = Column(String, nullable=False)  # relevant | not_relevant | corrected | deleted | prioritized | deprioritized
+    note = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_memory_feedback_owner_target", "owner", "target_type", "target_id"),
+    )
+
+
+class MemoryJob(TimestampMixin, Base):
+    """Background dreamer job state."""
+    __tablename__ = "memory_jobs"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=True, index=True)
+    job_type = Column(String, default="dream")
+    status = Column(String, default="queued", index=True)  # queued | running | success | error
+    source_type = Column(String, nullable=True)
+    source_id = Column(String, nullable=True)
+    progress = Column(Integer, default=0)
+    result_json = Column(Text, nullable=True)
+    error = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_memory_jobs_owner_status", "owner", "status"),
+    )
+
 def _migrate_add_last_message_at_column():
     """Add last_message_at to sessions + backfill from the latest message
     timestamp per session (fallback to last_accessed / created_at when a
@@ -1101,6 +1204,8 @@ def _migrate_assign_legacy_owner():
             "scheduled_tasks", "task_runs", "crew_members",
             "gallery_albums", "gallery_people", "user_tool_data",
             "api_tokens", "webhooks",
+            "memory_items", "memory_observations", "memory_summary_versions",
+            "memory_feedback", "memory_jobs",
         ]
         for table in tables:
             try:

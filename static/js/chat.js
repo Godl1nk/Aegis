@@ -23,6 +23,7 @@ import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handle
 import createResearchSynapse from './researchSynapse.js';
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
+  const IMAGE_TIMEOUT_MS = 900000;
   const RESEARCH_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 
   let API_BASE = '';
@@ -85,6 +86,9 @@ import createResearchSynapse from './researchSynapse.js';
   const _resumingStreams = new Set();   // sessionId -> a resumeStream() reader is live (re-attach lock)
   let _streamSessionId = null; // Session ID for the currently active reader loop
   let _lastReaderActivity = 0; // Timestamp of last reader.read() success — used to detect frozen streams
+  let _streamHiddenAt = 0; // Timestamp when an active stream entered document.hidden
+  let _readerActivityAtHide = 0; // Last reader activity captured at hide time
+  let _activeStreamToolName = ''; // Long-running tool currently waiting for output
   let _webLockRelease = null;  // Function to release the Web Lock held during streaming
 
   /** Check if an SSE reader is still actively connected for a session. */
@@ -266,7 +270,7 @@ import createResearchSynapse from './researchSynapse.js';
       abortCurrentRequest(true);  // explicit user Stop → also cancel the detached server run
 
       // Clean up any running agent thread nodes (stop wave animation, remove "running" state)
-      document.querySelectorAll('.agent-thread-node.running').forEach(node => {
+      (currentHolder || document).querySelectorAll('.agent-thread-node.running').forEach(node => {
         if (node._waveInterval) { clearInterval(node._waveInterval); node._waveInterval = null; }
         if (node._elapsedTicker) { clearInterval(node._elapsedTicker); node._elapsedTicker = null; }
         node.classList.remove('running');
@@ -285,7 +289,7 @@ import createResearchSynapse from './researchSynapse.js';
           }
         }
       });
-      document.querySelectorAll('.agent-thread.streaming').forEach(t => t.classList.remove('streaming'));
+      (currentHolder || document).querySelectorAll('.agent-thread.streaming').forEach(t => t.classList.remove('streaming'));
 
       // Clean up any thinking spinners
       document.querySelectorAll('.agent-thinking-dots').forEach(el => {
@@ -507,6 +511,8 @@ import createResearchSynapse from './researchSynapse.js';
     _streamSessionId = streamSessionId;
     const streamQuery = msg;
     _lastReaderActivity = Date.now();
+    _streamHiddenAt = 0;
+    _readerActivityAtHide = 0;
 
     // Acquire Web Lock to hint browser not to discard this tab while streaming
     if (navigator.locks) {
@@ -549,6 +555,7 @@ import createResearchSynapse from './researchSynapse.js';
     // Reset tracking variables at start
     currentAccumulated = '';
     currentHolder = null;
+    let streamingTTS = false;
     
     try {
       // Re-enable auto-scroll when user sends a message
@@ -797,9 +804,11 @@ import createResearchSynapse from './researchSynapse.js';
       const _tState = Storage.loadToggleState();
       const _isAgent = (_tState.mode || 'chat') === 'agent';
 
-      // Timeout: 6 min for research and agent mode, 3 min otherwise
+      // Timeout: 6 min for research and agent mode, 2 min otherwise.
+      // Image generation gets extended after the generate_image tool starts,
+      // because local backends may need to load/swap large models first.
       const timeoutMs = el('research-toggle').checked || _isAgent ? RESEARCH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
-      timeoutId = setTimeout(() => {
+      const abortForResponseTimeout = () => {
         if (!abortCtrl.signal.aborted) {
           timedOut = true;
           abortCtrl._reason = 'timeout';
@@ -813,7 +822,14 @@ import createResearchSynapse from './researchSynapse.js';
           } catch (_) {}
           abortCtrl.abort();
         }
-      }, timeoutMs);
+      };
+      const armResponseTimeout = (ms, force = false) => {
+        if (responseTimeoutCleared && !force) return;
+        if (force) responseTimeoutCleared = false;
+        if (timeoutId) clearTimeout(timeoutId);
+        timeoutId = setTimeout(abortForResponseTimeout, ms);
+      };
+      armResponseTimeout(timeoutMs);
       clearResponseTimeout = () => {
         if (responseTimeoutCleared) return;
         responseTimeoutCleared = true;
@@ -1004,8 +1020,9 @@ import createResearchSynapse from './researchSynapse.js';
       let metrics = null;
       let isThinking = false;
       let thinkingStartTime = null;
+      _activeStreamToolName = '';
       // Streaming TTS: synthesize sentence-by-sentence during streaming
-      const streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
+      streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
       if (streamingTTS) window.aiTTSManager.streamingStart();
       // Multi-bubble agent tracking
       let roundHolder = holder;       // Current AI text bubble (changes per round)
@@ -1044,6 +1061,8 @@ import createResearchSynapse from './researchSynapse.js';
 
       // Tool-aware thinking spinner
       let _lastToolName = '';
+      let _imageGenerationPlaceholder = null;
+      let _preserveImagePlaceholderOnFinalize = false;
       const _searchIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-2px;margin-right:4px"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
       const _toolLabels = {
         'web_search': _searchIcon + 'Searching',
@@ -1092,6 +1111,63 @@ import createResearchSynapse from './researchSynapse.js';
         _thinkMsg.appendChild(_thinkBody);
         document.getElementById('chat-history').appendChild(_thinkMsg);
         uiModule.scrollHistory();
+      }
+
+      function _showImageGenerationPlaceholder(prompt) {
+        const chatBox = document.getElementById('chat-history');
+        if (!chatBox) return null;
+        let displayPrompt = (prompt || '').trim();
+        if (displayPrompt.startsWith('{')) {
+          try {
+            const parsedPrompt = JSON.parse(displayPrompt);
+            if (parsedPrompt && typeof parsedPrompt === 'object' && parsedPrompt.prompt) {
+              displayPrompt = String(parsedPrompt.prompt || '').trim();
+            }
+          } catch (_) {}
+        }
+        const existing = chatBox.querySelector('.generated-image-loading-wrap');
+        if (existing) {
+          chatBox.querySelectorAll('.generated-image-loading-wrap').forEach((node) => {
+            if (node !== existing) node.remove();
+          });
+          const caption = existing.querySelector('.generated-image-loading-prompt');
+          if (caption) {
+            caption.textContent = displayPrompt || caption.textContent || '';
+          } else if (displayPrompt) {
+            const card = existing.querySelector('.generated-image-loading-card');
+            if (card) {
+              const nextCaption = document.createElement('div');
+              nextCaption.className = 'generated-image-loading-prompt';
+              nextCaption.textContent = displayPrompt;
+              card.appendChild(nextCaption);
+            }
+          }
+          _imageGenerationPlaceholder = existing;
+          uiModule.scrollHistory();
+          return existing;
+        }
+        if (_imageGenerationPlaceholder && _imageGenerationPlaceholder.isConnected) {
+          return _imageGenerationPlaceholder;
+        }
+        const wrap = document.createElement('div');
+        wrap.className = 'msg msg-ai generated-image-loading-wrap';
+        const body = document.createElement('div');
+        body.className = 'body';
+        const card = document.createElement('div');
+        card.className = 'generated-image-loading-card';
+        card.innerHTML = '<div class="generated-image-loading-title">Creating image</div><div class="generated-image-loading-grid" aria-hidden="true"></div>';
+        if (displayPrompt) {
+          const caption = document.createElement('div');
+          caption.className = 'generated-image-loading-prompt';
+          caption.textContent = displayPrompt;
+          card.appendChild(caption);
+        }
+        body.appendChild(card);
+        wrap.appendChild(body);
+        chatBox.appendChild(wrap);
+        _imageGenerationPlaceholder = wrap;
+        uiModule.scrollHistory();
+        return wrap;
       }
 
       // Auto-show thinking spinner after text stops streaming
@@ -1384,7 +1460,7 @@ import createResearchSynapse from './researchSynapse.js';
                 const errMsg = json.text || json.error?.message || `Error ${json.status || 'unknown'}`;
                 console.error('Stream error:', errMsg);
                 if (spinner && spinner.element) spinner.destroy();
-                typewriterInto(roundHolder.querySelector('.body'), errMsg);
+                roundHolder.querySelector('.body').innerHTML = markdownModule.mdToHtml(markdownModule.squashOutsideCode(errMsg));
                 break;
               }
               if (json.delta || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
@@ -2009,9 +2085,16 @@ import createResearchSynapse from './researchSynapse.js';
 
                 // Track tool name for contextual spinner labels
                 _lastToolName = json.tool || '';
+                _activeStreamToolName = (json.tool || '').toLowerCase();
+                const cmd = json.command || '';
+                if ((json.tool || '').toLowerCase() === 'generate_image') {
+                  armResponseTimeout(IMAGE_TIMEOUT_MS, true);
+                  _showImageGenerationPlaceholder(cmd);
+                  currentToolBubble = null;
+                  continue;
+                }
 
                 // --- Thread timeline: group tools in a thread container ---
-                const cmd = json.command || '';
                 const chatBox = document.getElementById('chat-history');
                 // Find existing thread to append to — check last few children
                 // (agent_step may insert an empty msg-ai between tool rounds)
@@ -2110,6 +2193,9 @@ import createResearchSynapse from './researchSynapse.js';
 
               } else if (json.type === 'tool_output') {
                 if (_isBg) continue;
+                if ((json.tool || '').toLowerCase() === _activeStreamToolName) {
+                  _activeStreamToolName = '';
+                }
                 // --- Update the current thread node ---
                 if (currentToolBubble) {
                   // Stop wave animation + the per-second cooking ticker
@@ -2169,10 +2255,19 @@ import createResearchSynapse from './researchSynapse.js';
                 // --- Render generated images inline ---
                 if (json.image_url) {
                   const chatBox = document.getElementById('chat-history');
-                  chatBox.appendChild(_buildImageBubble(json.image_url, json.image_prompt, json.image_model, json.image_size, json.image_quality, json.image_id));
+                  const imageBubble = _buildImageBubble(json.image_url, json.image_prompt, json.image_model, json.image_size, json.image_quality, json.image_id);
+                  if (_imageGenerationPlaceholder && _imageGenerationPlaceholder.isConnected) {
+                    _imageGenerationPlaceholder.replaceWith(imageBubble);
+                    _imageGenerationPlaceholder = null;
+                  } else {
+                    chatBox.appendChild(imageBubble);
+                  }
                   uiModule.scrollHistory();
                   // Notify gallery to refresh if open
                   window.dispatchEvent(new CustomEvent('gallery-refresh'));
+                } else if ((json.tool || '').toLowerCase() === 'generate_image' && _imageGenerationPlaceholder && _imageGenerationPlaceholder.isConnected) {
+                  _imageGenerationPlaceholder.remove();
+                  _imageGenerationPlaceholder = null;
                 }
                 // --- Render browser screenshots in tool output ---
                 if (json.screenshot && currentToolBubble) {
@@ -2386,7 +2481,7 @@ import createResearchSynapse from './researchSynapse.js';
       _cancelThinkingTimer();
       _removeThinkingSpinner();
       // Stop any thread pulse animations
-      document.querySelectorAll('.agent-thread.streaming').forEach(t => t.classList.remove('streaming'));
+      (holder || document).querySelectorAll('.agent-thread.streaming').forEach(t => t.classList.remove('streaming'));
       // --- Final render (skip if stream was ever backgrounded or currently in background) ---
       // Remove streaming class from all round bubbles
       holder.classList.remove('streaming');
@@ -2653,7 +2748,32 @@ import createResearchSynapse from './researchSynapse.js';
       if (spinner && spinner.element) spinner.destroy();
       _cancelThinkingTimer();
       _removeThinkingSpinner();
-      document.querySelectorAll('.agent-thread.streaming').forEach(t => t.classList.remove('streaming'));
+      (currentHolder || document).querySelectorAll('.agent-thread.streaming').forEach(t => t.classList.remove('streaming'));
+
+      const _markRunningToolsInterrupted = () => {
+        (holder || document).querySelectorAll('.agent-thread-node.running').forEach(node => {
+          if (node._waveInterval) { clearInterval(node._waveInterval); node._waveInterval = null; }
+          if (node._elapsedTicker) { clearInterval(node._elapsedTicker); node._elapsedTicker = null; }
+          node.classList.remove('running');
+          node.classList.add('error');
+          const wave = node.querySelector('.agent-thread-wave');
+          if (wave) wave.remove();
+          const icon = node.querySelector('.agent-thread-icon');
+          if (icon) icon.textContent = '\u2717';
+          const statusEl = node.querySelector('.agent-thread-status');
+          if (!statusEl) {
+            const header = node.querySelector('.agent-thread-header');
+            if (header) {
+              const s = document.createElement('span');
+              s.className = 'agent-thread-status';
+              s.textContent = 'interrupted';
+              header.appendChild(s);
+            }
+          } else {
+            statusEl.textContent = 'interrupted';
+          }
+        });
+      };
       // Check if this stream was running in background
       const _isBgCatch = (sessionModule.getCurrentSessionId() !== streamSessionId) || _backgroundStreams.has(streamSessionId);
 
@@ -2715,23 +2835,13 @@ import createResearchSynapse from './researchSynapse.js';
             return;
           }
 
-          if (abortReason === 'recovery') {
-            const recoveryMsg = 'Streaming was interrupted after the tab went inactive. Partial output was preserved.';
-            if (holder && !accumulated) {
-              holder.querySelector('.body').innerHTML =
-                `<div style="color: var(--color-error); font-style: italic; padding: 4px 0;">[${recoveryMsg}]</div>`;
-            } else if (holder && accumulated) {
-              const recoveryNote = document.createElement('div');
-              recoveryNote.className = 'stopped-indicator';
-              recoveryNote.innerHTML =
-                `<span style="color: var(--color-error);">[${recoveryMsg}]</span>`;
-              holder.querySelector('.body').appendChild(recoveryNote);
-            }
+          if (abortReason !== 'user_stop') {
+            console.warn('[stream] Local reader aborted without user stop; leaving detached run unmarked.', abortReason || 'client_detach');
             currentAbort = null;
             return;
           }
 
-          // User-initiated stop (or browser navigation abort).
+          // User-initiated stop.
           // Stopped before any text arrived — keep the bubble as a
           // "Cancelled by user" record (so it survives a refresh).
           if (holder && !accumulated) {
@@ -2796,18 +2906,49 @@ import createResearchSynapse from './researchSynapse.js';
           // fire forever on the orphaned node (and auto-recover compounds it per
           // nudge). Safe here: auto-recover's new send is deferred 200ms, so no
           // fresh running nodes exist yet.
-          document.querySelectorAll('.agent-thread-node.running').forEach(node => {
-            if (node._waveInterval) { clearInterval(node._waveInterval); node._waveInterval = null; }
-            if (node._elapsedTicker) { clearInterval(node._elapsedTicker); node._elapsedTicker = null; }
-            node.classList.remove('running');
-          });
+          const _hasActiveTool = !!_activeStreamToolName
+            || !!(_imageGenerationPlaceholder && _imageGenerationPlaceholder.isConnected)
+            || !!(holder && holder.querySelector('.generated-image-loading-wrap, .agent-thread-node.running'));
+          if (!_hasActiveTool) {
+            (holder || document).querySelectorAll('.agent-thread-node.running').forEach(node => {
+              if (node._waveInterval) { clearInterval(node._waveInterval); node._waveInterval = null; }
+              if (node._elapsedTicker) { clearInterval(node._elapsedTicker); node._elapsedTicker = null; }
+              node.classList.remove('running');
+            });
+          }
           // Stream died unexpectedly — the "silently died" case. Re-engage the
           // model immediately (no wait) with a completion handshake, up to the
           // cap. Only auto-recover from connection-class failures; deterministic
           // errors (unsupported tools, 4xx/5xx, parse failures) surface right away
           // instead of burning the nudge budget on a guaranteed-to-fail retry.
-          if (!(_isRecoverableStreamErr(err) && _tryAutoRecover(holder, accumulated, streamSessionId))) {
-            const errorHolder = document.querySelector('.msg-ai:last-of-type .body');
+          const _recoverableStreamErr = _isRecoverableStreamErr(err);
+          if (_recoverableStreamErr && _hasActiveTool) {
+            _preserveImagePlaceholderOnFinalize = !!(_imageGenerationPlaceholder && _imageGenerationPlaceholder.isConnected);
+            console.warn('[stream-monitor] Recoverable stream close during active tool; preserving tool UI and waiting for persisted result.', err);
+            const _pollSessionId = streamSessionId;
+            const _pollDetachedTool = async (attempt = 0) => {
+              if (!_pollSessionId || attempt > 240) return;
+              try {
+                const res = await fetch(`${API_BASE}/api/chat/stream_status/${_pollSessionId}`);
+                const info = res.ok ? await res.json() : null;
+                if (info && info.status === 'streaming') {
+                  setTimeout(() => _pollDetachedTool(attempt + 1), 1500);
+                  return;
+                }
+              } catch (_) {
+                setTimeout(() => _pollDetachedTool(attempt + 1), 1500);
+                return;
+              }
+              if (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId() === _pollSessionId) {
+                sessionModule.selectSession(_pollSessionId);
+              } else if (sessionModule.loadSessions) {
+                sessionModule.loadSessions();
+              }
+            };
+            setTimeout(() => _pollDetachedTool(), 1500);
+          } else if (!(_recoverableStreamErr && _tryAutoRecover(holder, accumulated, streamSessionId))) {
+            _markRunningToolsInterrupted();
+            const errorHolder = holder?.querySelector?.('.body') || document.querySelector('.msg-ai:last-of-type .body');
             if (errorHolder) {
               let errMsg = `Error: ${err.message}`;
               // Add hint for tool-call errors
@@ -2836,6 +2977,11 @@ import createResearchSynapse from './researchSynapse.js';
       const _isBgFinally = (sessionModule.getCurrentSessionId() !== streamSessionId) || _backgroundStreams.has(streamSessionId);
 
       if (!_isBgFinally) {
+        if (!_preserveImagePlaceholderOnFinalize && !_activeStreamToolName && _imageGenerationPlaceholder && _imageGenerationPlaceholder.isConnected) {
+          _imageGenerationPlaceholder.remove();
+          _imageGenerationPlaceholder = null;
+        }
+
         // Reset button to idle state
         updateSubmitButton('idle', submitBtn);
 
@@ -2910,6 +3056,7 @@ import createResearchSynapse from './researchSynapse.js';
         _webLockRelease();
         _webLockRelease = null;
       }
+      _activeStreamToolName = '';
 
       // Refresh session list after a delay (picks up auto-generated names)
       setTimeout(() => {
@@ -2930,6 +3077,9 @@ import createResearchSynapse from './researchSynapse.js';
   // defeating the whole point. Only the Stop button cancels the server run.
   export function abortCurrentRequest(stopServer = false) {
     if (currentAbort) {
+      if (!currentAbort._reason) {
+        currentAbort._reason = stopServer ? 'user_stop' : 'client_detach';
+      }
       currentAbort.abort();
       // Don't set to null here - let catch block handle it
     }
@@ -3521,46 +3671,32 @@ import createResearchSynapse from './researchSynapse.js';
       pre.dataset.btnPosComputed = '1';
     }, true);
 
-    // Tab suspension recovery: when user tabs back in, check if stream froze
+    // Tab suspension monitor. Do not abort on visibility changes: long-running
+    // image/tool calls can be silent for minutes, and browsers can briefly mark
+    // the page hidden for focus/overlay changes. The normal response timeout is
+    // the authoritative failure path.
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState !== 'visible') return;
       if (!isStreaming) return;
 
+      if (document.visibilityState === 'hidden') {
+        _streamHiddenAt = Date.now();
+        _readerActivityAtHide = _lastReaderActivity;
+        return;
+      }
+
+      if (document.visibilityState !== 'visible') return;
+      if (!_streamHiddenAt) return;
+
       // Stream claims to be running — check if reader is actually alive
-      const staleSince = Date.now() - _lastReaderActivity;
+      const now = Date.now();
+      const hiddenFor = now - _streamHiddenAt;
+      const activeBeforeHide = _streamHiddenAt - _readerActivityAtHide;
+      const staleSince = now - _lastReaderActivity;
+      _streamHiddenAt = 0;
+      _readerActivityAtHide = 0;
+      if (hiddenFor < 5000 || activeBeforeHide > 5000) return;
       if (staleSince < 20000) return; // Active recently, probably fine
-
-      // Reader hasn't produced data in 5+ seconds after tab resume.
-      // Give it a short grace period then recover.
-      console.warn('[tab-recovery] Stream appears frozen (no activity for ' + Math.round(staleSince/1000) + 's). Recovering...');
-
-      setTimeout(() => {
-        // Re-check — maybe the reader woke up during the grace period
-        if (!isStreaming) return;
-        const stillStale = Date.now() - _lastReaderActivity;
-        if (stillStale < 5000) return; // Came back to life
-
-        console.warn('[tab-recovery] Stream confirmed dead. Aborting and reloading session.');
-
-        // Abort the frozen stream, but preserve the visible bubble.
-        if (currentAbort) {
-          currentAbort._reason = 'recovery';
-          currentAbort.abort();
-        }
-        isStreaming = false;
-
-        // Release Web Lock
-        if (_webLockRelease) {
-          _webLockRelease();
-          _webLockRelease = null;
-        }
-
-        // Reset UI state
-        var _submitBtn = document.getElementById('submit');
-        updateSubmitButton('idle', _submitBtn);
-        var _msgInput = document.getElementById('message');
-        if (_msgInput) _msgInput.disabled = false;
-      }, 2000); // 2 second grace period
+      console.warn('[stream-monitor] Stream was quiet for ' + Math.round(staleSince / 1000) + 's after visibility resume; leaving it attached.');
     });
 
     // On mobile, fade out welcome text when keyboard opens to prevent overlap

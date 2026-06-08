@@ -124,7 +124,7 @@ _API_AGENT_RULES = """\
 - YOU DECLARE WHEN THE JOB IS DONE — not a timer. Keep taking concrete steps while the task still needs them; don't quit early just because you've made a few calls. Three ways to end a turn: (1) DONE — before declaring it, verify every concrete deliverable the user asked for actually exists or succeeded; then stop calling tools and write the final answer (that IS your "done" signal); (2) BLOCKED — you can't proceed (missing capability, permission denied, unobtainable data), so state plainly what's blocking you and stop; (3) keep going with the single most useful next step. Never trail off mid-task without (1) or (2), and never repeat a call you already ran.
 - Calendar: call `manage_calendar` with `action=list_calendars` FIRST before create/update/delete operations.
 - "Create/add/write a note" / "notes" / "todos" / "remind me to X at <time>" → use `manage_notes`. Do NOT store notes in `manage_memory`; memory is for persistent facts/preferences about the user, not note content. For reminders, include a `due_date`; for todos, use `note_type=checklist` when appropriate. `manage_tasks` is for RECURRING background AI jobs, NOT for one-off user reminders.
-- "Generate/create/make/draw/render/edit an image/picture/photo/art/illustration" → call `generate_image` FIRST with the user's exact request as `prompt`, model `auto`, size `1024x1024`, and quality `high` unless the user specified otherwise. Do NOT rewrite the user's request into a final art prompt when they attach or refer to an image; Aegis passes current/previous images to the image model directly. Do NOT run Python, `app_api`, `list_served_models`, `web_search`, or Cookbook diagnostics first. `generate_image` is the source of truth and uses the configured Image Generation model/endpoint. If it fails, report the exact tool error.
+- "Generate/create/make/draw/render/edit an image/picture/photo/art/illustration" → call `generate_image` FIRST with the user's exact request as `prompt` (or JSON payload), model `auto`, size `1024x1024`, and quality `high` unless the user specified otherwise. For follow-ups ("change X", "make it Y", "edit the Z"), use `reference_image_urls` with the previous image URL and write a complete prompt describing the desired final image. Do NOT rewrite the user's request into a final art prompt when they attach or refer to an image; Aegis passes current/previous images to the image model directly. Do NOT run Python, `app_api`, `list_served_models`, `web_search`, or Cookbook diagnostics first. `generate_image` is the source of truth and uses the configured Image Generation model/endpoint. If it fails, report the exact tool error.
 - "Disable/turn off/enable/turn on <tool>" (shell, search, research, browser, documents, incognito, etc.) → call `ui_control` with `toggle <name> <on|off>`. Aliases accepted: shell→bash, search→web, deepresearch→research, documents→document_editor. NEVER record this as a memory — the user wants the toggle flipped, not a note about preferring it.
 - "Research X" / "do research on X" / "look into Y" / "deep dive on Z" → call `trigger_research` with `topic`. This starts a live job that appears in the Deep Research sidebar (streams progress + final report). **Do NOT use `web_search` for these** — saw the agent do a plain web_search for "do research on X" when the user wanted the deep-research job. "research X" is a deep-research request, not a quick lookup. (web_search is only for a single quick fact mid-task.) Do NOT POST /api/research/start via app_api either — blocked. After starting, tell the user it's running in the Deep Research sidebar. Only if the user explicitly wants it inline/quick should you fall back to web_search.
 - "Open/show <panel>" (documents, library, gallery, email, inbox, sessions, brain/memories, skills, settings, notes, cookbook) → call `ui_control` with `open_panel <name>`. Panel aliases: library/doc/docs/document→documents, images→gallery, mail/inbox/emails→email, chats/history→sessions, memory/memories→brain, preferences→settings, models/serve/serving→cookbook. CRITICAL: "open memory/memories/brain" / "open skills" / "open notes" / "open documents" / "open cookbook" means OPEN THE PANEL — call `ui_control`, NOT a manage/list tool. The "manage_*" tools list contents in chat; `ui_control open_panel` opens the visual modal the user is asking for.
@@ -266,12 +266,11 @@ Suggest changes with explanations (for review/feedback requests).""",
 
     "generate_image": """\
 ```generate_image
-<prompt>
-<model>
-<size>
-<quality>
+<prompt or JSON>
 ```
-Generate an image. Line 1 = description, line 2 = model name or `auto`, line 3 = WxH (e.g. 1024x1024), line 4 = quality. For normal image requests, call this directly; do not probe servers first.""",
+Generate or edit an image. Accepts either a plain prompt (line 1 = description, line 2 = model or `auto`, line 3 = size, line 4 = quality) or JSON: {"prompt": "...", "model": "auto", "size": "1024x1024", "quality": "high", "reference_image_urls": ["..."]}.
+
+When the user wants to MODIFY a previously generated image, include the previous image's URL (from the last generate_image result's `image_url` field) in `reference_image_urls` and describe the full desired result in `prompt` incorporating the requested changes. The image model cannot see the chat — you must describe the complete image, not just the delta.""",
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
@@ -615,7 +614,8 @@ def _collect_image_context(messages: List[Dict], prompt: str, limit: int = 16) -
 
     referential = re.search(
         r"\b(this|that|it|its|same|previous|last|earlier|edit|modify|change|"
-        r"turn|make it|use it|based on|reference|variation|again|another)\b",
+        r"turn|make it|use it|based on|reference|variation|again|another|"
+        r"fix|adjust|redo|brighter|darker|off|wrong|remove|add)\b",
         f"{last_user_text}\n{prompt}",
         re.IGNORECASE,
     )

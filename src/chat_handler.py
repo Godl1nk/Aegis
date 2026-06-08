@@ -284,17 +284,20 @@ class ChatHandler:
         if len(session.history) > MAX_CONTEXT_MESSAGES:
             session.history = session.history[-MAX_CONTEXT_MESSAGES:]
 
-    async def handle_memory_command(self, session, message: str) -> Optional[str]:
+    async def handle_memory_command(self, session, message: str, owner: str = None) -> Optional[str]:
         """Process inline memory commands. Returns response string or None."""
         is_memory_cmd, memory_text = self.memory_manager.process_inline_memory_command(
             message
         )
         if is_memory_cmd and memory_text:
-            mem = self.memory_manager.load()
-            if not self.memory_manager.find_duplicates(memory_text, mem):
-                new_entry = self.memory_manager.add_entry(memory_text)
-                mem.append(new_entry)
-                self.memory_manager.save(mem)
+            user_mem = self.memory_manager.load(owner=owner)
+            if not self.memory_manager.find_duplicates(memory_text, user_mem):
+                new_entry = self.memory_manager.add_entry(memory_text, owner=owner)
+                if getattr(session, "id", None):
+                    new_entry["session_id"] = session.id
+                all_mem = self.memory_manager.load_all()
+                all_mem.append(new_entry)
+                self.memory_manager.save(all_mem)
 
             session.add_message(ChatMessage("user", message))
             session.add_message(

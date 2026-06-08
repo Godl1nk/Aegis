@@ -106,6 +106,16 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         except Exception:
             return False
 
+    def _owns_chat_session(request: Request, session_id: str) -> bool:
+        if session_manager is None:
+            return False
+        try:
+            from routes.session_routes import _verify_session_owner
+            _verify_session_owner(request, session_id, session_manager=session_manager)
+            return True
+        except HTTPException:
+            return False
+
     @router.get("/api/research/active")
     async def research_active(request: Request):
         """List all currently active (running) research tasks."""
@@ -130,10 +140,12 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         user = _require_user(request)
         _validate_session_id(session_id)
         if not _owns_in_memory(session_id, user):
+            if _owns_chat_session(request, session_id):
+                return {"status": "idle", "active": False}
             raise HTTPException(404, "No research found for this session")
         status = research_handler.get_status(session_id)
         if status is None:
-            raise HTTPException(404, "No research found for this session")
+            return {"status": "idle", "active": False}
         return status
 
     @router.post("/api/research/cancel/{session_id}")

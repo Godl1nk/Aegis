@@ -60,8 +60,9 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
         embedding_model = getattr(rag_manager, '_model', None) if rag_manager else None
         memory_vector = MemoryVectorStore(DATA_DIR, embedding_model=embedding_model)
         if memory_vector.healthy:
-            # Rebuild index from existing memories if empty
-            if memory_vector.count() == 0:
+            # Rebuild index from existing memories if empty or if older vectors
+            # are missing owner/kind metadata required by scoped retrieval.
+            if memory_vector.count() == 0 or memory_vector.needs_metadata_rebuild():
                 existing = memory_manager.load()
                 if existing:
                     memory_vector.rebuild(existing)

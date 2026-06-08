@@ -678,25 +678,8 @@ async function initImageSettings() {
   var _endpoints = [];
   if (!modelSel) return;
 
-  function isImageModel(mid) {
-    const lower = String(mid || '').toLowerCase();
-    return lower.includes('gpt-image')
-      || lower.includes('dall-e')
-      || lower.includes('chatgpt-image')
-      || lower.includes('stable-diffusion')
-      || lower.includes('sdxl')
-      || lower.includes('sd-')
-      || lower.includes('sd3')
-      || lower.includes('flux')
-      || lower.includes('pixart')
-      || lower.includes('playground')
-      || lower.includes('kandinsky');
-  }
-
   function imageModelsForEndpoint(ep) {
-    const models = ep && Array.isArray(ep.models) ? ep.models : [];
-    const filtered = models.filter(isImageModel);
-    return filtered.length ? filtered : models;
+    return ep && Array.isArray(ep.models) ? ep.models : [];
   }
 
   function imageEndpoints() {

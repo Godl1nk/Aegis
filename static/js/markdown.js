@@ -36,6 +36,21 @@ function linkHtml(text, url) {
   return `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer">${safeText}</a>`;
 }
 
+function generatedImageLinkHtml(text, url) {
+  const safeUrl = safeLinkUrl(url);
+  const safeText = escapeHtml(text || 'Generated image');
+  if (!safeUrl) return safeText;
+  try {
+    const parsed = new URL(safeUrl, window.location.origin);
+    if (parsed.origin !== window.location.origin || !parsed.pathname.startsWith('/api/generated-image/')) {
+      return linkHtml(text, url);
+    }
+  } catch (_) {
+    return safeText;
+  }
+  return `<a href="${escapeHtml(safeUrl)}" class="generated-image-markdown-link" data-image-url="${escapeHtml(safeUrl)}" data-image-prompt="${safeText}">${safeText}</a>`;
+}
+
 /**
  * Sanitize the raw-HTML fragments that mdToHtml deliberately preserves from
  * the source text — <details> blocks (collapsible agent output) and <a> tags
@@ -373,11 +388,12 @@ function _useSvgEmoji() {
 // The Unicode-emoji → monochrome-SVG pass always runs regardless, so a real 😀
 // in a document still renders as the themed line icon as it always has.
 export function svgifyEmoji(html, opts) {
-  if (!_useSvgEmoji() || !html) return html;
+  if (!html) return html;
+  const useSvgEmoji = _useSvgEmoji();
   const allowShortcodes = !opts || opts.shortcodes !== false;
   // Two reasons to walk the HTML: real Unicode emoji to turn into SVG icons,
   // or `:shortcode:` text the model emitted instead of an emoji (issue #345).
-  const hasUnicode = _EMOJI_RE.test(html);
+  const hasUnicode = useSvgEmoji && _EMOJI_RE.test(html);
   const hasShortcode = allowShortcodes && hasEmojiShortcode(html);
   if (!hasUnicode && !hasShortcode) return html;
   const parts = html.split(/(<[^>]*>)/);   // odd indices = tags
@@ -394,7 +410,7 @@ export function svgifyEmoji(html, opts) {
     // Expand shortcodes to Unicode first, then both they and any pre-existing
     // Unicode emoji get rendered as the same monochrome line icons below.
     if (hasShortcode) seg = replaceEmojiShortcodes(seg);
-    if (_EMOJI_RE.test(seg)) seg = _svgifyText(seg);
+    if (useSvgEmoji && _EMOJI_RE.test(seg)) seg = _svgifyText(seg);
     parts[i] = seg;
   }
   return parts.join('');
@@ -433,7 +449,7 @@ export function processWithThinking(text) {
     html += mdToHtml(content);
   }
 
-  return _useSvgEmoji() ? svgifyEmoji(html) : html;
+  return svgifyEmoji(html);
 }
 
 /**
@@ -505,6 +521,12 @@ export function mdToHtml(src, opts) {
     new RegExp(`(^|[^\\[(])#(${ANCHOR_KIND}-[A-Za-z0-9_-]+)\\b`, 'g'),
     '$1[#$2](#$2)',
   );
+
+  // Generated image markdown should open the same in-app preview as image
+  // bubbles, not navigate to the raw file in a new tab.
+  s = s.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, text, url) => {
+    return generatedImageLinkHtml(text, url);
+  });
 
   // Convert markdown links [text](url) to clickable links
   // Internal #hash links navigate in-page; external links open in new tab
@@ -698,7 +720,7 @@ export function mdToHtml(src, opts) {
     s = s.replace(`___CODE_BLOCK_${index}___`, block);
   });
 
-  return _useSvgEmoji() ? svgifyEmoji(s, opts) : s;
+  return svgifyEmoji(s, opts);
 }
 
 /**

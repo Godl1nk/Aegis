@@ -2662,7 +2662,7 @@ body.bg-pattern-sparkles {
       align-items: center;
       gap: 6px;
       height: 28px;
-      max-width: min(280px, 42vw);
+      max-width: min(360px, calc(100% - 16px));
       padding: 0 8px;
       border: 1px solid color-mix(in srgb, var(--red) 34%, var(--border));
       border-radius: 999px;
@@ -2672,6 +2672,7 @@ body.bg-pattern-sparkles {
       line-height: 1;
       flex: 0 1 auto;
       min-width: 0;
+      overflow: hidden;
     }
     .image-mode-dot {
       width: 6px;
@@ -2684,8 +2685,13 @@ body.bg-pattern-sparkles {
     .image-mode-label {
       font-weight: 600;
       white-space: nowrap;
+      flex: 0 0 auto;
     }
     .image-mode-back {
+      display: block;
+      flex: 1 1 auto;
+      min-width: 0;
+      max-width: 220px;
       border: 0;
       background: transparent;
       color: var(--red);
@@ -2695,7 +2701,6 @@ body.bg-pattern-sparkles {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      min-width: 0;
     }
     .image-mode-back:hover {
       text-decoration: underline;
@@ -5757,6 +5762,127 @@ body.bg-pattern-sparkles {
       margin: 0 auto;
     }
     .generated-image:hover { transform: scale(1.02); }
+    .msg-ai.generated-image-loading-wrap {
+      width: min(620px, 85%);
+      max-width: 85%;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      overflow: visible;
+    }
+    .generated-image-loading-wrap .body {
+      width: 100%;
+      text-align: left;
+      overflow: visible;
+    }
+    .generated-image-loading-card {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      min-height: min(520px, 62vh);
+      padding: 28px 32px 30px;
+      overflow: hidden;
+      border: 1px solid var(--bubble-border, var(--border));
+      border-radius: 18px 18px 18px 0;
+      background:
+        linear-gradient(180deg,
+          color-mix(in srgb, var(--ai-bubble-bg, var(--panel)) 94%, var(--fg) 6%),
+          color-mix(in srgb, var(--ai-bubble-bg, var(--panel)) 86%, var(--bg) 14%));
+      color: var(--fg);
+      text-align: left;
+      box-sizing: border-box;
+      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg) 7%, transparent);
+    }
+    .generated-image-loading-card::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      border-radius: inherit;
+      background: linear-gradient(115deg,
+        transparent 0%,
+        transparent 38%,
+        color-mix(in srgb, var(--accent, var(--red)) 10%, transparent) 50%,
+        transparent 62%,
+        transparent 100%);
+      transform: translateX(-45%);
+      animation: generated-image-sheen 3.6s ease-in-out infinite;
+    }
+    .generated-image-loading-title {
+      position: relative;
+      z-index: 1;
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1.2;
+      color: var(--fg);
+    }
+    .generated-image-loading-title::before {
+      content: '';
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent, var(--red));
+      box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, var(--red)) 16%, transparent);
+      animation: generated-image-pulse 1.4s ease-in-out infinite;
+    }
+    .generated-image-loading-grid {
+      position: absolute;
+      inset: 76px 26px 74px;
+      opacity: 0.86;
+      background-image: radial-gradient(circle, color-mix(in srgb, var(--fg) 22%, transparent) 1.15px, transparent 1.6px);
+      background-size: 18px 18px;
+      mask-image:
+        radial-gradient(ellipse at 20% 22%, #000 0 26%, transparent 54%),
+        radial-gradient(ellipse at 78% 74%, #000 0 24%, transparent 54%);
+      -webkit-mask-image:
+        radial-gradient(ellipse at 20% 22%, #000 0 26%, transparent 54%),
+        radial-gradient(ellipse at 78% 74%, #000 0 24%, transparent 54%);
+      animation: generated-image-dots 2.2s ease-in-out infinite alternate;
+    }
+    .generated-image-loading-prompt {
+      position: relative;
+      z-index: 1;
+      margin-top: auto;
+      color: color-mix(in srgb, var(--fg) 52%, transparent);
+      font-size: 13px;
+      font-style: italic;
+      line-height: 1.4;
+      text-align: center;
+      max-width: 88%;
+      align-self: center;
+    }
+    @keyframes generated-image-dots {
+      from { opacity: 0.42; transform: translate3d(-4px, -2px, 0); }
+      to { opacity: 0.82; transform: translate3d(4px, 2px, 0); }
+    }
+    @keyframes generated-image-sheen {
+      0%, 58% { transform: translateX(-48%); opacity: 0; }
+      72% { opacity: 1; }
+      100% { transform: translateX(48%); opacity: 0; }
+    }
+    @keyframes generated-image-pulse {
+      0%, 100% { transform: scale(0.85); opacity: 0.72; }
+      50% { transform: scale(1); opacity: 1; }
+    }
+    @media (max-width: 768px) {
+      .msg-ai.generated-image-loading-wrap {
+        width: 100% !important;
+        max-width: 100% !important;
+      }
+      .generated-image-loading-card {
+        min-height: min(420px, 58vh);
+        padding: 22px;
+        border-radius: 16px 16px 16px 0;
+      }
+      .generated-image-loading-grid {
+        inset: 66px 18px 70px;
+        background-size: 16px 16px;
+      }
+    }
     .generated-image-caption {
       font-size: 0.8rem;
       opacity: 0.5;
@@ -13832,6 +13958,7 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
 .mcp-tools-list {
   max-height: 200px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 4px 6px;
@@ -13853,6 +13980,8 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
   cursor: pointer;
   border-radius: 3px;
   min-width: 0;
+  min-height: 24px;
+  box-sizing: border-box;
 }
 .mcp-tools-list label > span {
   min-width: 0;
@@ -13891,7 +14020,7 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
   border-radius: 50%;
   border: 1.5px solid color-mix(in srgb, var(--fg) 35%, transparent);
   position: relative;
-  transition: background 0.2s, border-color 0.2s, transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: background 0.2s, border-color 0.2s;
 }
 .adm-check-dot::after {
   content: '';
@@ -13908,10 +14037,9 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
 }
 .adm-model-row:hover .adm-check-dot {
   border-color: var(--accent, var(--red));
-  transform: scale(1.15);
 }
 .adm-model-row:active .adm-check-dot {
-  transform: scale(0.9);
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 78%, var(--fg));
 }
 .adm-cb-hidden:checked + .adm-check-dot {
   background: var(--accent, var(--red));
