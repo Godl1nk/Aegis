@@ -1068,6 +1068,102 @@ def _legacy_whole_image_harmonize(req, source_full):
     return {"image": b64, "elapsed": round(elapsed, 2)}
 
 
+class Img2ImgRequest(BaseModel):
+    image: str  # base64 PNG
+    prompt: str = ""
+    model: str | None = None
+    strength: float = 0.75
+    steps: int = 0
+    size: str = "1024x1024"
+    quality: str = "medium"
+    n: int = 1
+
+
+@app.post("/v1/images/img2img")
+def img2img_image(req: Img2ImgRequest):
+    if _pipe is None:
+        return {"error": "Model not loaded"}
+
+    from PIL import Image as PILImage
+
+    # Decode input image
+    try:
+        img_bytes = base64.b64decode(req.image)
+        source_full = PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
+    except Exception as e:
+        return {"error": f"Invalid image format: {e}"}
+
+    orig_w, orig_h = source_full.size
+    
+    # Parse size if provided
+    try:
+        w, h = req.size.split("x")
+        max_w, max_h = int(w), int(h)
+    except Exception:
+        max_w, max_h = 1024, 1024
+
+    scale = min(max_w / orig_w, max_h / orig_h, 1.0)
+    width = ((int(orig_w * scale) + 63) // 64) * 64
+    height = ((int(orig_h * scale) + 63) // 64) * 64
+    init_image = source_full.resize((width, height), PILImage.LANCZOS)
+    
+    steps = req.steps or (_args.steps or 20)
+    strength = req.strength if req.strength is not None else 0.75
+    strength = max(0.01, min(0.99, strength))
+
+    alt_pipe, alt_type = _get_inpaint_pipe()
+    i2i_pipe = _img2img_pipe if _img2img_pipe else (alt_pipe if alt_type == 'img2img' else None)
+
+    start = time.time()
+    images = []
+    
+    for _ in range(req.n):
+        try:
+            if i2i_pipe:
+                result = i2i_pipe(
+                    prompt=req.prompt, image=init_image,
+                    num_inference_steps=steps, strength=strength, guidance_scale=7.0,
+                )
+            else:
+                result = _pipe(
+                    prompt=req.prompt, image=init_image,
+                    num_inference_steps=steps, strength=strength, guidance_scale=7.0,
+                )
+        except TypeError:
+            # Fallback to txt2img
+            result = _pipe(
+                prompt=req.prompt, width=width, height=height,
+                num_inference_steps=steps, guidance_scale=7.0,
+            )
+
+        img = result.images[0]
+        if (orig_w, orig_h) != (width, height):
+            img = img.resize((orig_w, orig_h), PILImage.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        images.append({"b64_json": b64})
+
+    elapsed = time.time() - start
+    logger.info(f"Img2img done in {elapsed:.1f}s")
+    
+    return {
+        "image": images[0]["b64_json"],
+        "data": images,
+        "created": int(time.time()),
+        "elapsed": round(elapsed, 2)
+    }
+
+
+@app.post("/v1/images/variations")
+def variations_image(req: Img2ImgRequest):
+    if not req.prompt:
+        req.prompt = "high quality, detailed"
+    if req.strength == 0.75:
+        req.strength = 0.6
+    return img2img_image(req)
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "model": _model_id}
