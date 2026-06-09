@@ -285,7 +285,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     }
     // Get current session
     const sessionId = sessionModule.getCurrentSessionId();
-    const session = sessionModule.getSessions().find(s => s.id === sessionId);
+    const session = (sessionModule.getSessions() || []).find(s => s.id === sessionId);
     
     const submitBtn = document.querySelector('.send-btn');
     
@@ -2541,7 +2541,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // Add model name label
                 const newRole = document.createElement('div');
                 newRole.className = 'role';
-                const metaS = sessionModule.getSessions().find(s => s.id === streamSessionId);
+                const metaS = (sessionModule.getSessions() || []).find(s => s.id === streamSessionId);
                 const _roundRequested = holder?._requestedModel || metaS?.model;
                 const _roundActual = holder?._actualModel || _roundRequested;
                 newRole.textContent = _modelRouteLabel(_roundRequested, _roundActual) || '';
@@ -2651,7 +2651,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
       const _isBgFinal = (sessionModule.getCurrentSessionId() !== streamSessionId) || _backgroundStreams.has(streamSessionId);
       if (!_isBgFinal) {
-        finalMeta = sessionModule.getSessions().find(s => s.id === sessionModule.getCurrentSessionId());
+        finalMeta = (sessionModule.getSessions() || []).find(s => s.id === sessionModule.getCurrentSessionId());
         const _finalActualModel = metrics?.model || holder._actualModel || finalMeta?.model;
         const _finalRequestedModel = metrics?.requested_model || holder._requestedModel || finalMeta?.model || _finalActualModel;
         // Prepend character name if set

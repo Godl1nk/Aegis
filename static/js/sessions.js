@@ -1885,7 +1885,7 @@ export function getCurrentSessionId() {
 }
 
 export function getSessions() {
-  return sessions;
+  return sessions || [];
 }
 
 export function getCurrentModel() {
@@ -2241,7 +2241,7 @@ export function clearStreamComplete(sessionId) {
 function _initAllDropdowns() {
   initModelPicker({
     getCurrentSessionId: () => currentSessionId,
-    getSessions: () => sessions,
+    getSessions: () => sessions || [],
     getPendingChat: () => _pendingChat,
     setPendingChat: (v) => { _pendingChat = v; },
     createDirectChat,
