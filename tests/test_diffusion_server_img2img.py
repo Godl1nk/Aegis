@@ -31,7 +31,7 @@ def test_diffusion_server_img2img(monkeypatch):
     monkeypatch.setattr(ds, "_get_inpaint_pipe", lambda: (None, None))
     ds._img2img_pipe = None
     
-    client = TestClient(ds.app)
+    client = TestClient(ds.app, base_url="http://127.0.0.1")
     
     payload = {
         "image": img_b64,
@@ -72,7 +72,7 @@ def test_diffusion_server_variations(monkeypatch):
     monkeypatch.setattr(ds, "_get_inpaint_pipe", lambda: (None, None))
     ds._img2img_pipe = None
     
-    client = TestClient(ds.app)
+    client = TestClient(ds.app, base_url="http://127.0.0.1")
     
     payload = {
         "image": img_b64,
