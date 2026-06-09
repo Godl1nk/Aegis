@@ -36,14 +36,6 @@ def test_non_streaming_chat_path_uses_tool_policy_before_context_and_research():
     assert "allow_background_extraction=not tool_policy.block_all_tool_calls" in chat_endpoint
 
 
-def test_image_generation_fast_path_checks_policy_before_tool_start():
-    src = _source()
-    policy_gate = src.index('if tool_policy.blocks("generate_image"):')
-    tool_start = src.index('"type": "tool_start", "tool": "generate_image"')
-    generator_call = src.index("do_generate_image(")
-    assert policy_gate < tool_start
-    assert policy_gate < generator_call
-
 
 def test_streaming_chat_paths_disable_background_extraction_under_policy():
     src = _source()

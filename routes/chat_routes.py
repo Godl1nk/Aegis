@@ -321,13 +321,9 @@ def setup_chat_routes(
         allow_tool_preprocessing = not tool_policy.block_all_tool_calls
 
         # Inline memory command
-<<<<<<< HEAD
-        memory_response = await chat_handler.handle_memory_command(sess, message, owner=owner)
-=======
         memory_response = None
         if not tool_policy.blocks("manage_memory"):
-            memory_response = await chat_handler.handle_memory_command(sess, message)
->>>>>>> upstream/main
+            memory_response = await chat_handler.handle_memory_command(sess, message, owner=owner)
         if memory_response:
             return {"response": memory_response}
 
