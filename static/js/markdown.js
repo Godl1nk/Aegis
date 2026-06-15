@@ -9,6 +9,8 @@ import { splitTableRow } from './markdown/tableRow.js';
 import { replaceEmojiShortcodes, hasEmojiShortcode } from './emojiShortcodes.js';
 
 var escapeHtml = uiModule.esc;
+const CDOT_COMMAND_RE = /\\(?:cdot|cdotp)\b/g;
+const CDOT_COMMAND_ONLY_RE = /^\\(?:cdot|cdotp)\b$/;
 
 function safeLinkUrl(rawUrl) {
   const url = String(rawUrl || '').trim();
@@ -49,6 +51,34 @@ function generatedImageLinkHtml(text, url) {
     return safeText;
   }
   return `<a href="${escapeHtml(safeUrl)}" class="generated-image-markdown-link" data-image-url="${escapeHtml(safeUrl)}" data-image-prompt="${safeText}">${safeText}</a>`;
+}
+
+function replaceOutsideInlineCode(text, pattern, replacer) {
+  return String(text || '').split(/(`[^`]*`)/g).map(part => {
+    if (part.startsWith('`') && part.endsWith('`')) return part;
+    return part.replace(pattern, replacer);
+  }).join('');
+}
+
+const KATEX_RENDER_OPTIONS = {
+  throwOnError: false,
+  macros: {
+    "\\cdotp": "\\cdot",
+  },
+};
+
+function renderKatexToString(math, options = {}) {
+  return katex.renderToString(String(math || '').trim(), {
+    ...KATEX_RENDER_OPTIONS,
+    ...options,
+  });
+}
+
+function repairKatexCommandErrors(html) {
+  return String(html || '').replace(
+    /<span\b([^>]*\bclass=(["'])[^"']*\bkatex-error\b[^"']*\2[^>]*)>\\(?:cdot|cdotp)<\/span>/gi,
+    '&centerdot;'
+  );
 }
 
 function _isModelEndpointUrl(rawUrl) {
@@ -616,7 +646,7 @@ export function mdToHtml(src, opts) {
       try {
         const raw = math.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
         const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
-        mathBlocks.push(katex.renderToString(raw.trim(), { displayMode: true, throwOnError: false }));
+        mathBlocks.push(renderKatexToString(raw, { displayMode: true }));
         return placeholder;
       } catch (e) { return match; }
     });
@@ -626,7 +656,7 @@ export function mdToHtml(src, opts) {
       try {
         const raw = math.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
         const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
-        mathBlocks.push(katex.renderToString(raw.trim(), { displayMode: false, throwOnError: false }));
+        mathBlocks.push(renderKatexToString(raw, { displayMode: false }));
         return placeholder;
       } catch (e) { return match; }
     });
@@ -635,7 +665,7 @@ export function mdToHtml(src, opts) {
       try {
         const raw = math.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
         const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
-        mathBlocks.push(katex.renderToString(raw.trim(), { displayMode: true, throwOnError: false }));
+        mathBlocks.push(renderKatexToString(raw, { displayMode: true }));
         return placeholder;
       } catch (e) { return match; }
     });
@@ -644,11 +674,12 @@ export function mdToHtml(src, opts) {
       try {
         const raw = math.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
         const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
-        mathBlocks.push(katex.renderToString(raw.trim(), { displayMode: false, throwOnError: false }));
+        mathBlocks.push(renderKatexToString(raw, { displayMode: false }));
         return placeholder;
       } catch (e) { return match; }
     });
   }
+  s = replaceOutsideInlineCode(s, CDOT_COMMAND_RE, '&centerdot;');
 
   // Handle pipe tables
   s = s.replace(/(?:^|\n)([^\n]*\|[^\n]*\|[^\n]*)(?:\n([^\n]*\|[^\n]*\|[^\n]*))*/g, (table) => {
@@ -759,7 +790,7 @@ export function mdToHtml(src, opts) {
     s = s.replace(`___CODE_BLOCK_${index}___`, block);
   });
 
-  return svgifyEmoji(s, opts);
+  return svgifyEmoji(repairKatexCommandErrors(s), opts);
 }
 
 /**
@@ -819,7 +850,8 @@ const markdownModule = {
   extractThinkingBlocks,
   normalizeThinkingMarkup,
   startsWithReasoningPrefix,
-  renderMermaid
+  renderMermaid,
+  repairCdotCommandsInDom
 };
 
 export default markdownModule;
@@ -832,6 +864,60 @@ function initMermaid() {
 }
 window.odysseusInitMermaid = initMermaid;
 initMermaid();
+
+function _repairCdotTextNode(node) {
+  if (!node || node.nodeType !== 3) return;
+  const value = node.nodeValue || '';
+  CDOT_COMMAND_RE.lastIndex = 0;
+  if (!CDOT_COMMAND_RE.test(value)) return;
+  CDOT_COMMAND_RE.lastIndex = 0;
+  const parent = node.parentElement;
+  if (parent?.closest?.('pre, code, textarea, input')) return;
+  const repaired = value.replace(CDOT_COMMAND_RE, '\u00b7');
+  const katexError = parent?.classList?.contains?.('katex-error') ? parent : parent?.closest?.('.katex-error');
+  if (katexError && CDOT_COMMAND_ONLY_RE.test(value.trim()) && document.createTextNode && katexError.replaceWith) {
+    katexError.replaceWith(document.createTextNode(repaired));
+    return;
+  }
+  node.nodeValue = repaired;
+}
+
+export function repairCdotCommandsInDom(root = document.body) {
+  if (!root || typeof document === 'undefined') return;
+  if (root.nodeType === 3) {
+    _repairCdotTextNode(root);
+    return;
+  }
+  if (!root.querySelectorAll || !document.createTreeWalker) return;
+  const showText = typeof NodeFilter !== 'undefined' ? NodeFilter.SHOW_TEXT : 4;
+  const walker = document.createTreeWalker(root, showText);
+  while (walker.nextNode()) _repairCdotTextNode(walker.currentNode);
+}
+
+(function _watchCdotCommands() {
+  if (typeof document === 'undefined' || typeof window === 'undefined' || window._cdotCommandWatcherWired) return;
+  window._cdotCommandWatcherWired = true;
+  const start = () => {
+    const root = document.getElementById?.('chat-history') || document.body;
+    if (!root) return;
+    repairCdotCommandsInDom(root);
+    if (typeof MutationObserver === 'undefined') return;
+    new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type === 'characterData') {
+          repairCdotCommandsInDom(mutation.target);
+          continue;
+        }
+        for (const node of mutation.addedNodes) repairCdotCommandsInDom(node);
+      }
+    }).observe(root, { childList: true, subtree: true, characterData: true });
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start, { once: true });
+  } else {
+    start();
+  }
+})();
 
 // Persist which thinking sections were expanded across page refreshes.
 // IDs are render-generated (Date.now-based) so we key by a stable hash of

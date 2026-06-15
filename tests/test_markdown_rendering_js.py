@@ -18,12 +18,13 @@ def node_available():
         pytest.skip("node binary not on PATH")
 
 
-def _run_markdown_case(markdown: str, render_expr: str = "mod.mdToHtml(input)"):
+def _run_markdown_case(markdown: str, render_expr: str = "mod.mdToHtml(input)", katex_expr: str = "null"):
     script = textwrap.dedent(
         r"""
         import fs from 'node:fs';
 
-        globalThis.window = { location: { origin: 'http://localhost' }, katex: null };
+        globalThis.window = { location: { origin: 'http://localhost' }, katex: __KATEX_EXPR__ };
+        globalThis.katex = globalThis.window.katex;
         globalThis.document = {
           readyState: 'loading',
           addEventListener() {},
@@ -77,7 +78,7 @@ def _run_markdown_case(markdown: str, render_expr: str = "mod.mdToHtml(input)"):
         const input = JSON.parse(process.argv[1]);
         console.log(JSON.stringify({ html: __RENDER_EXPR__ }));
         """
-    ).replace("__RENDER_EXPR__", render_expr)
+    ).replace("__RENDER_EXPR__", render_expr).replace("__KATEX_EXPR__", katex_expr)
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script, json.dumps(markdown)],
         cwd=_REPO,
@@ -185,3 +186,97 @@ def test_dotted_python_import_paths_are_not_autolinked(node_available):
     assert 'href="https://imblearn.com' not in html
     assert 'href="https://sklearn.me' not in html
     assert 'href="https://example.com/docs"' in html
+
+
+def test_bare_cdot_commands_render_without_math_delimiters(node_available):
+    html = _run_markdown_case(
+        "c_p = 468 J/kg\\cdotp\u00b0C, k = 13.4 W/m\\cdot\u00b0C and `\\cdot` stays code",
+        katex_expr="{ renderToString() { return '<span class=\"katex-error\">\\\\cdotp</span>'; } }",
+    )
+
+    assert "kg&centerdot;\u00b0C" in html
+    assert "m&centerdot;\u00b0C" in html
+    assert "katex-error" not in html
+    assert "<code>\\cdot</code>" in html
+
+
+def test_cdotp_inside_math_is_normalized_before_katex(node_available):
+    html = _run_markdown_case(
+        "$c_p = 468 J/kg\\cdotp{}^\\circ C$",
+        katex_expr="{ renderToString(math, options) { if (options?.macros?.['\\\\cdotp'] !== '\\\\cdot') throw new Error('missing cdotp macro'); return '<span class=\"katex\">' + math.replace('\\\\cdotp', options.macros['\\\\cdotp']) + '</span>'; } }",
+    )
+
+    assert "\\cdot" in html
+    assert "\\cdotp" not in html
+
+
+def test_katex_error_span_for_cdot_is_repaired(node_available):
+    html = _run_markdown_case(
+        "$J/kg\\cdot{}^\\circ C$",
+        katex_expr="{ renderToString() { return '<span class=\"katex-error\" style=\"color:#cc0000\" title=\"x\">\\\\cdot</span>'; } }",
+    )
+
+    assert "&centerdot;" in html
+    assert "katex-error" not in html
+    assert "\\cdot" not in html
+
+
+def test_dom_cdot_repair_handles_cached_text_nodes(node_available):
+    result = _run_markdown_case(
+        "",
+        """(() => {
+          const node = {
+            nodeType: 3,
+            nodeValue: 'J/kg\\\\cdot C and W/m\\\\cdotp C',
+            parentElement: { closest() { return false; } },
+          };
+          document.createTreeWalker = () => ({
+            currentNode: null,
+            _done: false,
+            nextNode() {
+              if (this._done) return false;
+              this._done = true;
+              this.currentNode = node;
+              return true;
+            },
+          });
+          mod.repairCdotCommandsInDom({ nodeType: 1, querySelectorAll() { return []; } });
+          return node.nodeValue;
+        })()""",
+    )
+
+    assert result == "J/kg\u00b7 C and W/m\u00b7 C"
+
+
+def test_dom_cdot_repair_replaces_cached_katex_error_span(node_available):
+    result = _run_markdown_case(
+        "",
+        """(() => {
+          const replaced = [];
+          const parent = {
+            classList: { contains(name) { return name === 'katex-error'; } },
+            closest() { return null; },
+            replaceWith(node) { replaced.push(node.nodeValue); },
+          };
+          const node = {
+            nodeType: 3,
+            nodeValue: '\\\\cdot',
+            parentElement: parent,
+          };
+          document.createTextNode = (value) => ({ nodeType: 3, nodeValue: value });
+          document.createTreeWalker = () => ({
+            currentNode: null,
+            _done: false,
+            nextNode() {
+              if (this._done) return false;
+              this._done = true;
+              this.currentNode = node;
+              return true;
+            },
+          });
+          mod.repairCdotCommandsInDom({ nodeType: 1, querySelectorAll() { return []; } });
+          return replaced[0];
+        })()""",
+    )
+
+    assert result == "\u00b7"
