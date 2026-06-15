@@ -3074,16 +3074,20 @@ def setup_email_routes():
     async def get_email_urgency_state(owner: str = Depends(require_user)):
         from pathlib import Path as _P
         import json as _json
+        empty = {"total_unread": 0, "total_urgent": 0, "max_score": 0, "per_uid": {}}
         _slug = "".join(c if (c.isalnum() or c in "-_.@") else "_" for c in (owner or "default"))
         path = _P(DATA_DIR) / f"email_urgency_state_{_slug}.json"
         if not path.exists():
-            return {"total_unread": 0, "total_urgent": 0, "max_score": 0, "per_uid": {}}
+            return empty
         try:
             data = _json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {"total_unread": 0, "total_urgent": 0, "max_score": 0, "per_uid": {}}
+        except Exception as e:
+            logger.warning(f"Failed to read email urgency state for {owner or 'default'}: {e}")
+            return empty
         # Drop `notified_uids` from the payload — it's an internal scheduler
         # debounce, not UI-relevant.
+        if not isinstance(data, dict):
+            return empty
         data.pop("notified_uids", None)
         return data
 

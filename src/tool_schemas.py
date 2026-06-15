@@ -193,7 +193,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "model": {"type": "string", "description": "Model name, model@endpoint, or auto. Defaults to auto."},
                     "size": {"type": "string", "description": "Image size, e.g. 1024x1024. Defaults to 1024x1024."},
                     "quality": {"type": "string", "enum": ["low", "medium", "high", "auto"], "description": "Generation quality. Defaults to high for user-facing requests."},
-                    "reference_image_urls": {"type": "array", "items": {"type": "string"}, "description": "Optional existing images to use as references for image-to-image/edit requests. Usually omit this; Aegis auto-adds the current uploaded image or clearly referenced previous generated image."}
+                    "reference_image_urls": {"type": "array", "items": {"type": "string"}, "description": "Deprecated for direct generate_image calls. Omit for fresh generation; use ai_edit_image when the user wants to modify an existing image."}
                 },
                 "required": ["prompt"]
             }
@@ -1011,6 +1011,24 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "ai_edit_image",
+            "description": "Edit an image using AI. Describe what changes you want. If the user attached or previously generated an image, you do NOT need to provide image_id — it is auto-resolved from the conversation. Just describe the desired changes in prompt.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "image_id": {"type": "string", "description": "Gallery image ID or upload ID of the image to edit"},
+                    "prompt": {"type": "string", "description": "Description of the desired result. Be specific about what to change — the model cannot see the original, so describe the full image you want."},
+                    "model": {"type": "string", "description": "Model name or auto. Defaults to configured image model."},
+                    "size": {"type": "string", "description": "Output size, e.g. 1024x1024. Defaults to original image size."},
+                    "denoising_strength": {"type": "number", "description": "Denoising strength (0.0 to 1.0) indicating how much of the original image should be rewritten. Default is 0.65. Use lower values (0.2-0.3) to keep more of the original, and higher values to make bigger changes."},
+                },
+                "required": ["prompt"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "trigger_research",
             "description": "Start a deep research task on a topic. Returns a task ID for tracking.",
             "parameters": {
@@ -1285,7 +1303,6 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             "model": args.get("model", "auto") or "auto",
             "size": args.get("size", "1024x1024") or "1024x1024",
             "quality": args.get("quality", "high") or "high",
-            "reference_image_urls": args.get("reference_image_urls") or [],
         })
     elif tool_type == "create_document":
         parts = [args.get("title", "Untitled")]

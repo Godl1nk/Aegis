@@ -741,7 +741,11 @@ async function initTeacherModel() {
 async function initImageSettings() {
   const epSel = el('set-imgEpSelect');
   const modelSel = el('set-imgModelSelect');
+  const editEpSel = el('set-imgEditEpSelect');
+  const editModelSel = el('set-imgEditModelSelect');
   const qualSel = el('set-imgQualitySelect');
+  const formatSel = el('set-imgPromptFormatSelect');
+  const templateInput = el('set-imgPromptTemplate');
   const msg = el('set-imgSettingsMsg');
   const enabledToggle = el('set-imgEnabledToggle');
   const configWrap = modelSel ? modelSel.closest('div[style*="flex-direction"]') : null;
@@ -771,30 +775,37 @@ async function initImageSettings() {
     return { model: spec.slice(0, idx).trim(), endpointName: spec.slice(idx + 1).trim() };
   }
 
-  function fillEndpoints(selectedId) {
-    if (!epSel) return;
-    while (epSel.options.length) epSel.remove(0);
+  function fillEndpoints(selectElem, selectedId) {
+    if (!selectElem) return;
+    const previous = selectedId !== undefined ? selectedId : selectElem.value;
+    while (selectElem.options.length) selectElem.remove(0);
     const blank = document.createElement('option');
     blank.value = '';
     blank.textContent = 'Auto-detect';
-    epSel.appendChild(blank);
+    selectElem.appendChild(blank);
     imageEndpoints().forEach(function(ep) {
       const opt = document.createElement('option');
       opt.value = ep.id;
       opt.textContent = ep.name + ((ep.online || String(ep.model_type || '').toLowerCase() === 'image') ? '' : ' (offline)');
-      epSel.appendChild(opt);
+      selectElem.appendChild(opt);
     });
-    if (selectedId && Array.from(epSel.options).some(function(o) { return String(o.value) === String(selectedId); })) epSel.value = selectedId;
+    if (previous && Array.from(selectElem.options).some(function(o) { return String(o.value) === String(previous); })) {
+      selectElem.value = previous;
+    } else {
+      selectElem.value = '';
+    }
   }
 
-  function fillModels(selectedModel) {
-    while (modelSel.options.length) modelSel.remove(0);
+  function fillModels(targetModelSel, targetEpSel, selectedModel, blankLabel = 'Auto-detect') {
+    if (!targetModelSel) return;
+    const previous = selectedModel !== undefined ? selectedModel : targetModelSel.value;
+    while (targetModelSel.options.length) targetModelSel.remove(0);
     const blank = document.createElement('option');
     blank.value = '';
-    blank.textContent = 'Auto-detect';
-    modelSel.appendChild(blank);
+    blank.textContent = blankLabel;
+    targetModelSel.appendChild(blank);
 
-    const endpoints = epSel && epSel.value ? [endpointById(epSel.value)].filter(Boolean) : imageEndpoints();
+    const endpoints = targetEpSel && targetEpSel.value ? [endpointById(targetEpSel.value)].filter(Boolean) : imageEndpoints();
     const seen = new Set();
     endpoints.forEach(function(ep) {
       const models = imageModelsForEndpoint(ep);
@@ -804,19 +815,23 @@ async function initImageSettings() {
         seen.add(key);
         const opt = document.createElement('option');
         opt.value = mid;
-        opt.textContent = epSel && epSel.value ? String(mid).split('/').pop() : `${String(mid).split('/').pop()} · ${ep.name}`;
-        modelSel.appendChild(opt);
+        opt.textContent = targetEpSel && targetEpSel.value ? String(mid).split('/').pop() : `${String(mid).split('/').pop()} · ${ep.name}`;
+        targetModelSel.appendChild(opt);
       });
     });
-    if (selectedModel && Array.from(modelSel.options).some(function(o) { return o.value === selectedModel; })) {
-      modelSel.value = selectedModel;
+    if (previous && Array.from(targetModelSel.options).some(function(o) { return o.value === previous; })) {
+      targetModelSel.value = previous;
+    } else {
+      targetModelSel.value = '';
     }
   }
 
   try {
     _endpoints = await _fetchModelEndpoints();
-    fillEndpoints('');
-    fillModels('');
+    fillEndpoints(epSel, '');
+    fillEndpoints(editEpSel, '');
+    fillModels(modelSel, epSel, '');
+    fillModels(editModelSel, editEpSel, '', 'Same as generation');
   } catch (e) { console.warn('Failed to load endpoints for image settings', e); }
   try {
     const settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
@@ -826,9 +841,19 @@ async function initImageSettings() {
       const match = imageEndpoints().find(function(ep) { return String(ep.name || '').toLowerCase() === spec.endpointName.toLowerCase(); });
       if (match) epSel.value = match.id;
     }
-    fillModels(spec.model || '');
-    if (settings.image_quality) qualSel.value = settings.image_quality;
-    if (enabledToggle) enabledToggle.checked = settings.image_gen_enabled === true;
+    fillModels(modelSel, epSel, spec.model || '');
+
+    const editSpec = splitImageSpec(settings.image_edit_model || '');
+    if (editEpSel && editSpec.endpointName) {
+      const match = imageEndpoints().find(function(ep) { return String(ep.name || '').toLowerCase() === editSpec.endpointName.toLowerCase(); });
+      if (match) editEpSel.value = match.id;
+    }
+    fillModels(editModelSel, editEpSel, editSpec.model || '', 'Same as generation');
+
+    if (settings.image_quality && qualSel) qualSel.value = settings.image_quality;
+    if (settings.image_prompt_format && formatSel) formatSel.value = settings.image_prompt_format;
+    if (settings.image_prompt_json_template && templateInput) templateInput.value = settings.image_prompt_json_template;
+    if (enabledToggle) enabledToggle.checked = settings.image_gen_enabled !== false;
   } catch (e) { console.warn('Failed to load settings', e); }
 
   function syncImgDisabled() {
@@ -842,21 +867,78 @@ async function initImageSettings() {
   async function saveSettings() {
     try {
       const ep = epSel && epSel.value ? endpointById(epSel.value) : null;
-      const modelSpec = modelSel.value && ep ? `${modelSel.value}@${ep.name}` : modelSel.value;
+      const modelSpec = modelSel && modelSel.value && ep ? `${modelSel.value}@${ep.name}` : (modelSel ? modelSel.value : '');
+      const editEp = editEpSel && editEpSel.value ? endpointById(editEpSel.value) : null;
+      const editModelSpec = editModelSel && editModelSel.value && editEp ? `${editModelSel.value}@${editEp.name}` : (editModelSel ? editModelSel.value : '');
+      const promptFormatVal = formatSel ? formatSel.value : 'auto';
+      const promptTemplateVal = templateInput ? templateInput.value : '';
       await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_gen_enabled: enabledToggle ? enabledToggle.checked : true, image_model: modelSpec, image_quality: qualSel.value }) });
-      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2000);
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+        body: JSON.stringify({
+          image_gen_enabled: enabledToggle ? enabledToggle.checked : true,
+          image_model: modelSpec,
+          image_edit_model: editModelSpec || '',
+          image_quality: qualSel ? qualSel.value : 'medium',
+          image_prompt_format: promptFormatVal,
+          image_prompt_json_template: promptTemplateVal
+        })
+      });
+      if (msg) {
+        msg.textContent = 'Saved';
+        msg.style.color = 'var(--fg)';
+        setTimeout(() => { msg.textContent = ''; }, 2000);
+      }
+    } catch (e) {
+      if (msg) {
+        msg.textContent = 'Failed to save';
+        msg.style.color = 'var(--red)';
+      }
+    }
   }
-  if (epSel) epSel.addEventListener('change', function() { fillModels(''); saveSettings(); });
-  modelSel.addEventListener('change', saveSettings);
-  qualSel.addEventListener('change', saveSettings);
+  if (epSel) epSel.addEventListener('change', function() { fillModels(modelSel, epSel, ''); saveSettings(); });
+  if (modelSel) modelSel.addEventListener('change', saveSettings);
+  if (editEpSel) editEpSel.addEventListener('change', function() { fillModels(editModelSel, editEpSel, '', 'Same as generation'); saveSettings(); });
+  if (editModelSel) editModelSel.addEventListener('change', saveSettings);
+  if (qualSel) qualSel.addEventListener('change', saveSettings);
+  if (formatSel) formatSel.addEventListener('change', saveSettings);
+  if (templateInput) templateInput.addEventListener('change', saveSettings);
+  const resetBtn = el('set-imgPromptTemplateReset');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      const defaultTemplate = `{
+  "high_level_description": "{{clean_prompt}}",
+  "style_description": {
+    "aesthetics": "{{aesthetics}}",
+    "lighting": "{{lighting}}",
+    "medium": "{{medium}}",
+    "color_palette": {{palette}}
+  },
+  "compositional_deconstruction": {
+    "canvas": "{{canvas}}",
+    "background": "{{background}}",
+    "elements": [
+      {
+        "type": "obj",
+        "bbox": {{bbox}},
+        "desc": "{{main_subject_description}}"
+      }
+    ]
+  }
+}`;
+      if (templateInput) {
+        templateInput.value = defaultTemplate;
+        saveSettings();
+      }
+    });
+  }
   if (enabledToggle) enabledToggle.addEventListener('change', function() { syncImgDisabled(); saveSettings(); });
 
   _registerAiEndpointRefresh(function(endpoints) {
     _endpoints = endpoints;
-    fillEndpoints(epSel ? epSel.value : '');
-    fillModels(modelSel.value);
+    fillEndpoints(epSel, epSel ? epSel.value : '');
+    fillEndpoints(editEpSel, editEpSel ? editEpSel.value : '');
+    fillModels(modelSel, epSel, modelSel ? modelSel.value : '');
+    fillModels(editModelSel, editEpSel, editModelSel ? editModelSel.value : '', 'Same as generation');
   });
 }
 

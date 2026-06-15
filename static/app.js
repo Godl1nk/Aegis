@@ -3154,8 +3154,8 @@ function initializeEventListeners() {
         // Check if already submitting before triggering form submission
         const form = el('chat-form');
         if (form) {
-         const submitBtn = form.querySelector('button[type="submit"]');
-         if (submitBtn) submitBtn.click();
+          const submitBtn = document.querySelector('.send-btn') || form.querySelector('button[type="submit"]');
+          if (submitBtn) submitBtn.click();
         }
       }
     });
@@ -3334,7 +3334,10 @@ function initializeEventListeners() {
         // Now submit the form (the /new command handler will process it)
         setTimeout(() => {
           const form = el('chat-form');
-          if (form) form.querySelector('button[type="submit"]').click();
+          if (form) {
+            const submitBtn = document.querySelector('.send-btn') || form.querySelector('button[type="submit"]');
+            if (submitBtn) submitBtn.click();
+          }
         }, 0);
       }
     };

@@ -1769,7 +1769,10 @@ body.bg-pattern-sparkles {
       border-radius: 4px;
       transition: background 0.08s, border-color 0.08s, color 0.08s, opacity 0.08s;
     }
-    input:hover, textarea:hover, button:hover, select:hover {
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]):hover,
+    textarea:hover,
+    button:hover,
+    select:hover {
       border-color: var(--fg);
       background-color: var(--panel);
     }
@@ -6065,6 +6068,22 @@ body.bg-pattern-sparkles {
       0%, 100% { transform: scale(0.85); opacity: 0.72; }
       50% { transform: scale(1); opacity: 1; }
     }
+    .generated-image-loading-card.cancelled::after {
+      animation: none !important;
+      display: none !important;
+    }
+    .generated-image-loading-card.cancelled .generated-image-loading-title {
+      color: color-mix(in srgb, var(--fg) 60%, transparent) !important;
+    }
+    .generated-image-loading-card.cancelled .generated-image-loading-title::before {
+      background: color-mix(in srgb, var(--fg) 35%, transparent) !important;
+      box-shadow: none !important;
+      animation: none !important;
+    }
+    .generated-image-loading-card.cancelled .generated-image-loading-grid {
+      animation: none !important;
+      opacity: 0.15 !important;
+    }
     @media (max-width: 768px) {
       .msg-ai.generated-image-loading-wrap {
         width: 100% !important;
@@ -6096,8 +6115,28 @@ body.bg-pattern-sparkles {
       align-items: center;
       gap: 6px;
       font-size: 12px;
+      line-height: 16px;
       color: var(--fg);
       opacity: 0.78;
+      user-select: none;
+      cursor: pointer;
+    }
+    .memory-source-check input[type="checkbox"] {
+      flex: 0 0 auto;
+      margin: 0;
+    }
+    .memory-modal-content label:not(.admin-switch) input[type="checkbox"] {
+      width: 13px;
+      height: 13px;
+      padding: 0;
+      margin: 0;
+      background: transparent;
+      border: 1px solid color-mix(in srgb, var(--fg) 45%, transparent);
+      accent-color: var(--red);
+    }
+    .memory-modal-content label:not(.admin-switch) input[type="checkbox"]:hover {
+      background: transparent;
+      border-color: color-mix(in srgb, var(--fg) 65%, transparent);
     }
     .memory-summary-status {
       min-height: 16px;
@@ -10556,7 +10595,7 @@ details a:hover {
 #memory-modal .memory-tab-panel[data-memory-panel="settings"] .admin-card {
   transition: opacity 0.15s, border-color 0.15s, background 0.15s;
 }
-#memory-modal .memory-tab-panel[data-memory-panel="settings"] .admin-card:has(.admin-switch input:not(:checked)) {
+#memory-modal .memory-tab-panel[data-memory-panel="settings"] .admin-card.pref-off {
   opacity: 0.55;
   border-color: color-mix(in srgb, var(--fg) 8%, transparent);
   background: color-mix(in srgb, var(--fg) 2%, transparent);

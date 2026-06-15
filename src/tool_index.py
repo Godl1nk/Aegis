@@ -42,6 +42,11 @@ ALWAYS_AVAILABLE = frozenset({
     "ask_user",
     # Write back to the active plan (tick steps done / revise) during execution.
     "update_plan",
+    # Image generation/editing are core features — must be available on every
+    # turn so the model can handle image requests without RAG having to
+    # retrieve them by embedding similarity.
+    "generate_image",
+    "ai_edit_image",
 })
 
 # Tools that the Personal Assistant always has access to during scheduled
@@ -83,6 +88,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "update_document": "Replace the entire active document content. ONLY for full rewrites (>50% changed). Do not use for small edits — use edit_document instead.",
     "suggest_document": "Suggest changes to the active document with explanations. For code review, proofreading, feedback requests.",
     "generate_image": "Generate an AI image from a text prompt. Use directly for generate/create/draw image requests. Model may be auto; do not probe Cookbook/Python first.",
+    "ai_edit_image": "Edit an existing gallery image using AI img2img. Pass the image ID and describe what changes to make. The model rewrites the image based on your prompt.",
     "chat_with_model": "Send a message to a different AI model. Compare responses, get specialized help, delegate tasks.",
     "ask_teacher": "Ask a more capable model for help with a difficult problem. Escalate complex tasks.",
     "pipeline": "Run a multi-step AI pipeline with multiple models. Chain tasks together in sequence.",
@@ -413,6 +419,16 @@ class ToolIndex:
                    "image of", "picture of", "photo of", "logo", "poster",
                    "illustration", "artwork", "wallpaper", "sticker"}):
             {"generate_image", "edit_image"},
+        # AI-powered image editing (img2img) — "edit this photo", "change the
+        # background", "make it darker", etc. The user provides an existing
+        # image and describes desired changes.
+        frozenset({"edit this", "edit the image", "edit the photo",
+                   "change the image", "change the photo",
+                   "modify the image", "modify the photo",
+                   "make it darker", "make it brighter", "make it bluer",
+                   "remove the", "add a", "replace the",
+                   "turn it into", "transform", "restyle", "restyle this"}):
+            {"ai_edit_image"},
         # Settings-change intent — "change my…/set my…/use X for…/turn on…".
         frozenset({"change my", "set my", "use the voice", "change the voice",
                    "my voice", "tts voice", "search engine", "default model",

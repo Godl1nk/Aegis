@@ -1685,10 +1685,10 @@ async def llm_call_async(
                 raise HTTPException(502, f"POST {target_url} failed after {max_retries} attempts: {e}")
             await asyncio.sleep(LLMConfig.RETRY_DELAY)
 
-async def stream_llm(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
-                     max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
-                     timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
-                     tools: Optional[List[Dict]] = None, session_id: Optional[str] = None):
+async def _stream_llm_impl(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
+                           max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
+                           timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
+                           tools: Optional[List[Dict]] = None, session_id: Optional[str] = None):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -2268,6 +2268,40 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
     except Exception as e:
         logger.error(f"Stream error: {e}")
         yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502})}\n\n'
+
+
+async def stream_llm(*args, **kwargs):
+    """Stream LLM SSE and keep proxy/client connection warm while upstream is silent."""
+    import contextlib
+
+    heartbeat_s = 15.0
+    agen = _stream_llm_impl(*args, **kwargs)
+    pending = asyncio.create_task(agen.__anext__())
+    try:
+        while True:
+            done, _ = await asyncio.wait({pending}, timeout=heartbeat_s)
+            if not done:
+                yield ": heartbeat\n\n"
+                continue
+            try:
+                chunk = pending.result()
+            except StopAsyncIteration:
+                return
+            yield chunk
+            pending = asyncio.create_task(agen.__anext__())
+    except asyncio.CancelledError:
+        pending.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pending
+        try:
+            await agen.aclose()
+        finally:
+            raise
+    finally:
+        if not pending.done():
+            pending.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pending
 
 
 def _summarize_stream_error(err_chunk: Optional[str]) -> str:

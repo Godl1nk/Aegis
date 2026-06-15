@@ -18,7 +18,7 @@ from src.upload_limits import (
     GALLERY_UPLOAD_MAX_BYTES,
     GALLERY_TRANSFORM_UPLOAD_MAX_BYTES,
 )
-from src.constants import GENERATED_IMAGES_DIR
+from src.constants import GENERATED_IMAGES_DIR, IMAGE_EDIT_MAX_SIDE
 from src.optional_deps import patch_realesrgan_torchvision_compat
 
 from routes.gallery_helpers import (
@@ -141,6 +141,36 @@ async def _fetch_result_image_b64(url: str) -> Optional[str]:
         if ir.status_code == 200:
             return base64.b64encode(ir.content).decode()
     return None
+
+
+def _fit_diffusion_size(width: int, height: int, max_side: int = IMAGE_EDIT_MAX_SIDE, multiple: int = 16) -> tuple[int, int]:
+    """Cap image-model work size while preserving aspect ratio."""
+    try:
+        width = int(width)
+        height = int(height)
+    except Exception:
+        return max_side, max_side
+    if width <= 0 or height <= 0:
+        return max_side, max_side
+    scale = min(max_side / max(width, height), 1.0)
+    target_w = max(multiple, int(round(width * scale / multiple)) * multiple)
+    target_h = max(multiple, int(round(height * scale / multiple)) * multiple)
+    return target_w, target_h
+
+
+def _fit_diffusion_size_from_b64(image_b64: str, max_side: int = IMAGE_EDIT_MAX_SIDE) -> tuple[int, int]:
+    try:
+        import base64 as _base64
+        from io import BytesIO
+        from PIL import Image as _Image
+
+        raw = str(image_b64 or "")
+        if "," in raw and raw.lstrip().startswith("data:"):
+            raw = raw.split(",", 1)[1]
+        with _Image.open(BytesIO(_base64.b64decode(raw))) as im:
+            return _fit_diffusion_size(im.width, im.height, max_side=max_side)
+    except Exception:
+        return max_side, max_side
 
 
 def setup_gallery_routes() -> APIRouter:
@@ -387,7 +417,7 @@ def setup_gallery_routes() -> APIRouter:
 
         # Use img2img endpoint if available, otherwise upscale via canvas on client
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(timeout=900) as client:
                 resp = await client.post(f"{base_url}/images/upscale", json={
                     "image": b64, "scale": scale,
                 })
@@ -414,6 +444,7 @@ def setup_gallery_routes() -> APIRouter:
 
         image_bytes = await read_upload_limited(file, GALLERY_TRANSFORM_UPLOAD_MAX_BYTES, "Image upload")
         b64 = base64.b64encode(image_bytes).decode()
+        target_w, target_h = _fit_diffusion_size_from_b64(b64)
 
         db = SessionLocal()
         try:
@@ -429,10 +460,11 @@ def setup_gallery_routes() -> APIRouter:
             base_url += "/v1"
 
         try:
-            async with httpx.AsyncClient(timeout=180) as client:
+            async with httpx.AsyncClient(timeout=900) as client:
                 resp = await client.post(f"{base_url}/images/generations", json={
                     "prompt": prompt,
                     "image": b64,
+                    "size": f"{target_w}x{target_h}",
                     "strength": strength,
                     "response_format": "b64_json",
                 })
@@ -1173,7 +1205,7 @@ def setup_gallery_routes() -> APIRouter:
             }
             headers = {"Authorization": f"Bearer {api_key}"}
             try:
-                async with httpx.AsyncClient(timeout=120) as client:
+                async with httpx.AsyncClient(timeout=900) as client:
                     r = await client.post(f"{base}/images/edits", headers=headers, data=data, files=files)
                     if r.status_code != 200:
                         raise HTTPException(r.status_code, f"OpenAI edit failed: {r.text[:300]}")
@@ -1214,7 +1246,7 @@ def setup_gallery_routes() -> APIRouter:
                         logger.warning(f"Inpaint compose failed, returning raw: {comp_err}")
                         return {"image": raw_b64}
             except httpx.TimeoutException:
-                raise HTTPException(504, "OpenAI inpaint timed out (120s)")
+                raise HTTPException(504, "OpenAI inpaint timed out (900s)")
 
         # Self-hosted diffusion server path
         try:
@@ -1222,13 +1254,13 @@ def setup_gallery_routes() -> APIRouter:
             # supports multiple models per process. Harmless if ignored.
             if chosen_model:
                 body["model"] = chosen_model
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(timeout=900) as client:
                 r = await client.post(f"{base}/images/inpaint", json=body)
                 if r.status_code != 200:
                     raise HTTPException(r.status_code, f"Inpaint failed: {r.text[:200]}")
                 return r.json()
         except httpx.TimeoutException:
-            raise HTTPException(504, "Inpaint request timed out (120s)")
+            raise HTTPException(504, "Inpaint request timed out (900s)")
         except HTTPException:
             raise
         except Exception as e:
@@ -1318,6 +1350,8 @@ def setup_gallery_routes() -> APIRouter:
         seam_fix = max(0.0, min(1.0, seam_fix))
         body_mask_b64 = body.get("body_mask") or body.get("mask")
         seam_mask_b64 = body.get("seam_mask")
+        target_w, target_h = _fit_diffusion_size_from_b64(image_b64)
+        target_size = f"{target_w}x{target_h}"
 
         # OpenAI's image API has no img2img mode — its edits endpoint
         # regenerates pixels from the prompt rather than preserving the
@@ -1341,6 +1375,7 @@ def setup_gallery_routes() -> APIRouter:
             "prompt": prompt,
             "color_match": color_match,
             "seam_fix": seam_fix,
+            "max_side": IMAGE_EDIT_MAX_SIDE,
             # Legacy field names so an un-restarted older diffusion server
             # still recognises the body mask. The new server prefers
             # `body_mask` over `mask`, so sending both is safe.
@@ -1357,12 +1392,14 @@ def setup_gallery_routes() -> APIRouter:
             ("/images/img2img", "json", {
                 "image": image_b64,
                 "prompt": prompt,
+                "size": target_size,
                 "strength": strength,
                 **({"model": model} if model else {}),
             }),
             ("/images/variations", "json", {
                 "image": image_b64,
                 "prompt": prompt,
+                "size": target_size,
                 "strength": strength,
                 **({"model": model} if model else {}),
             }),
@@ -1370,8 +1407,9 @@ def setup_gallery_routes() -> APIRouter:
             ("/sdapi/v1/img2img", "json_a1111", {
                 "init_images": [f"data:image/png;base64,{image_b64}"],
                 "prompt": prompt,
+                "width": target_w,
+                "height": target_h,
                 "denoising_strength": strength,
-                "steps": 30,
                 **({"override_settings": {"sd_model_checkpoint": model}} if model else {}),
             }),
         ]
@@ -1385,9 +1423,9 @@ def setup_gallery_routes() -> APIRouter:
 
         last_err = None
         # Cold-start SDXL inpaint can take 60-90s on first request (loading
-        # weights to GPU). 240s gives headroom for both that and a full
+        # weights to GPU). 900s gives headroom for both that and a full
         # 1024×1024 inference pass on slower setups.
-        async with httpx.AsyncClient(timeout=240) as client:
+        async with httpx.AsyncClient(timeout=900) as client:
             for path, kind, payload in candidates:
                 target = base_root + path if path.startswith("/sdapi") else base + path
                 try:
@@ -1429,7 +1467,7 @@ def setup_gallery_routes() -> APIRouter:
                 except httpx.ConnectError as e:
                     raise HTTPException(502, f"Can't reach diffusion server at {base}: {e}")
                 except httpx.TimeoutException:
-                    raise HTTPException(504, "Harmonize timed out (240s) — restart the diffusion server or lower Color match / disable Seam fix")
+                    raise HTTPException(504, "Harmonize timed out (900s) — restart the diffusion server or lower Color match / disable Seam fix")
         raise HTTPException(502,
             f"None of the img2img routes worked on {base}. "
             f"Last response: {last_err or 'unknown'}. "

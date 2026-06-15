@@ -44,5 +44,5 @@ def test_recognizes_multimodal_families_without_vision_in_name():
 
 def test_new_keywords_do_not_overmatch_text_models():
     # The added families must not flag their text-only siblings.
-    for name in ["gemma2:9b", "gemma:7b", "llama3.3", "mistral-small", "phi-3-mini"]:
+    for name in ["gemma2:9b", "gemma:7b", "llama3.3", "mistral-small", "phi-3-mini", "qwen3.6-35b", "qwen3-7b"]:
         assert not is_vision_model(name), f"{name!r} should not be flagged as vision"

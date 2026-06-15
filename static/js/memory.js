@@ -333,6 +333,10 @@ async function syncPrefNumber(elementId, prefKey, defaultVal) {
 async function syncPrefToggle(elementId, prefKey, onMsg, offMsg, dimBelow = true) {
   const toggle = document.getElementById(elementId);
   if (!toggle) return;
+  const prefCard = toggle.closest('.admin-card');
+  const syncPrefCardState = () => {
+    if (prefCard) prefCard.classList.toggle('pref-off', !toggle.checked);
+  };
   try {
     const res = await fetch(`${window.location.origin}/api/prefs/${prefKey}`);
     if (res.ok) {
@@ -342,10 +346,12 @@ async function syncPrefToggle(elementId, prefKey, onMsg, offMsg, dimBelow = true
   } catch (e) {
     console.error(`Failed to load ${prefKey} pref:`, e);
   }
+  syncPrefCardState();
   if (dimBelow) syncToggleDim(toggle);
   if (!toggle.dataset.bound) {
     toggle.dataset.bound = '1';
     toggle.addEventListener('change', async () => {
+      syncPrefCardState();
       if (dimBelow) syncToggleDim(toggle);
       try {
         const res = await fetch(`${window.location.origin}/api/prefs/${prefKey}`, {
@@ -356,6 +362,7 @@ async function syncPrefToggle(elementId, prefKey, onMsg, offMsg, dimBelow = true
         if (!res.ok) {
           console.error(`PUT ${prefKey} returned ${res.status}`);
           toggle.checked = !toggle.checked; // revert
+          syncPrefCardState();
           if (dimBelow) syncToggleDim(toggle);
           showError('Failed to save preference');
           return;
@@ -364,6 +371,7 @@ async function syncPrefToggle(elementId, prefKey, onMsg, offMsg, dimBelow = true
       } catch (e) {
         console.error(`Failed to save ${prefKey} pref:`, e);
         toggle.checked = !toggle.checked; // revert
+        syncPrefCardState();
         if (dimBelow) syncToggleDim(toggle);
         showError('Failed to save preference');
       }

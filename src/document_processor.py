@@ -12,6 +12,8 @@ from src.llm_core import llm_call
 
 logger = logging.getLogger(__name__)
 
+VISION_ANALYSIS_TIMEOUT_SECONDS = 300
+
 MAX_INLINE_ATTACHMENT_CHARS = 24000
 MIN_INLINE_ATTACHMENT_SLICE = 500
 
@@ -372,7 +374,13 @@ def analyze_image_with_vl_result(image_path: str, owner: str | None = None) -> d
         last_err = None
         for i, (_url, _model, _headers) in enumerate([c for c in _vl_candidates if c and c[0] and c[1]]):
             try:
-                description = llm_call(_url, _model, vl_messages, headers=_headers, timeout=120)
+                description = llm_call(
+                    _url,
+                    _model,
+                    vl_messages,
+                    headers=_headers,
+                    timeout=VISION_ANALYSIS_TIMEOUT_SECONDS,
+                )
                 logger.info("VL analysis complete with model %s", _model)
                 return {"text": description, "model": _model}
             except Exception as e:

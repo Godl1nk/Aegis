@@ -25,8 +25,8 @@ import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
 import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composerArrowUpRecall.js';
 
-  const RESEARCH_TIMEOUT_MS = 360000;
-  const DEFAULT_TIMEOUT_MS = 120000;
+  const RESEARCH_TIMEOUT_MS = 900000;
+  const DEFAULT_TIMEOUT_MS = 300000;
   const IMAGE_TIMEOUT_MS = 900000;
   const RESEARCH_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 
@@ -114,6 +114,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   let _readerActivityAtHide = 0; // Last reader activity captured at hide time
   let _activeStreamToolName = ''; // Long-running tool currently waiting for output
   let _webLockRelease = null;  // Function to release the Web Lock held during streaming
+  let _submitButtonSwapTimer = null;
 
   /** Check if an SSE reader is still actively connected for a session. */
   function hasActiveStream(sessionId) {
@@ -131,6 +132,15 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   var _buildImageBubble = chatRenderer.buildImageBubble;
   var getModelCost = chatRenderer.getModelCost;
   var getImageCost = chatRenderer.getImageCost;
+
+  function _markImagePlaceholdersCancelled(label = 'Cancelled') {
+    document.querySelectorAll('.generated-image-loading-wrap').forEach((wrap) => {
+      const card = wrap.querySelector('.generated-image-loading-card');
+      if (card) card.classList.add('cancelled');
+      const titleEl = wrap.querySelector('.generated-image-loading-title');
+      if (titleEl) titleEl.textContent = label;
+    });
+  }
 
   // stripToolBlocks and roleTimestamp now in chatRenderer.js
   var stripToolBlocks = chatRenderer.stripToolBlocks;
@@ -222,6 +232,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   function updateSubmitButton(state, submitBtn) {
     if (!submitBtn) return;
 
+    if (_submitButtonSwapTimer) {
+      clearTimeout(_submitButtonSwapTimer);
+      _submitButtonSwapTimer = null;
+    }
+
     if (state === 'streaming') {
       // Clear any pending transitions from + → arrow swap
       submitBtn.classList.remove('anim-spin', 'anim-spin-swap', 'anim-land', 'mic-mode', 'newchat-mode', 'newchat-expanded', 'recording');
@@ -235,7 +250,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       // Wait for the launch keyframe to finish (0.3s) before swapping the
       // arrow out for the stop icon — otherwise the swap happens mid-flight
       // and the user sees nothing fly out.
-      setTimeout(() => {
+      _submitButtonSwapTimer = setTimeout(() => {
+        _submitButtonSwapTimer = null;
+        if (submitBtn.dataset.mode !== 'streaming') return;
         submitBtn.innerHTML = _stopSvg;
         submitBtn.classList.remove('anim-launch');
         void submitBtn.offsetWidth;
@@ -250,7 +267,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     } else if (state === 'idle') {
       submitBtn.dataset.mode = '';
       delete submitBtn.dataset.phase;
-      submitBtn.classList.remove('recording');
+      submitBtn.classList.remove('recording', 'anim-launch', 'anim-land');
       isStreaming = false;
       _stopStallWatchdog();
       // Defer to global updater which handles mic/newchat/send modes
@@ -577,6 +594,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     let timeoutId = null;
     let responseTimeoutCleared = false;
     let clearResponseTimeout = () => {};
+    let _imageGenerationPlaceholder = null;
+    let _preserveImagePlaceholderOnFinalize = false;
     const clearProcessingProbe = () => {
       if (processingProbeTimer) {
         clearTimeout(processingProbeTimer);
@@ -855,10 +874,17 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       const _tState = Storage.loadToggleState();
       const _isAgent = (_tState.mode || 'chat') === 'agent';
 
-      // Timeout: 6 min for research and agent mode, 2 min otherwise.
+      const hasImageAttachment = Array.isArray(_pendingAttachInfo)
+        && _pendingAttachInfo.some((att) => String(att?.mime || '').startsWith('image/'));
+
+      // Timeout: long for research/agent/image work, 5 min otherwise.
       // Image generation gets extended after the generate_image tool starts,
       // because local backends may need to load/swap large models first.
-      const timeoutMs = el('research-toggle').checked || _isAgent ? RESEARCH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
+      // Image attachments can also spend minutes in pre-stream vision analysis
+      // on CPU, before the backend has sent the first SSE chunk.
+      const timeoutMs = el('research-toggle').checked || _isAgent || hasImageAttachment
+        ? RESEARCH_TIMEOUT_MS
+        : DEFAULT_TIMEOUT_MS;
       const abortForResponseTimeout = () => {
         if (!abortCtrl.signal.aborted) {
           timedOut = true;
@@ -1114,8 +1140,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
       // Tool-aware thinking spinner
       let _lastToolName = '';
-      let _imageGenerationPlaceholder = null;
-      let _preserveImagePlaceholderOnFinalize = false;
+      _imageGenerationPlaceholder = null;
+      _preserveImagePlaceholderOnFinalize = false;
       const _searchIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-2px;margin-right:4px"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
       const _toolLabels = {
         'web_search': 'Searching',
@@ -1169,7 +1195,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         uiModule.scrollHistory();
       }
 
-      function _showImageGenerationPlaceholder(prompt) {
+      function _showImageGenerationPlaceholder(prompt, toolName = '') {
         const chatBox = document.getElementById('chat-history');
         if (!chatBox) return null;
         let displayPrompt = (prompt || '').trim();
@@ -1211,7 +1237,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         body.className = 'body';
         const card = document.createElement('div');
         card.className = 'generated-image-loading-card';
-        card.innerHTML = '<div class="generated-image-loading-title">Creating image</div><div class="generated-image-loading-grid" aria-hidden="true"></div>';
+        const isEdit = (toolName || '').toLowerCase() === 'ai_edit_image';
+        const title = isEdit ? 'Editing image' : 'Creating image';
+        card.innerHTML = `<div class="generated-image-loading-title">${title}</div><div class="generated-image-loading-grid" aria-hidden="true"></div>`;
         if (displayPrompt) {
           const caption = document.createElement('div');
           caption.className = 'generated-image-loading-prompt';
@@ -1225,6 +1253,50 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         uiModule.scrollHistory();
         return wrap;
       }
+
+      function _cancelImageGenerationPlaceholder() {
+        _markImagePlaceholdersCancelled();
+        if (_imageGenerationPlaceholder && _imageGenerationPlaceholder.isConnected) {
+          const card = _imageGenerationPlaceholder.querySelector('.generated-image-loading-card');
+          if (card) {
+            card.classList.add('cancelled');
+          }
+          const titleEl = _imageGenerationPlaceholder.querySelector('.generated-image-loading-title');
+          if (titleEl) {
+            titleEl.textContent = 'Cancelled';
+          }
+          _imageGenerationPlaceholder = null;
+        }
+      }
+
+      function _isImageToolName(toolName) {
+        const lower = (toolName || '').toLowerCase();
+        return lower === 'generate_image' || lower === 'ai_edit_image' ||
+          lower.includes('generate_image') || lower.includes('edit_image') ||
+          lower.includes('image_gen');
+      }
+
+      function _imagePayloadFromToolOutput(json) {
+        if (!json) return null;
+        const out = String(json.output || '');
+        const urlMatch = out.match(/(?:https?:\/\/[^\s)\]]+)?\/api\/generated-image\/[A-Za-z0-9._-]+/);
+        const imageUrl = json.image_url || (urlMatch ? urlMatch[0].trim() : '');
+        if (!imageUrl) return null;
+        const lineValue = (label) => {
+          const rx = new RegExp('^' + label + ':\\s*(.+)$', 'mi');
+          const m = out.match(rx);
+          return m ? m[1].trim() : '';
+        };
+        return {
+          image_url: imageUrl,
+          image_prompt: json.image_prompt || lineValue('Generated image for'),
+          image_model: json.image_model || lineValue('model'),
+          image_size: json.image_size || lineValue('size'),
+          image_quality: json.image_quality || '',
+          image_id: json.image_id || lineValue('image_id') || lineValue('Image ID'),
+        };
+      }
+
 
       // Auto-show thinking spinner after text stops streaming
       let _textPauseTimer = null;
@@ -1251,6 +1323,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let _liveThinkTimerEl = null;
       let _liveThinkToggle = null;
       let _liveThinkDomId = null;
+      let _thinkRafId = 0;
+      let _pendingThinkText = null;
+      let _cachedHasUnclosedThink = false;
+      const _replyPrefixReCache = {};
+      function _getReplyPrefixRe(rp) {
+        if (!_replyPrefixReCache[rp]) _replyPrefixReCache[rp] = new RegExp('[.!?]\\s*' + rp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+        return _replyPrefixReCache[rp];
+      }
 
       function _replyAfterClosedThinking(text) {
         const closeRe = /<\/(?:think(?:ing)?|thought)>|<channel\|>/gi;
@@ -1319,7 +1399,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         }
 
         // If thinking is still streaming (unclosed <think>), show indicator instead of raw text
-        if (markdownModule.hasUnclosedThinkTag && markdownModule.hasUnclosedThinkTag(dt)) {
+        if (_cachedHasUnclosedThink || (markdownModule.hasUnclosedThinkTag && markdownModule.hasUnclosedThinkTag(dt))) {
           const thinkStart = dt.search(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>|<\|channel>thought/i);
           const thinkContent = dt.substring(Math.max(thinkStart, 0))
             .replace(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>|<\|channel>thought\s*\n?/i, '')
@@ -1541,6 +1621,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // 2. Malformed: <think></think>\n...text but no second </think> yet
                 // 3. Qwen3.5: "Thinking Process:" without <think> tags
                 let hasUnclosedThink = markdownModule.hasUnclosedThinkTag(roundText);
+                _cachedHasUnclosedThink = hasUnclosedThink;
                 // Detect non-tag thinking patterns: "Thinking:", "Thinking Process:", Gemma-style reasoning
                 // These patterns don't use <think> tags, so we simulate unclosed thinking during streaming
                 const _replyPrefixes = ['Hey', 'Hi ', 'Hi!', 'Hello', 'Sure', 'Yes', 'No ', 'No,', 'Yo', 'OK', 'Here', 'Absolutely', 'Of course', 'Great', 'Alright', 'Thanks', 'Welcome', 'Good ', "I'm happy", "I'd be"];
@@ -1562,7 +1643,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                     if (!_replyFound) {
                       // Also check within-line: "reasoning text.Reply text"
                       const _inlineReply = _replyPrefixes.some(rp => {
-                        const rx = new RegExp('[.!?]\\s*' + rp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+                        const rx = _getReplyPrefixRe(rp);
                         const m = rx.exec(_trimmedRT);
                         return m && m.index > 20;
                       });
@@ -1652,23 +1733,37 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                       .replace(/<\|channel>response\s*\n?/gi, '')
                       .replace(/<channel\|>/gi, '');
                     thinkText = thinkText.replace(/^\s*Thinking(?:\s+Process)?:\s*/i, '');
-                    _liveThinkInner.innerHTML = markdownModule.mdToHtml(thinkText);
-                    // Keep thinking box scrolled to bottom, but let user scroll up
-                    var thinkBox = _liveThinkInner.closest('.thinking-content');
-                    if (thinkBox) {
-                      var nearBottom = thinkBox.scrollHeight - thinkBox.clientHeight - thinkBox.scrollTop < 80;
-                      if (nearBottom) thinkBox.scrollTop = thinkBox.scrollHeight;
+                    _pendingThinkText = thinkText;
+                    if (!_thinkRafId) {
+                      _thinkRafId = requestAnimationFrame(() => {
+                        _thinkRafId = 0;
+                        if (_liveThinkInner && _pendingThinkText !== null) {
+                          var tb = _liveThinkInner.closest('.thinking-content');
+                          var nearBottom = !tb || (tb.scrollHeight - tb.clientHeight - tb.scrollTop < 80);
+                          _liveThinkInner.innerHTML = markdownModule.mdToHtml(_pendingThinkText);
+                          _pendingThinkText = null;
+                          if (tb && nearBottom) tb.scrollTop = tb.scrollHeight;
+                        }
+                      });
                     }
                   }
                   uiModule.scrollHistory();
                   continue;
                 } else if (!hasUnclosedThink && isThinking) {
                   isThinking = false;
+                  // Flush pending thinking render
+                  if (_thinkRafId) { cancelAnimationFrame(_thinkRafId); _thinkRafId = 0; }
+                  if (_liveThinkInner && _pendingThinkText !== null) {
+                    _liveThinkInner.innerHTML = markdownModule.mdToHtml(_pendingThinkText);
+                    _pendingThinkText = null;
+                  }
                   var _thinkTextLen = _liveThinkInner ? _liveThinkInner.textContent.trim().length : 0;
 
                   // If thinking was trivially short (< 20 chars), remove the section entirely
                   // Models sometimes emit <think>The</think> or similar noise
                   if (_thinkTextLen < 20 && _liveThinkSection) {
+                    if (_thinkRafId) { cancelAnimationFrame(_thinkRafId); _thinkRafId = 0; }
+                    _pendingThinkText = null;
                     _liveThinkSection.remove();
                     _liveThinkSection = null;
                     _liveThinkContent = null;
@@ -2133,9 +2228,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 _lastToolName = json.tool || '';
                 _activeStreamToolName = (json.tool || '').toLowerCase();
                 const cmd = json.command || '';
-                if ((json.tool || '').toLowerCase() === 'generate_image') {
+                const toolLower = (json.tool || '').toLowerCase();
+                if (_isImageToolName(toolLower)) {
                   armResponseTimeout(IMAGE_TIMEOUT_MS, true);
-                  _showImageGenerationPlaceholder(cmd);
+                  _showImageGenerationPlaceholder(cmd, toolLower);
                   currentToolBubble = null;
                   continue;
                 }
@@ -2240,7 +2336,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
               } else if (json.type === 'tool_output') {
                 if (_isBg) continue;
-                if ((json.tool || '').toLowerCase() === _activeStreamToolName) {
+                const _toolLowerOut = (json.tool || '').toLowerCase();
+                const _isImageToolOut = _isImageToolName(_toolLowerOut);
+                if (_toolLowerOut === _activeStreamToolName || _isImageToolOut) {
                   _activeStreamToolName = '';
                 }
                 // --- Update the current thread node ---
@@ -2300,9 +2398,17 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   uiModule.scrollHistory();
                 }
                 // --- Render generated images inline ---
-                if (json.image_url) {
+                const _imagePayload = _imagePayloadFromToolOutput(json);
+                if (_imagePayload) {
                   const chatBox = document.getElementById('chat-history');
-                  const imageBubble = _buildImageBubble(json.image_url, json.image_prompt, json.image_model, json.image_size, json.image_quality, json.image_id);
+                  const imageBubble = _buildImageBubble(
+                    _imagePayload.image_url,
+                    _imagePayload.image_prompt,
+                    _imagePayload.image_model,
+                    _imagePayload.image_size,
+                    _imagePayload.image_quality,
+                    _imagePayload.image_id
+                  );
                   if (_imageGenerationPlaceholder && _imageGenerationPlaceholder.isConnected) {
                     _imageGenerationPlaceholder.replaceWith(imageBubble);
                     _imageGenerationPlaceholder = null;
@@ -2312,7 +2418,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   uiModule.scrollHistory();
                   // Notify gallery to refresh if open
                   window.dispatchEvent(new CustomEvent('gallery-refresh'));
-                } else if ((json.tool || '').toLowerCase() === 'generate_image' && _imageGenerationPlaceholder && _imageGenerationPlaceholder.isConnected) {
+                } else if (_isImageToolOut && _imageGenerationPlaceholder && _imageGenerationPlaceholder.isConnected) {
                   _imageGenerationPlaceholder.remove();
                   _imageGenerationPlaceholder = null;
                 }
@@ -2680,7 +2786,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         throw new Error('Stream closed before completion');
       }
 
-      _renderStream();
       _cancelThinkingTimer();
       _removeThinkingSpinner();
       // Stop any thread pulse animations
@@ -2690,7 +2795,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       holder.classList.remove('streaming');
       if (roundHolder && roundHolder !== holder) roundHolder.classList.remove('streaming');
 
-      const _isBgFinal = (sessionModule.getCurrentSessionId() !== streamSessionId) || _backgroundStreams.has(streamSessionId);
+      const _isBgFinal = (sessionModule.getCurrentSessionId() !== streamSessionId);
       if (!_isBgFinal) {
         finalMeta = (sessionModule.getSessions() || []).find(s => s.id === sessionModule.getCurrentSessionId());
         const _finalActualModel = metrics?.model || holder._actualModel || finalMeta?.model;
@@ -2799,10 +2904,29 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             }
             if (_findingsData) _body4.insertAdjacentHTML('beforeend', chatRenderer.buildFindingsBox(_findingsData));
           } else {
-            // Full re-render (reply empty or no live-reply container)
-            _body4.innerHTML = (_sourcesData ? _buildSourcesBox(_sourcesData, _sourcesType, _wasExpanded) : '')
-              + markdownModule.processWithThinking(markdownModule.squashOutsideCode(finalDisplay))
-              + (_findingsData ? chatRenderer.buildFindingsBox(_findingsData) : '');
+            // Fast path: if streaming renderer already built the content, freeze it
+            // and restructure DOM instead of re-rendering from source text.
+            var _streamEl = _body4 && _body4.querySelector('.stream-content');
+            var _sr = _streamEl && _streamEl._streamRenderer;
+            if (_sr && _streamEl.childNodes.length) {
+              _sr.finalize();
+              // Unwrap .stream-content — move its children to be direct children of .body
+              var _frag = document.createDocumentFragment();
+              while (_streamEl.firstChild) _frag.appendChild(_streamEl.firstChild);
+              _streamEl.remove();
+              _body4.appendChild(_frag);
+              if (_sourcesData) {
+                var _srcEl = document.createElement('div');
+                _srcEl.innerHTML = _buildSourcesBox(_sourcesData, _sourcesType, _wasExpanded);
+                _body4.insertBefore(_srcEl.firstChild || _srcEl, _body4.firstChild);
+              }
+              if (_findingsData) _body4.insertAdjacentHTML('beforeend', chatRenderer.buildFindingsBox(_findingsData));
+            } else {
+              // Fallback: full re-render
+              _body4.innerHTML = (_sourcesData ? _buildSourcesBox(_sourcesData, _sourcesType, _wasExpanded) : '')
+                + markdownModule.processWithThinking(markdownModule.squashOutsideCode(finalDisplay))
+                + (_findingsData ? chatRenderer.buildFindingsBox(_findingsData) : '');
+            }
           }
         } else if (_sourcesHtml) {
           var _body4b = roundHolder.querySelector('.body');
@@ -2828,7 +2952,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
         if (window.hljs) {
           roundHolder.querySelectorAll('pre code').forEach((block) => {
-            window.hljs.highlightElement(block);
+            if (!block.dataset.hljsDone) { window.hljs.highlightElement(block); block.dataset.hljsDone = '1'; }
           });
         }
         if (markdownModule.renderMermaid) markdownModule.renderMermaid(roundHolder);
@@ -2974,9 +3098,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             statusEl.textContent = 'interrupted';
           }
         });
+        _cancelImageGenerationPlaceholder();
       };
       // Check if this stream was running in background
-      const _isBgCatch = (sessionModule.getCurrentSessionId() !== streamSessionId) || _backgroundStreams.has(streamSessionId);
+      const _isBgCatch = (sessionModule.getCurrentSessionId() !== streamSessionId);
 
       if (_isBgCatch) {
         // Error happened while backgrounded — update map, don't touch DOM
@@ -3005,6 +3130,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             const timeoutMsg = _isAgent
               ? 'Agent response timed out. Try again, switch to a faster model, or reduce tool usage.'
               : 'Response timed out. Try again.';
+            _markImagePlaceholdersCancelled('Timed out');
 
             if (holder && !accumulated) {
               holder.querySelector('.body').innerHTML =
@@ -3022,6 +3148,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
           if (abortReason === 'offline') {
             const offlineMsg = 'Endpoint offline — switch model or try again.';
+            _markImagePlaceholdersCancelled('Endpoint offline');
             if (holder && !accumulated) {
               holder.querySelector('.body').innerHTML =
                 `<div style="color: var(--color-error); font-style: italic; padding: 4px 0;">[${offlineMsg}]</div>`;
@@ -3050,7 +3177,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           }
 
           // But just in case the stop button didn't render it, render it here
-          if (holder && accumulated && !currentHolder) {
+          if (holder && accumulated && !currentHolder && !holder.querySelector('.stopped-indicator')) {
             holder.dataset.raw = accumulated;
             holder.querySelector('.body').innerHTML = markdownModule.processWithThinking(
               markdownModule.squashOutsideCode(accumulated)
@@ -3174,8 +3301,17 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         if (_rToggleCleanup) _rToggleCleanup.classList.remove('research-running');
       }
 
+      // Always clear streaming, abort controller, and spinners when the reader loop finishes
+      isStreaming = false;
+      currentAbort = null;
+      if (spinner && spinner.element) {
+        try { spinner.destroy(); } catch (_) {}
+      }
+      spinner = null;
+      currentSpinner = null;
+
       // Only reset UI state if still on the stream's session and was never backgrounded
-      const _isBgFinally = (sessionModule.getCurrentSessionId() !== streamSessionId) || _backgroundStreams.has(streamSessionId);
+      const _isBgFinally = (sessionModule.getCurrentSessionId() !== streamSessionId);
 
       if (!_isBgFinally) {
         if (!_preserveImagePlaceholderOnFinalize && !_activeStreamToolName && _imageGenerationPlaceholder && _imageGenerationPlaceholder.isConnected) {
@@ -3285,6 +3421,16 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       // Don't set to null here - let catch block handle it
     }
     if (stopServer) {
+      const submitBtn = document.querySelector('.send-btn');
+      updateSubmitButton('idle', submitBtn);
+      const messageInput = uiModule.el('message');
+      if (messageInput) messageInput.disabled = false;
+      if (currentSpinner) {
+        try { currentSpinner.destroy(); } catch (_) {}
+        currentSpinner = null;
+      }
+      _stopStallWatchdog();
+      _markImagePlaceholdersCancelled();
       try {
         const _sid = _streamSessionId
           || (window.sessionModule && window.sessionModule.getCurrentSessionId && window.sessionModule.getCurrentSessionId());
@@ -3641,19 +3787,27 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     var entry = _backgroundStreams.get(sessionId);
 
     if (entry.status === 'completed') {
-      // Response is already saved to DB and will appear in history — just clean up
+      // Response is already saved to DB and will appear in history — just clean up and reload to update UI
       _backgroundStreams.delete(sessionId);
+      if (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId() === sessionId) {
+        sessionModule.selectSession(sessionId);
+      }
       return;
     }
 
     if (entry.status === 'error') {
       _backgroundStreams.delete(sessionId);
-      var box = document.getElementById('chat-history');
-      if (box) {
-        var errHolder = document.createElement('div');
-        errHolder.className = 'msg msg-ai';
-        errHolder.innerHTML = '<div class="body"><i style="color: var(--color-error);">[Background stream encountered an error]</i></div>';
-        box.appendChild(errHolder);
+      if (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId() === sessionId) {
+        sessionModule.selectSession(sessionId).then(function() {
+          var box = document.getElementById('chat-history');
+          if (box) {
+            var errHolder = document.createElement('div');
+            errHolder.className = 'msg msg-ai';
+            errHolder.innerHTML = '<div class="body"><i style="color: var(--color-error);">[Background stream encountered an error]</i></div>';
+            box.appendChild(errHolder);
+            uiModule.scrollHistory();
+          }
+        });
       }
       return;
     }

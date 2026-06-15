@@ -133,6 +133,15 @@ class MemoryManager:
                 return self._validate_entries(self._v2.load_all())
             except Exception as e:
                 logger.warning("Memory V2 load failed, falling back to JSON: %s", e)
+        return self._load_json_entries()
+
+    def _load_json_entries(self) -> List[Dict]:
+        """Load memory.json directly, bypassing V2.
+
+        Used as a repair/fallback path when SQLite and the legacy mirror drift:
+        a row can be visible from the JSON fallback but absent from V2, and
+        deletes must still be able to remove that visible stale row.
+        """
         if not os.path.exists(self.memory_file):
             return []
 
@@ -254,6 +263,13 @@ class MemoryManager:
         """Delete one memory entry by id, keeping JSON and V2 in sync."""
         entries = self.load_all()
         target = next((e for e in entries if e.get("id") == memory_id), None)
+        json_entries = None
+        json_target = None
+        if self._v2 is not None:
+            json_entries = self._load_json_entries()
+            json_target = next((e for e in json_entries if e.get("id") == memory_id), None)
+        if target is None:
+            target = json_target
         if target is None:
             return False
         if owner is not None and target.get("owner") != owner:
@@ -262,11 +278,19 @@ class MemoryManager:
         remaining = [e for e in entries if e.get("id") != memory_id]
         if self._v2 is not None:
             try:
-                if not self._v2.delete_item(memory_id, owner=owner):
+                deleted_v2 = self._v2.delete_item(memory_id, owner=owner)
+                if not deleted_v2 and owner is not None and json_target is None:
+                    logger.warning("Memory V2 scoped delete missed owned row %s; retrying by id", memory_id)
+                    deleted_v2 = self._v2.delete_item(memory_id, owner=None)
+                if not deleted_v2 and json_target is None:
                     return False
             except Exception as e:
-                logger.warning("Memory V2 delete failed: %s", e)
-                return False
+                if json_target is None:
+                    logger.warning("Memory V2 delete failed: %s", e)
+                    return False
+                logger.warning("Memory V2 delete failed; removing JSON fallback row only: %s", e)
+            if json_entries is not None:
+                remaining = [e for e in json_entries if e.get("id") != memory_id]
             tmp_file = self.memory_file + ".tmp"
             with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(remaining, f, ensure_ascii=False, indent=2)

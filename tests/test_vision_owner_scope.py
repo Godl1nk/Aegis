@@ -80,8 +80,9 @@ def test_vision_analysis_uses_owner_scoped_primary_and_fallback(monkeypatch, tmp
         "http://primary.test/chat/completions",
         "vision-primary",
         {"X-Test": "1"},
-        120,
+        dp.VISION_ANALYSIS_TIMEOUT_SECONDS,
     )
+    assert dp.VISION_ANALYSIS_TIMEOUT_SECONDS == 300
 
 
 def test_request_vision_call_sites_pass_owner():
@@ -92,8 +93,9 @@ def test_request_vision_call_sites_pass_owner():
     gallery_source = (ROOT / "routes" / "gallery_routes.py").read_text()
     memory_source = (ROOT / "routes" / "memory_routes.py").read_text()
 
-    assert 'analyze_image_with_vl_result(file_info["path"], owner=owner)' in chat_source
-    assert "analyze_image_with_vl(path, owner=current_user)" in upload_source
+    assert "asyncio.to_thread(" in chat_source
+    assert "analyze_image_with_vl_result," in chat_source
+    assert "asyncio.to_thread(analyze_image_with_vl, path, owner=current_user)" in upload_source
     assert "_process_pdf(path, owner=owner)" in processor_source
     assert "_process_pdf(pdf_path, owner=user)" in document_source
     assert "_resolve_vl_model(vl_model, owner=user)" in document_source

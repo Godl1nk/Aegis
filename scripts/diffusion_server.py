@@ -487,19 +487,15 @@ def generate_image(req: ImageRequest):
     except Exception:
         width, height = _args.width, _args.height
 
-    # Map quality to num_inference_steps
-    default_steps = _args.steps or 8
-    steps_map = {"low": 4, "medium": default_steps, "high": 20, "auto": 12}
-    steps = steps_map.get(req.quality, default_steps)
-
-    logger.info(f"Generating: {req.prompt[:80]}... ({width}x{height}, {steps} steps)")
+    logger.info(f"Generating: {req.prompt[:80]}... ({width}x{height}, model default steps)")
     start = time.time()
 
     # Detect if pipeline is inpaint-only (requires image + mask)
     _is_inpaint_pipe = 'inpaint' in type(_pipe).__name__.lower()
 
+    count = max(1, min(int(req.n or 1), 4))
     images = []
-    for _ in range(req.n):
+    for _ in range(count):
         if _is_inpaint_pipe:
             # Inpaint pipelines need an image + mask — create blank ones for txt2img
             from PIL import Image as _PILGen
@@ -511,7 +507,6 @@ def generate_image(req: ImageRequest):
                 mask_image=_mask,
                 width=width,
                 height=height,
-                num_inference_steps=steps,
                 guidance_scale=3.5,
             )
         else:
@@ -519,7 +514,6 @@ def generate_image(req: ImageRequest):
                 prompt=req.prompt,
                 width=width,
                 height=height,
-                num_inference_steps=steps,
                 guidance_scale=3.5,
             )
         img = result.images[0]
@@ -531,7 +525,7 @@ def generate_image(req: ImageRequest):
         images.append({"b64_json": b64})
 
     elapsed = time.time() - start
-    logger.info(f"Generated {req.n} image(s) in {elapsed:.1f}s")
+    logger.info(f"Generated {count} image(s) in {elapsed:.1f}s")
 
     return {
         "created": int(time.time()),

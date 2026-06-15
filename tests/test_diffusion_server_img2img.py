@@ -1,11 +1,45 @@
 import base64
 import io
+from types import SimpleNamespace
 from PIL import Image
 from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
 
 # Import app and globals from diffusion_server
 import scripts.diffusion_server as ds
+
+
+def test_diffusion_server_generation_uses_pipeline_default_steps(monkeypatch):
+    img = Image.new("RGB", (64, 64), (0, 255, 0))
+
+    class StableDiffusionPipeline:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, **kwargs):
+            self.calls.append(kwargs)
+            result = MagicMock()
+            result.images = [img]
+            return result
+
+    pipe = StableDiffusionPipeline()
+    ds._pipe = pipe
+    ds._args = SimpleNamespace(width=1024, height=1024)
+
+    client = TestClient(ds.app, base_url="http://127.0.0.1")
+    response = client.post("/v1/images/generations", json={
+        "prompt": "test image",
+        "size": "512x512",
+        "quality": "high",
+        "n": 0,
+    })
+
+    assert response.status_code == 200
+    assert len(response.json()["data"]) == 1
+    assert pipe.calls
+    assert "num_inference_steps" not in pipe.calls[0]
+    assert pipe.calls[0]["width"] == 512
+    assert pipe.calls[0]["height"] == 512
 
 def test_diffusion_server_img2img(monkeypatch):
     # Create a small dummy image in base64

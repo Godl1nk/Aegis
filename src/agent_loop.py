@@ -38,6 +38,8 @@ from src.agent_tools import (
 
 logger = logging.getLogger(__name__)
 
+_TOOL_PROGRESS_TIMEOUT = 10.0
+
 
 def _load_mcp_disabled_map() -> Dict[str, set]:
     """Load per-server disabled tool sets from the database."""
@@ -127,7 +129,8 @@ _API_AGENT_RULES = """\
 - YOU DECLARE WHEN THE JOB IS DONE — not a timer. Keep taking concrete steps while the task still needs them; don't quit early just because you've made a few calls. Three ways to end a turn: (1) DONE — before declaring it, verify every concrete deliverable the user asked for actually exists or succeeded; then stop calling tools and write the final answer (that IS your "done" signal); (2) BLOCKED — you can't proceed (missing capability, permission denied, unobtainable data), so state plainly what's blocking you and stop; (3) keep going with the single most useful next step. Never trail off mid-task without (1) or (2), and never repeat a call you already ran.
 - Calendar: call `manage_calendar` with `action=list_calendars` FIRST before create/update/delete operations.
 - "Create/add/write a note" / "notes" / "todos" / "remind me to X at <time>" → use `manage_notes`. Do NOT store notes in `manage_memory`; memory is for persistent facts/preferences about the user, not note content. For reminders, include a `due_date`; for todos, use `note_type=checklist` when appropriate. `manage_tasks` is for RECURRING background AI jobs, NOT for one-off user reminders.
-- "Generate/create/make/draw/render/edit an image/picture/photo/art/illustration" → call `generate_image` FIRST with the user's exact request as `prompt` (or JSON payload), model `auto`, size `1024x1024`, and quality `high` unless the user specified otherwise. For follow-ups ("change X", "make it Y", "edit the Z"), use `reference_image_urls` with the previous image URL and write a complete prompt describing the desired final image. Do NOT rewrite the user's request into a final art prompt when they attach or refer to an image; Aegis passes current/previous images to the image model directly. Do NOT run Python, `app_api`, `list_served_models`, `web_search`, or Cookbook diagnostics first. `generate_image` is the source of truth and uses the configured Image Generation model/endpoint. If it fails, report the exact tool error.
+- "Generate/create/make/draw/render an image/picture/photo/art/illustration" → call `generate_image` FIRST with the user's exact request as `prompt` (or JSON payload), model `auto`, size `1024x1024`, and quality `high` unless the user specified otherwise. For image edits ("change X", "make it Y", "edit the Z", "modify this image"), call `ai_edit_image` instead; it resolves the current/previous image reference. Do NOT add previous generated images to `generate_image` requests; "another/new/different" means a fresh generation unless the user explicitly says to edit the existing image. Do NOT run Python, `app_api`, `list_served_models`, `web_search`, or Cookbook diagnostics first. If the image tool fails, report the exact tool error.
+- After `generate_image` or `ai_edit_image` succeeds, do NOT claim you inspected the generated image, do NOT list visual details/changed numbers, and do NOT invent benchmark/data values. The tool result only proves an image file was produced. Reply with a short confirmation like "Done — the image is above." unless another real vision/analysis tool has actually inspected the output. Never call `read_file` on `/api/generated-image/...`; that is an app URL, not a workspace file.
 - "Disable/turn off/enable/turn on <tool>" (shell, search, research, browser, documents, incognito, etc.) → call `ui_control` with `toggle <name> <on|off>`. Aliases accepted: shell→bash, search→web, deepresearch→research, documents→document_editor. NEVER record this as a memory — the user wants the toggle flipped, not a note about preferring it.
 - "Research X" / "do research on X" / "look into Y" / "deep dive on Z" → call `trigger_research` with `topic`. This starts a live job that appears in the Deep Research sidebar (streams progress + final report). **Do NOT use `web_search` for these** — saw the agent do a plain web_search for "do research on X" when the user wanted the deep-research job. "research X" is a deep-research request, not a quick lookup. (web_search is only for a single quick fact mid-task.) Do NOT POST /api/research/start via app_api either — blocked. After starting, tell the user it's running in the Deep Research sidebar. Only if the user explicitly wants it inline/quick should you fall back to web_search.
 - "Open/show <panel>" (documents, library, gallery, email, inbox, sessions, brain/memories, skills, settings, notes, cookbook) → call `ui_control` with `open_panel <name>`. Panel aliases: library/doc/docs/document→documents, images→gallery, mail/inbox/emails→email, chats/history→sessions, memory/memories→brain, preferences→settings, models/serve/serving→cookbook. CRITICAL: "open memory/memories/brain" / "open skills" / "open notes" / "open documents" / "open cookbook" means OPEN THE PANEL — call `ui_control`, NOT a manage/list tool. The "manage_*" tools list contents in chat; `ui_control open_panel` opens the visual modal the user is asking for.
@@ -400,15 +403,15 @@ Suggest changes with explanations (for review/feedback requests).""",
 ```generate_image
 <prompt or JSON>
 ```
-Generate or edit an image. Accepts either a plain prompt (line 1 = description, line 2 = model or `auto`, line 3 = size, line 4 = quality) or JSON: {"prompt": "...", "model": "auto", "size": "1024x1024", "quality": "high", "reference_image_urls": ["..."]}.
+Generate a fresh image. Accepts either a plain prompt (line 1 = description, line 2 = model or `auto`, line 3 = size, line 4 = quality) or JSON: {"prompt": "...", "model": "auto", "size": "1024x1024", "quality": "high"}.
 
-When the user wants to MODIFY a previously generated image, include the previous image's URL (from the last generate_image result's `image_url` field) in `reference_image_urls` and describe the full desired result in `prompt` incorporating the requested changes. The image model cannot see the chat — you must describe the complete image, not just the delta.""",
+Do not include current or previous images as references in this tool. When the user wants to MODIFY an existing image, call `ai_edit_image` instead and describe the full desired result in `prompt`, not just the delta.""",
 
     "ai_edit_image": """\
 ```ai_edit_image
 {"prompt": "<description of desired result>"}
 ```
-Edit an existing image (uploaded or previously generated) using AI. You do NOT need to provide image_id — it is auto-resolved from the conversation context. Just describe the desired changes in `prompt`. The model cannot see the original, so describe the full image you want, incorporating the changes. Optional: `model` (auto), `size` (e.g. 1024x1024).""",
+Edit an existing image (uploaded or previously generated) using AI. You do NOT need to provide image_id — it is auto-resolved from the conversation context. Just describe the desired changes in `prompt`. The model cannot see the original, so describe the full image you want, incorporating the changes. Optional: `model` (auto), `size` (e.g. 1024x1024). After this tool returns, do not claim visual details, changed values, or successful data edits beyond saying the edited image was produced unless a separate vision/analysis tool inspected the result.""",
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
@@ -712,6 +715,19 @@ def _extract_last_user_message(messages: List[Dict]) -> str:
     return ""
 
 
+def _is_explicit_image_ref(value: str) -> bool:
+    """Return true for image refs that should not be replaced by chat context."""
+    if not isinstance(value, str) or not value:
+        return False
+    return (
+        value.startswith("/")
+        or value.startswith("upload:")
+        or value.startswith("data:")
+        or bool(re.match(r"^[0-9a-fA-F]{32}(?:\.[A-Za-z0-9]+)?$", value))
+        or bool(re.match(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", value))
+    )
+
+
 def _collect_image_context(messages: List[Dict], prompt: str, limit: int = 16) -> List[str]:
     """Return image refs for image-to-image turns.
 
@@ -731,14 +747,16 @@ def _collect_image_context(messages: List[Dict], prompt: str, limit: int = 16) -
     for msg in reversed(messages):
         role = msg.get("role")
         content = msg.get("content", "")
-        if role == "user" and not latest_user_seen:
-            latest_user_seen = True
+        if role == "user":
+            is_latest_user = not latest_user_seen
+            if is_latest_user:
+                latest_user_seen = True
             meta = msg.get("metadata") or {}
             for att in meta.get("attachments") or []:
                 if isinstance(att, dict) and str(att.get("mime") or "").startswith("image/"):
                     att_id = att.get("id")
                     if att_id:
-                        _add(current_turn_refs, f"upload:{att_id}")
+                        _add(current_turn_refs if is_latest_user else previous_refs, f"upload:{att_id}")
             if isinstance(content, list):
                 text_parts = []
                 for block in content:
@@ -747,10 +765,15 @@ def _collect_image_context(messages: List[Dict], prompt: str, limit: int = 16) -
                     if block.get("type") == "text":
                         text_parts.append(str(block.get("text") or ""))
                     elif block.get("type") == "image_url":
-                        _add(current_turn_refs, ((block.get("image_url") or {}).get("url") or ""))
-                last_user_text = " ".join(text_parts)
+                        _add(
+                            current_turn_refs if is_latest_user else previous_refs,
+                            ((block.get("image_url") or {}).get("url") or ""),
+                        )
+                if is_latest_user:
+                    last_user_text = " ".join(text_parts)
             else:
-                last_user_text = str(content or "")
+                if is_latest_user:
+                    last_user_text = str(content or "")
         elif role == "assistant":
             meta = msg.get("metadata") or {}
             for ev in reversed(meta.get("tool_events") or []):
@@ -762,7 +785,7 @@ def _collect_image_context(messages: List[Dict], prompt: str, limit: int = 16) -
 
     referential = re.search(
         r"\b(this|that|it|its|same|previous|last|earlier|edit|modify|change|"
-        r"turn|make it|use it|based on|reference|variation|again|another|"
+        r"turn|make it|use it|based on|reference|variation|again|"
         r"fix|adjust|redo|brighter|darker|off|wrong|remove|add)\b",
         f"{last_user_text}\n{prompt}",
         re.IGNORECASE,
@@ -1590,6 +1613,7 @@ def _append_tool_results(
     for _m in messages:
         if _m.get("role") == "assistant":
             _m.pop("reasoning_content", None)
+
     if used_native and native_tool_calls:
         assistant_msg = {"role": "assistant"}
         # When the model emitted ONLY tool calls (no prose), content must be
@@ -1888,6 +1912,7 @@ async def stream_agent_loop(
     owner: Optional[str] = None,
     relevant_tools: Optional[Set[str]] = None,
     fallbacks: Optional[List[tuple]] = None,
+    workspace: Optional[str] = None,
     plan_mode: bool = False,
     approved_plan: Optional[str] = None,
     tool_policy: Optional[ToolPolicy] = None,
@@ -2182,6 +2207,27 @@ async def stream_agent_loop(
         suppress_local_context=guide_only,
         active_email=active_email,
     )
+    if workspace and not guide_only:
+        # PREPEND (not append) so it dominates the large base prompt — appended
+        # at the end, small models ignored it and asked the user for code. The
+        # folder IS the project; the agent must explore it, not ask.
+        _ws_note = (
+            f"## ACTIVE WORKSPACE — READ FIRST\n"
+            f"The user is working in this folder: {workspace}\n"
+            f"It IS the project. bash/python run with cwd set here and "
+            f"read_file/write_file are confined to it (paths outside are rejected).\n"
+            f"When the user says \"the code\" / \"this project\" / \"the workspace\" "
+            f"or asks to review/find/edit something WITHOUT a path, they mean THIS "
+            f"folder. Do NOT ask the user for code or a path, and do NOT read a file "
+            f"literally named \"workspace\". ALWAYS start by exploring it yourself: "
+            f"run `bash` → `git ls-files` (or `ls -R`) to see the files, then "
+            f"read_file the relevant ones by path RELATIVE to the workspace."
+        )
+        if messages and messages[0].get("role") == "system":
+            messages[0]["content"] = _ws_note + "\n\n" + (messages[0].get("content") or "")
+        else:
+            messages.insert(0, {"role": "system", "content": _ws_note})
+        logger.info("[workspace] active for this turn: %s", workspace)
     if plan_mode and not guide_only:
         # Steer the model to investigate-then-propose. Hard tool gating handles
         # every write path except shell; this directive is what keeps the
@@ -2424,6 +2470,9 @@ async def stream_agent_loop(
                 break
             # Forward error events from stream_llm to the frontend
             if chunk.startswith("event: error"):
+                yield chunk
+                continue
+            if chunk.startswith(":"):
                 yield chunk
                 continue
             if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
@@ -2885,40 +2934,19 @@ async def stream_agent_loop(
                         _image_context = None
                         _exec_block = block
                         if block.tool_type == "generate_image":
-                            try:
-                                _raw = block.content.strip()
-                                if _raw.startswith("{"):
-                                    _args = json.loads(_raw)
-                                    _prompt = _args.get("prompt", "") if isinstance(_args, dict) else ""
-                                else:
-                                    _lines = block.content.split("\n")
-                                    _args = {
-                                        "model": _lines[1].strip() if len(_lines) > 1 else "auto",
-                                        "size": _lines[2].strip() if len(_lines) > 2 else "1024x1024",
-                                        "quality": _lines[3].strip() if len(_lines) > 3 else "high",
-                                    }
-                                    _prompt = _lines[0] if _lines else ""
-                                _image_context = _collect_image_context(messages, _prompt)
-                                _last_user_prompt = _extract_last_user_message(messages).strip()
-                                if _image_context and _last_user_prompt:
-                                    _exec_block = ToolBlock("generate_image", json.dumps({
-                                        "prompt": _last_user_prompt,
-                                        "model": (_args.get("model") if isinstance(_args, dict) else None) or "auto",
-                                        "size": (_args.get("size") if isinstance(_args, dict) else None) or "1024x1024",
-                                        "quality": (_args.get("quality") if isinstance(_args, dict) else None) or "high",
-                                    }))
-                            except Exception:
-                                _image_context = None
-                                _exec_block = block
+                            _image_context = None
                         elif block.tool_type == "ai_edit_image":
                             try:
                                 _raw = block.content.strip()
                                 _args = json.loads(_raw) if _raw.startswith("{") else {}
-                                # If no image_id provided, auto-collect from conversation context
-                                if not _args.get("image_id"):
+                                _img_id = _args.get("image_id", "")
+                                # Auto-collect from conversation context if:
+                                # 1) No image_id provided, OR
+                                # 2) image_id looks like a filename (not a UUID/URL)
+                                _is_valid_ref = _is_explicit_image_ref(_img_id)
+                                if not _is_valid_ref:
                                     _image_context = _collect_image_context(messages, _args.get("prompt", ""))
                                     if _image_context:
-                                        # Inject the first resolved image ref as image_id
                                         _args["image_id"] = _image_context[0]
                                         _exec_block = ToolBlock("ai_edit_image", json.dumps(_args))
                             except Exception:
@@ -2941,8 +2969,13 @@ async def stream_agent_loop(
                 _tool_task = asyncio.create_task(_run_tool())
                 # Drain progress events as they arrive — block until the
                 # next event OR the tool finishes (sentinel = None).
+                # Send periodic heartbeats to prevent connection timeouts.
                 while True:
-                    evt = await _progress_q.get()
+                    try:
+                        evt = await asyncio.wait_for(_progress_q.get(), timeout=_TOOL_PROGRESS_TIMEOUT)
+                    except asyncio.TimeoutError:
+                        yield ": heartbeat\n\n"
+                        continue
                     if evt is None:
                         break
                     yield (
@@ -3125,9 +3158,13 @@ async def stream_agent_loop(
                     if k in result:
                         tool_output_data[k] = result[k]
             # Forward image data from generate_image tool
-            for k in ("image_url", "image_prompt", "image_model", "image_size", "image_quality", "image_previous_model", "image_previous_endpoint_url", "image_previous_endpoint_id"):
+            for k in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality", "image_previous_model", "image_previous_endpoint_url", "image_previous_endpoint_id"):
                 if k in result:
                     tool_output_data[k] = result[k]
+            # Forward doc info if present
+            if result.get("doc_id"):
+                tool_output_data["doc_id"] = result["doc_id"]
+                tool_output_data["doc_title"] = result.get("title", "")
             # Forward screenshots from browser tools (base64 images)
             if result.get("images"):
                 img = result["images"][0]

@@ -28,6 +28,27 @@ def _invalidate_caches():
 
 # ── Default values ──
 
+DEFAULT_JSON_TEMPLATE = """{
+  "high_level_description": "{{clean_prompt}}",
+  "style_description": {
+    "aesthetics": "{{aesthetics}}",
+    "lighting": "{{lighting}}",
+    "medium": "{{medium}}",
+    "color_palette": {{palette}}
+  },
+  "compositional_deconstruction": {
+    "canvas": "{{canvas}}",
+    "background": "{{background}}",
+    "elements": [
+      {
+        "type": "obj",
+        "bbox": {{bbox}},
+        "desc": "{{main_subject_description}}"
+      }
+    ]
+  }
+}"""
+
 DEFAULT_SETTINGS = {
     # Agent email safety: when True, the MCP send_email / reply_to_email
     # tools don't SMTP directly. They stage the composed message into the
@@ -39,7 +60,10 @@ DEFAULT_SETTINGS = {
     "agent_email_confirm": True,
     "image_gen_enabled": False,
     "image_model": "",
+    "image_edit_model": "",
     "image_quality": "medium",
+    "image_prompt_format": "auto",
+    "image_prompt_json_template": DEFAULT_JSON_TEMPLATE,
     "vision_model": "",
     "vision_enabled": True,
     # Ordered fallback chain for the Vision model (image analysis, OCR, tagging).
@@ -126,7 +150,7 @@ DEFAULT_SETTINGS = {
     # want to actually use (e.g. 900_000 to fill a 1M-context model). See
     # `compute_input_token_budget`.
     "agent_input_token_hard_max": 200_000,
-    "agent_stream_timeout_seconds": 300,
+    "agent_stream_timeout_seconds": 900,
     # Extra directory roots that read_file / write_file may access, in
     # addition to the built-in project data/ and system temp dirs. Each
     # entry is an absolute path. Sensitive subpaths (.ssh, .gnupg, shell
@@ -259,7 +283,7 @@ def is_setting_overridden(key: str) -> bool:
 # resolved by FastAPI deps; an empty/None owner falls through to the global.
 _PER_USER_KEYS = {
     "vision_model", "vision_enabled", "vision_model_fallbacks",
-    "image_model", "image_gen_enabled", "image_quality",
+    "image_model", "image_edit_model", "image_gen_enabled", "image_quality", "image_prompt_format", "image_prompt_json_template",
     # Default chat endpoint / model — without per-user resolution every new
     # account inherited whatever the most-recent admin picked, which then
     # got injected into the chat composer on first open.

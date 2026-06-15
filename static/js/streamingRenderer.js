@@ -43,7 +43,9 @@ export function createStreamRenderer(contentEl, { render, hljs } = {}) {
   }
 
   function highlight(root) {
-    if (hljs) root.querySelectorAll('pre code').forEach((b) => hljs.highlightElement(b));
+    if (hljs) root.querySelectorAll('pre code').forEach((b) => {
+      if (!b.dataset.hljsDone) { hljs.highlightElement(b); b.dataset.hljsDone = '1'; }
+    });
   }
 
   function clearTail() {

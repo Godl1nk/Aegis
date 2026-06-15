@@ -334,6 +334,22 @@ def _parse_generate_image(content: str) -> Dict:
     return args
 
 
+def _strip_generate_image_references(content: str) -> str:
+    """Keep generate_image as fresh text-to-image; edits go through ai_edit_image."""
+    raw = (content or "").strip()
+    if not raw.startswith("{"):
+        return content
+    try:
+        args = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return content
+    if not isinstance(args, dict) or "reference_image_urls" not in args:
+        return content
+    args.pop("reference_image_urls", None)
+    args.pop("image_id", None)
+    return json.dumps(args)
+
+
 def _parse_manage_memory(content: str) -> Dict:
     lines = content.strip().split("\n")
     action = lines[0].strip().lower() if lines else ""
@@ -727,10 +743,23 @@ async def _execute_tool_block_impl(
             logger.info(f"Tool executed: {desc} -> bg job {rec['id']}")
             return desc, result
 
+    if tool == "generate_image":
+        from src.ai_interaction import do_generate_image
+        content = _strip_generate_image_references(content)
+        first_line = content.split(chr(10))[0][:80]
+        desc = f"generate_image: {first_line}"
+        result = await do_generate_image(
+            content,
+            session_id=session_id,
+            owner=owner,
+            reference_image_urls=None,
+        )
+        if "exit_code" not in result:
+            result["exit_code"] = 1 if result.get("error") else 0
     # Route MCP-extracted tools through the MCP manager. Forward
     # the progress callback so long-running subprocess tools
     # (bash, python) can stream `tool_progress` events to the UI.
-    if tool in _MCP_TOOL_MAP:
+    elif tool in _MCP_TOOL_MAP:
         first_line = content.split(chr(10))[0][:80]
         desc = f"{tool}: {first_line}"
         result = await _call_mcp_tool(tool, content, progress_cb=progress_cb)
@@ -833,6 +862,12 @@ async def _execute_tool_block_impl(
     elif tool == "edit_image":
         desc = "edit_image"
         result = await do_edit_image(content, owner=owner, reference_image_urls=image_context)
+    elif tool == "ai_edit_image":
+        from src.tool_implementations import do_ai_edit_image
+        desc = "ai_edit_image"
+        result = await do_ai_edit_image(content, session_id=session_id, owner=owner)
+        if result.get("image_url"):
+            _promote_image_fields(result)
     elif tool == "edit_file":
         result = await _direct_fallback(tool, content) or {"error": "edit failed", "exit_code": 1}
         desc = result.get("output") or result.get("error") or "edit_file"

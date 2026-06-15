@@ -55,3 +55,20 @@ def test_nonzero_exit_not_promoted():
     r = _result("https://host/api/generated-image/zzz.png", exit_code=1)
     _promote_image_fields(r)
     assert "image_url" not in r
+
+
+def test_image_id_promoted():
+    """An image_id in stdout is lifted into image_id along with other fields."""
+    r = _result(
+        "Generated image for: a yellow bird\n"
+        "Direct link: /api/generated-image/xyz789.png\n"
+        "model: dall-e-3\n"
+        "size: 1024x1024\n"
+        "image_id: 1234-5678-abcd"
+    )
+    _promote_image_fields(r)
+    assert r["image_url"] == "/api/generated-image/xyz789.png"
+    assert r["image_prompt"] == "a yellow bird"
+    assert r["image_model"] == "dall-e-3"
+    assert r["image_size"] == "1024x1024"
+    assert r["image_id"] == "1234-5678-abcd"

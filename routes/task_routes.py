@@ -572,7 +572,13 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         user = _owner(request)
         if not user:
             return {"notifications": []}
-        notes = task_scheduler.pop_notifications(owner=user)
+        if task_scheduler is None:
+            return {"notifications": []}
+        try:
+            notes = task_scheduler.pop_notifications(owner=user)
+        except Exception as e:
+            logger.warning(f"Failed to pop task notifications for {user}: {e}")
+            notes = []
         return {"notifications": notes}
 
     @router.post("/{task_id}/clear-cache")

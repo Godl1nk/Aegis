@@ -46,6 +46,12 @@ def _request(user):
     )
 
 
+def _memory_delete_router(monkeypatch, caller, mem):
+    monkeypatch.setattr(mr, "get_current_user", lambda request: caller, raising=False)
+    monkeypatch.setattr(mr, "require_privilege", lambda request, key: caller, raising=False)
+    return mr.setup_memory_routes(mem, MagicMock())
+
+
 def test_extract_rejects_other_users_session(monkeypatch):
     router = _router(monkeypatch, caller="bob")
     extract = _route(router, "/api/memory/extract", "POST")
@@ -125,3 +131,95 @@ def test_timeline_does_not_expose_other_users_session_name():
     out = timeline(request=_request("alice"))
 
     assert out["timeline"][0]["session_name"] == "Unknown"
+
+
+def test_delete_memory_is_idempotent_for_stale_rows(monkeypatch):
+    mem = MagicMock()
+    mem.load.return_value = []
+    mem.delete_entry.return_value = False
+    router = _memory_delete_router(monkeypatch, caller="alice", mem=mem)
+
+    delete = _route(router, "/api/memory/{memory_id}", "DELETE")
+    out = delete(request=None, memory_id="stale-id")
+
+    assert out["ok"] is True
+    assert out["already_deleted"] is True
+    mem.delete_entry.assert_not_called()
+
+
+def test_delete_memory_reports_storage_failure_for_visible_rows(monkeypatch):
+    mem = MagicMock()
+    mem.load.return_value = [{"id": "m1", "text": "keep", "owner": "alice"}]
+    mem.delete_entry.return_value = False
+    router = _memory_delete_router(monkeypatch, caller="alice", mem=mem)
+
+    delete = _route(router, "/api/memory/{memory_id}", "DELETE")
+    with pytest.raises(HTTPException) as exc:
+        delete(request=None, memory_id="m1")
+
+    assert exc.value.status_code == 500
+    mem.delete_entry.assert_called_once_with("m1", owner="alice")
+
+
+def test_delete_entry_removes_json_fallback_row_when_v2_missing(tmp_path):
+    from src.memory import MemoryManager
+
+    class EmptyV2:
+        def load_all(self):
+            return []
+
+        def delete_item(self, memory_id, owner=None):
+            return False
+
+    manager = MemoryManager(str(tmp_path))
+    manager._v2 = EmptyV2()
+    (tmp_path / "memory.json").write_text(
+        '[{"id":"m1","text":"stale","owner":"alice"}]',
+        encoding="utf-8",
+    )
+
+    assert manager.delete_entry("m1", owner="alice") is True
+    assert manager._load_json_entries() == []
+
+
+def test_delete_entry_removes_json_row_after_v2_load_failure(tmp_path):
+    from src.memory import MemoryManager
+
+    class BrokenV2:
+        def load_all(self):
+            raise RuntimeError("db unavailable")
+
+        def delete_item(self, memory_id, owner=None):
+            raise RuntimeError("db unavailable")
+
+    manager = MemoryManager(str(tmp_path))
+    manager._v2 = BrokenV2()
+    (tmp_path / "memory.json").write_text(
+        '[{"id":"m1","text":"fallback","owner":"alice"}]',
+        encoding="utf-8",
+    )
+
+    assert manager.delete_entry("m1", owner="alice") is True
+    assert manager._load_json_entries() == []
+
+
+def test_delete_entry_retries_v2_delete_by_id_for_owned_row(tmp_path):
+    from src.memory import MemoryManager
+
+    class DriftedV2:
+        def __init__(self):
+            self.calls = []
+
+        def load_all(self):
+            return [{"id": "m1", "text": "owned", "owner": "alice"}]
+
+        def delete_item(self, memory_id, owner=None):
+            self.calls.append((memory_id, owner))
+            return owner is None
+
+    manager = MemoryManager(str(tmp_path))
+    v2 = DriftedV2()
+    manager._v2 = v2
+
+    assert manager.delete_entry("m1", owner="alice") is True
+    assert v2.calls == [("m1", "alice"), ("m1", None)]

@@ -860,6 +860,7 @@ def setup_chat_routes(
             # the outer scope. (Was `nonlocal` but never reassigned.)
             research_sources = None
             web_sources = ctx.web_sources
+            accumulated_tool_events = []
 
             # Register active stream for partial-save safety net
             _active_streams[session] = {"status": "streaming", "partial": "", "query": message, "is_research": effective_do_research, "mode": _effective_mode}
@@ -1110,6 +1111,8 @@ def setup_chat_routes(
                         elif chunk.startswith("event: error"):
                             logger.warning(f"Stream error for {sess.model} on {sess.endpoint_url}: {chunk!r}")
                             yield chunk
+                        elif chunk.startswith(":"):
+                            yield chunk
                         elif chunk.startswith("event: "):
                             yield chunk
                         elif chunk == "data: [DONE]\n\n":
@@ -1240,6 +1243,20 @@ def setup_chat_routes(
                                         _agent_rounds = max(_agent_rounds, data.get("round", 1))
                                     elif data.get("type") == "tool_start":
                                         _agent_tool_calls += 1
+                                    elif data.get("type") == "tool_output":
+                                        tool_ev = {
+                                            "round": _agent_rounds or 1,
+                                            "tool": data.get("tool"),
+                                            "command": data.get("command"),
+                                            "output": data.get("output"),
+                                            "exit_code": data.get("exit_code"),
+                                        }
+                                        for k in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality",
+                                                  "image_previous_model", "image_previous_endpoint_url", "image_previous_endpoint_id",
+                                                  "diff", "doc_id", "doc_title"):
+                                            if k in data:
+                                                tool_ev[k] = data[k]
+                                        accumulated_tool_events.append(tool_ev)
                                     yield chunk
                                 elif data.get("type") == "fallback":
                                     # Selected model failed; a fallback answered.
@@ -1262,16 +1279,20 @@ def setup_chat_routes(
                                     yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
                             except json.JSONDecodeError:
                                 yield chunk
+                        elif chunk.startswith(":"):
+                            yield chunk
                         elif chunk.startswith("event: "):
                             yield chunk
                         elif chunk == "data: [DONE]\n\n":
-                            if full_response:
+                            _final_tool_events = (last_metrics.get("tool_events") if last_metrics else None) or accumulated_tool_events or None
+                            if full_response or _final_tool_events:
                                 _saved_id = save_assistant_response(
                                     sess, session_manager, session, full_response, last_metrics,
                                     character_name=ctx.preset.character_name,
                                     web_sources=web_sources,
                                     rag_sources=ctx.rag_sources,
                                     used_memories=ctx.used_memories,
+                                    tool_events=_final_tool_events,
                                     incognito=incognito,
                                 )
                                 response_saved = True
@@ -1299,15 +1320,20 @@ def setup_chat_routes(
                     # outer finally from running and left _active_streams
                     # with a stale entry).
                     try:
-                        if full_response and not response_saved:
+                        _disconnect_tool_events = (last_metrics.get("tool_events") if last_metrics else None) or accumulated_tool_events
+                        if (full_response or _disconnect_tool_events) and not response_saved:
                             logger.info("Client disconnected mid-stream for session %s, saving partial response (%d chars)", session, len(full_response))
+                            _stopped_meta = {
+                                "stopped": True,
+                                "model": _actual_model or _answered_by or _requested_model,
+                                "requested_model": _requested_model,
+                            }
+                            # Persist tool_events (incl. image_url) from metrics or accumulated events so
+                            # images survive a disconnect + reload.
+                            if _disconnect_tool_events:
+                                _stopped_meta["tool_events"] = _disconnect_tool_events
                             _stopped_content2, _stopped_md2 = clean_thinking_for_save(
-                                full_response,
-                                {
-                                    "stopped": True,
-                                    "model": _actual_model or _answered_by or _requested_model,
-                                    "requested_model": _requested_model,
-                                },
+                                full_response, _stopped_meta,
                             )
                             sess.add_message(ChatMessage("assistant", _stopped_content2, metadata=_stopped_md2))
                             if not incognito:
@@ -1502,6 +1528,8 @@ def setup_chat_routes(
                                 yield chunk
                         except json.JSONDecodeError:
                             yield chunk
+                    elif chunk.startswith(":"):
+                        yield chunk
                     elif chunk.startswith("event: "):
                         yield chunk
                     elif chunk == "data: [DONE]\n\n":

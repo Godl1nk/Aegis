@@ -9,6 +9,7 @@ through the standard agent_tools.py pipeline.
 """
 
 import base64
+import hashlib
 import json
 import logging
 import mimetypes
@@ -16,7 +17,7 @@ import uuid
 import time
 from typing import Dict, Optional, Tuple
 
-from src.constants import GENERATED_IMAGES_DIR
+from src.constants import GENERATED_IMAGES_DIR, IMAGE_EDIT_MAX_SIDE
 
 logger = logging.getLogger(__name__)
 
@@ -1621,10 +1622,12 @@ def _parse_image_generation_content(content: str) -> Dict:
         try:
             data = json.loads(raw)
             if isinstance(data, dict):
+                size_value = data.get("size")
                 return {
                     "prompt": str(data.get("prompt") or "").strip(),
                     "model": str(data.get("model") or "").strip(),
-                    "size": str(data.get("size") or "1024x1024").strip(),
+                    "size": str(size_value or "").strip(),
+                    "size_explicit": bool(str(size_value or "").strip()),
                     "quality": str(data.get("quality") or "medium").strip(),
                     "reference_image_urls": [
                         str(u) for u in (data.get("reference_image_urls") or []) if isinstance(u, str) and u
@@ -1637,10 +1640,36 @@ def _parse_image_generation_content(content: str) -> Dict:
     return {
         "prompt": lines[0].strip() if lines else "",
         "model": lines[1].strip() if len(lines) > 1 and lines[1].strip() else "",
-        "size": lines[2].strip() if len(lines) > 2 and lines[2].strip() else "1024x1024",
+        "size": lines[2].strip() if len(lines) > 2 and lines[2].strip() else "",
+        "size_explicit": len(lines) > 2 and bool(lines[2].strip()),
         "quality": lines[3].strip() if len(lines) > 3 and lines[3].strip() else "medium",
         "reference_image_urls": [],
     }
+
+
+def _fit_diffusion_size(width: int, height: int, max_side: int = IMAGE_EDIT_MAX_SIDE, multiple: int = 16) -> tuple[int, int]:
+    try:
+        width = int(width)
+        height = int(height)
+    except Exception:
+        return max_side, max_side
+    if width <= 0 or height <= 0:
+        return max_side, max_side
+    scale = min(max_side / max(width, height), 1.0)
+    target_w = max(multiple, int(round(width * scale / multiple)) * multiple)
+    target_h = max(multiple, int(round(height * scale / multiple)) * multiple)
+    return target_w, target_h
+
+
+def _fit_diffusion_size_from_bytes(image_bytes: bytes, max_side: int = IMAGE_EDIT_MAX_SIDE) -> tuple[int, int]:
+    try:
+        from io import BytesIO
+        from PIL import Image
+
+        with Image.open(BytesIO(image_bytes)) as im:
+            return _fit_diffusion_size(im.width, im.height, max_side=max_side)
+    except Exception:
+        return max_side, max_side
 
 
 def _image_ref_to_file(url: str, owner: Optional[str] = None):
@@ -1663,14 +1692,34 @@ def _image_ref_to_file(url: str, owner: Optional[str] = None):
 
     if url.startswith("/api/generated-image/"):
         filename = url.rsplit("/", 1)[-1].split("?", 1)[0]
-        path = (Path("data/generated_images") / filename).resolve()
-        base = Path("data/generated_images").resolve()
+        base = Path(GENERATED_IMAGES_DIR).resolve()
+        path = (base / filename).resolve()
         try:
             path.relative_to(base)
         except ValueError:
             return None
         if not path.is_file():
             return None
+        if owner:
+            try:
+                from core.database import SessionLocal, GalleryImage
+                db = SessionLocal()
+                try:
+                    owned = (
+                        db.query(GalleryImage.id)
+                        .filter(
+                            GalleryImage.filename == filename,
+                            GalleryImage.owner == owner,
+                            GalleryImage.is_active == True,
+                        )
+                        .first()
+                    )
+                finally:
+                    db.close()
+                if not owned:
+                    return None
+            except Exception:
+                return None
         mime = mimetypes.guess_type(path.name)[0] or "image/png"
         return ("image", (path.name, path.read_bytes(), mime))
 
@@ -1801,12 +1850,196 @@ def _adopt_image_model_for_session(
     return previous
 
 
+def format_ideogram_prompt(user_prompt: str, size: str, owner: Optional[str] = None) -> str:
+    """Format prompt for Ideogram-4 model using JSON-based deconstruction.
+
+    If prompt is already valid Ideogram-like JSON, returns it as-is.
+    """
+    trimmed = user_prompt.strip()
+    if trimmed.startswith("{") and trimmed.endswith("}"):
+        try:
+            data = json.loads(trimmed)
+            if isinstance(data, dict) and ("high_level_description" in data or "style_description" in data):
+                return trimmed
+        except Exception:
+            pass
+
+    prompt_lower = user_prompt.lower()
+    medium = "photograph"
+    aesthetics = "clean, realistic, minimal, natural"
+    photo_style = "sharp realistic product photography"
+    lighting = "soft diffused studio lighting with gentle shadows"
+    background = "Clean neutral studio background, no text, no people."
+
+    if any(k in prompt_lower for k in ["painting", "watercolor", "oil painting", "canvas"]):
+        medium = "painting"
+        aesthetics = "artistic, colorful, detailed, expressive"
+        photo_style = None
+    elif any(k in prompt_lower for k in ["illustration", "vector", "drawing", "sketch", "digital art"]):
+        medium = "illustration"
+        aesthetics = "clean, minimal, graphic"
+        photo_style = None
+    elif "anime" in prompt_lower or "manga" in prompt_lower:
+        medium = "illustration"
+        aesthetics = "anime style, vibrant, detailed"
+        photo_style = None
+    elif "pixel" in prompt_lower:
+        medium = "pixel art"
+        aesthetics = "retro, pixelated, 8-bit"
+        photo_style = None
+
+    if "dark" in prompt_lower or "night" in prompt_lower:
+        lighting = "dramatic low-key lighting with high contrast"
+    elif "bright" in prompt_lower or "sun" in prompt_lower or "day" in prompt_lower:
+        lighting = "bright natural sunlight"
+    elif "neon" in prompt_lower or "cyberpunk" in prompt_lower:
+        lighting = "vibrant neon glow with colored highlights"
+
+    color_map = {
+        "red": "#B32020",
+        "blue": "#2060B3",
+        "green": "#20B340",
+        "yellow": "#F3D020",
+        "orange": "#E37020",
+        "purple": "#8020B3",
+        "pink": "#E370A0",
+        "brown": "#8B5A2B",
+        "black": "#202020",
+        "white": "#F5F0E8",
+        "grey": "#808080",
+        "gray": "#808080",
+    }
+
+    palette = []
+    for color, hex_val in color_map.items():
+        if color in prompt_lower:
+            palette.append(hex_val)
+    if not palette:
+        palette = ["#B32020", "#8B5A2B", "#F5F0E8", "#202020"]
+    else:
+        while len(palette) < 4:
+            palette.append("#808080")
+        palette = palette[:4]
+
+    canvas_desc = "Square 1024 by 1024 image"
+    if size:
+        parts = size.lower().split("x")
+        if len(parts) == 2:
+            w, h = parts[0], parts[1]
+            try:
+                w_val = int(w)
+                h_val = int(h)
+                orientation = "square"
+                if w_val > h_val:
+                    orientation = "landscape"
+                elif h_val > w_val:
+                    orientation = "upright"
+                canvas_desc = f"{orientation.capitalize()} {w_val} by {h_val} image"
+            except ValueError:
+                pass
+
+    clean_desc = user_prompt.strip()
+    for phrase in [", studio photo", ", photography", "studio photo", "photography"]:
+        clean_desc = clean_desc.replace(phrase, "")
+    clean_desc = clean_desc.strip().strip(",").strip(".")
+    if clean_desc:
+        clean_desc = clean_desc[0].upper() + clean_desc[1:]
+
+    # Load template from settings (per-user if owner is specified)
+    from src.settings import get_user_setting, DEFAULT_JSON_TEMPLATE
+    template = get_user_setting("image_prompt_json_template", owner or "", default=DEFAULT_JSON_TEMPLATE)
+    if not template:
+        template = DEFAULT_JSON_TEMPLATE
+
+    w_val, h_val = 1024, 1024
+    if size:
+        parts = size.lower().split("x")
+        if len(parts) == 2:
+            try:
+                w_val = int(parts[0])
+                h_val = int(parts[1])
+            except ValueError:
+                pass
+
+    is_full_scene = any(k in prompt_lower for k in [
+        "landscape", "scenery", "scene", "poster", "panoramic", "view",
+        "cityscape", "forest", "mountains", "beach", "skyline", "room",
+        "interior", "background", "wide shot", "full shot", "streets"
+    ])
+    has_multiple = any(k in prompt_lower for k in [
+        "and", "with", "group", "multiple", "several", "crowd",
+        "two ", "three ", "four ", "five ", "six "
+    ])
+
+    if is_full_scene or has_multiple:
+        bbox = [0, 0, w_val, h_val]
+    else:
+        bbox = [int(w_val * 0.3125), int(h_val * 0.3125), int(w_val * 0.742), int(h_val * 0.703)]
+
+    main_subject_description = clean_desc
+
+    try:
+        # JSON-escape values
+        escaped_clean_prompt = json.dumps(clean_desc)[1:-1]
+        escaped_aesthetics = json.dumps(aesthetics)[1:-1]
+        escaped_lighting = json.dumps(lighting)[1:-1]
+        escaped_medium = json.dumps(medium)[1:-1]
+        escaped_canvas = json.dumps(canvas_desc)[1:-1]
+        escaped_background = json.dumps(background)[1:-1]
+        escaped_photo_style = json.dumps(photo_style)[1:-1] if photo_style else ""
+        escaped_main_subject = json.dumps(main_subject_description)[1:-1]
+
+        filled = template
+        filled = filled.replace("{{clean_prompt}}", escaped_clean_prompt)
+        filled = filled.replace("{{aesthetics}}", escaped_aesthetics)
+        filled = filled.replace("{{lighting}}", escaped_lighting)
+        filled = filled.replace("{{medium}}", escaped_medium)
+        filled = filled.replace("{{canvas}}", escaped_canvas)
+        filled = filled.replace("{{background}}", escaped_background)
+        filled = filled.replace("{{photo_style}}", escaped_photo_style)
+        filled = filled.replace("{{palette}}", json.dumps(palette))
+        filled = filled.replace("{{bbox}}", json.dumps(bbox))
+        filled = filled.replace("{{main_subject_description}}", escaped_main_subject)
+
+        # Test if valid JSON
+        json.loads(filled)
+        return filled
+    except Exception as e:
+        logger.warning(f"Failed to substitute custom prompt template: {e}. Falling back to default dictionary.")
+
+    ideogram_dict = {
+        "high_level_description": clean_desc,
+        "style_description": {
+            "aesthetics": aesthetics,
+            "lighting": lighting,
+            "medium": medium,
+            "color_palette": palette
+        },
+        "compositional_deconstruction": {
+            "canvas": canvas_desc,
+            "background": background,
+            "elements": [
+                {
+                    "type": "obj",
+                    "bbox": bbox,
+                    "desc": main_subject_description
+                }
+            ]
+        }
+    }
+    if photo_style:
+        ideogram_dict["style_description"]["photo"] = photo_style
+
+    return json.dumps(ideogram_dict)
+
+
 async def do_generate_image(
     content: str,
     session_id: Optional[str] = None,
     owner: Optional[str] = None,
     reference_image_urls: Optional[list] = None,
     adopt_model: bool = True,
+    denoising_strength: Optional[float] = None,
 ) -> Dict:
     """Generate an image using an image-capable model (e.g. gpt-image-1).
 
@@ -1825,6 +2058,7 @@ async def do_generate_image(
     if model_spec.lower() == "auto":
         model_spec = ""
     size = parsed["size"] or "1024x1024"
+    size_explicit = bool(parsed.get("size_explicit"))
     quality = parsed["quality"] or "medium"
     refs = list(parsed.get("reference_image_urls") or [])
     for ref in reference_image_urls or []:
@@ -1837,14 +2071,21 @@ async def do_generate_image(
 
     # Load admin settings for defaults
     try:
+        from src.settings import get_user_setting
+    except Exception:
+        def get_user_setting(key, owner, default=""): return default
+
+    # Use admin-configured model/quality if not specified by the tool call
+    if not model_spec:
+        if reference_image_urls:
+            model_spec = get_user_setting("image_edit_model", owner or "", default="")
+        if not model_spec:
+            model_spec = get_user_setting("image_model", owner or "", default="")
+    try:
         from src.settings import load_settings
         _settings = load_settings()
     except Exception:
         _settings = {}
-
-    # Use admin-configured model/quality if not specified by the tool call
-    if not model_spec:
-        model_spec = _settings.get("image_model", "")
     if quality == "medium" and _settings.get("image_quality"):
         quality = _settings["image_quality"]
 
@@ -1900,6 +2141,7 @@ async def do_generate_image(
                 "Configure an OpenAI-compatible endpoint with image generation support."}
 
     # Detect if this is a GPT image model vs DALL-E vs local diffusion
+    is_openai_api = "api.openai.com" in url
     is_gpt_image = "gpt-image" in model_id.lower()
     is_dalle = "dall-e" in model_id.lower()
 
@@ -1911,10 +2153,25 @@ async def do_generate_image(
     # Validate size for cloud image models (local diffusion accepts any WxH)
     valid_gpt_sizes = {"1024x1024", "1024x1536", "1536x1024", "auto"}
     valid_dalle3_sizes = {"1024x1024", "1024x1792", "1792x1024"}
-    if is_gpt_image and size not in valid_gpt_sizes:
+    if is_openai_api and is_gpt_image and size not in valid_gpt_sizes:
         size = "1024x1024"
-    elif is_dalle and size not in valid_dalle3_sizes:
+    elif is_openai_api and is_dalle and size not in valid_dalle3_sizes:
         size = "1024x1024"
+
+    # Format prompt if the model uses JSON prompt format (e.g. Ideogram-4)
+    from src.settings import get_user_setting, get_setting
+    prompt_format_setting = get_user_setting("image_prompt_format", owner or "", default="auto")
+
+    if prompt_format_setting == "json":
+        format_type = "json"
+    elif prompt_format_setting == "string":
+        format_type = "string"
+    else:  # auto
+        format_type = "json" if "ideogram" in model_id.lower() else "string"
+
+    if format_type == "json":
+        prompt = format_ideogram_prompt(prompt, size, owner=owner)
+        logger.info(f"Ideogram formatted prompt: {prompt}")
 
     payload = {
         "model": model_id,
@@ -1923,10 +2180,17 @@ async def do_generate_image(
         "size": size,
     }
 
+    local_width, local_height = 1024, 1024
+    try:
+        _sw, _sh = (size or "1024x1024").lower().split("x", 1)
+        local_width, local_height = int(_sw), int(_sh)
+    except Exception:
+        pass
+
     # GPT image models support OpenAI's quality field. Some local/proxy image
     # backends (including llama-swap -> stable-diffusion.cpp) reject or mishandle
     # unknown OpenAI fields, so keep local payloads minimal.
-    if is_gpt_image:
+    if is_openai_api and is_gpt_image:
         if quality in ("low", "medium", "high", "auto"):
             payload["quality"] = quality
         else:
@@ -1938,6 +2202,14 @@ async def do_generate_image(
     if refs and not ref_files:
         return {"error": "Failed to load reference image(s). The image files may have been deleted or are inaccessible."}
     use_edits_endpoint = bool(ref_files)
+    if use_edits_endpoint and not is_openai_api and not size_explicit:
+        _, (_, content_bytes, _) = ref_files[0]
+        local_width, local_height = _fit_diffusion_size_from_bytes(content_bytes)
+        size = f"{local_width}x{local_height}"
+        payload["size"] = size
+        if format_type == "json":
+            prompt = format_ideogram_prompt(parsed["prompt"], size, owner=owner)
+            payload["prompt"] = prompt
 
     logger.info(
         f"Image generation: model={model_id}, size={size}, quality={quality}, "
@@ -1960,11 +2232,11 @@ async def do_generate_image(
         # GPT/OpenAI image models can take 30-120s+ depending on quality
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=900.0, write=30.0, pool=30.0)) as client:
             if use_edits_endpoint:
-                if is_gpt_image:
+                if is_openai_api and is_gpt_image:
                     edit_data = {k: str(v) for k, v in payload.items() if k != "n"}
                     edit_data["input_fidelity"] = "high"
                     resp = await client.post(edits_url, data=edit_data, files=ref_files, headers=headers)
-                elif "api.openai.com" in url:
+                elif is_openai_api:
                     edit_data = {k: str(v) for k, v in payload.items() if k != "n"}
                     resp = await client.post(edits_url, data=edit_data, files=ref_files, headers=headers)
                 else:
@@ -1972,10 +2244,14 @@ async def do_generate_image(
                     _, (_, content_bytes, _) = ref_files[0]
                     ref_b64 = base64.b64encode(content_bytes).decode()
 
+                    strength = denoising_strength if denoising_strength is not None else 0.75
+
                     img2img_payload = {
                         "image": ref_b64,
                         "prompt": prompt,
                         "model": model_id,
+                        "size": f"{local_width}x{local_height}",
+                        "strength": strength,
                     }
                     base_root = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
                     base_root_no_v1 = base_root[:-3] if base_root.endswith("/v1") else base_root
@@ -1984,19 +2260,22 @@ async def do_generate_image(
                         (base_root + "/images/img2img", "json", img2img_payload),
                         (base_root + "/images/variations", "json", img2img_payload),
                         (base_root_no_v1 + "/sdapi/v1/img2img", "json_a1111", {
+                            "model": model_id,
                             "init_images": [f"data:image/png;base64,{ref_b64}"],
                             "prompt": prompt,
-                            "denoising_strength": 0.75,
-                            "steps": 30,
+                            "width": local_width,
+                            "height": local_height,
+                            "denoising_strength": strength,
                             "override_settings": {"sd_model_checkpoint": model_id} if model_id else {},
                         })
                     ]
 
                     resp = None
                     last_err_text = ""
+                    local_img2img_timeout = httpx.Timeout(connect=10.0, read=900.0, write=30.0, pool=10.0)
                     for target_url, kind, pl in candidates:
                         try:
-                            resp = await client.post(target_url, json=pl, headers=headers)
+                            resp = await client.post(target_url, json=pl, headers=headers, timeout=local_img2img_timeout)
                             if resp.status_code == 200:
                                 break
                             else:
@@ -2014,7 +2293,7 @@ async def do_generate_image(
             else:
                 resp = await client.post(images_url, json=payload, headers=headers)
 
-            if not use_edits_endpoint or is_gpt_image or "api.openai.com" in url:
+            if not use_edits_endpoint or is_openai_api:
                 if resp.status_code != 200:
                     error_text = resp.text[:500]
                     try:
@@ -2029,21 +2308,22 @@ async def do_generate_image(
                     return {"error": f"Image generation failed ({resp.status_code}) for {model_id} at {endpoint}: {error_text}{hint}"}
 
             res_json = resp.json()
-            if use_edits_endpoint and not is_gpt_image and "api.openai.com" not in url:
+            if use_edits_endpoint and not is_openai_api:
                 # Normalize local diffusion img2img output to OpenAI format: {"data": [{"b64_json": ...}]}
                 img_b64 = None
                 if isinstance(res_json, dict):
-                    if res_json.get("image"):
+                    if isinstance(res_json.get("image"), str) and res_json.get("image"):
                         img_b64 = res_json["image"]
                     elif res_json.get("images") and isinstance(res_json["images"], list):
                         img_b64 = res_json["images"][0]
-                        if img_b64.startswith("data:"):
+                        if isinstance(img_b64, str) and img_b64.startswith("data:"):
                             img_b64 = img_b64.split(",", 1)[1]
                     elif res_json.get("data") and isinstance(res_json["data"], list):
                         item = res_json["data"][0]
-                        img_b64 = item.get("b64_json") or item.get("url")
+                        if isinstance(item, dict):
+                            img_b64 = item.get("b64_json") or item.get("url")
 
-                if img_b64:
+                if isinstance(img_b64, str) and img_b64:
                     if img_b64.startswith("http"):
                         data = {"data": [{"url": img_b64}]}
                     else:
@@ -2053,6 +2333,8 @@ async def do_generate_image(
             else:
                 data = res_json
 
+            if not isinstance(data, dict):
+                return {"error": f"Image API returned unexpected response type: {type(data).__name__}"}
             images = data.get("data", [])
             if not images:
                 return {"error": "No images returned from API"}
@@ -2061,12 +2343,50 @@ async def do_generate_image(
             image_url = None
             image_id = None
 
-            def _save_to_gallery(filename: str) -> str:
-                """Insert a GalleryImage row and return the new id (or '')."""
+            def _save_to_gallery(filename: str) -> Tuple[str, str]:
+                """Persist gallery metadata once; return (id, canonical filename)."""
+                _gdb = None
                 try:
                     from src.database import SessionLocal as _GallerySL, GalleryImage
-                    new_id = str(uuid.uuid4())
+
+                    img_path = Path(GENERATED_IMAGES_DIR) / filename
+                    content = img_path.read_bytes()
+                    file_hash = hashlib.sha256(content).hexdigest()
+                    width = height = None
+                    try:
+                        from io import BytesIO
+                        from PIL import Image
+                        with Image.open(BytesIO(content)) as im:
+                            width, height = im.width, im.height
+                    except Exception:
+                        pass
+
                     _gdb = _GallerySL()
+                    existing = _gdb.query(GalleryImage).filter(
+                        GalleryImage.filename == filename,
+                        GalleryImage.is_active == True,  # noqa: E712
+                    ).first()
+                    if existing:
+                        return existing.id, existing.filename
+
+                    dup_q = _gdb.query(GalleryImage).filter(
+                        GalleryImage.file_hash == file_hash,
+                        GalleryImage.is_active == True,  # noqa: E712
+                    )
+                    if owner:
+                        dup_q = dup_q.filter(GalleryImage.owner == owner)
+                    else:
+                        dup_q = dup_q.filter(GalleryImage.owner == None)  # noqa: E711
+                    duplicate = dup_q.first()
+                    if duplicate:
+                        try:
+                            if duplicate.filename != filename:
+                                img_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        return duplicate.id, duplicate.filename
+
+                    new_id = str(uuid.uuid4())
                     _gdb.add(GalleryImage(
                         id=new_id,
                         filename=filename,
@@ -2076,13 +2396,24 @@ async def do_generate_image(
                         quality=quality,
                         session_id=session_id,
                         owner=owner,
+                        file_hash=file_hash,
+                        file_size=len(content),
+                        width=width,
+                        height=height,
                     ))
                     _gdb.commit()
-                    _gdb.close()
-                    return new_id
+                    return new_id, filename
                 except Exception as _ge:
+                    if _gdb is not None:
+                        try:
+                            _gdb.rollback()
+                        except Exception:
+                            pass
                     logger.warning(f"Failed to save gallery record: {_ge}")
-                    return ""
+                    return "", filename
+                finally:
+                    if _gdb is not None:
+                        _gdb.close()
 
             # GPT image models always return b64_json; DALL-E may return url
             if img.get("b64_json"):
@@ -2091,8 +2422,8 @@ async def do_generate_image(
                 filename = f"{uuid.uuid4().hex[:12]}.png"
                 img_path = img_dir / filename
                 img_path.write_bytes(base64.b64decode(img.get("b64_json")))
+                image_id, filename = _save_to_gallery(filename)
                 image_url = f"/api/generated-image/{filename}"
-                image_id = _save_to_gallery(filename)
 
             elif img.get("url"):
                 # Download external URL and save locally (DALL-E returns temp URLs)
@@ -2104,8 +2435,8 @@ async def do_generate_image(
                         filename = f"{uuid.uuid4().hex[:12]}.png"
                         img_path = img_dir / filename
                         img_path.write_bytes(dl_resp.content)
+                        image_id, filename = _save_to_gallery(filename)
                         image_url = f"/api/generated-image/{filename}"
-                        image_id = _save_to_gallery(filename)
                     else:
                         image_url = img["url"]  # fallback to external URL
                 except Exception as _dl_e:
