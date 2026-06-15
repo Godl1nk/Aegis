@@ -392,6 +392,12 @@ Generate or edit an image. Accepts either a plain prompt (line 1 = description, 
 
 When the user wants to MODIFY a previously generated image, include the previous image's URL (from the last generate_image result's `image_url` field) in `reference_image_urls` and describe the full desired result in `prompt` incorporating the requested changes. The image model cannot see the chat — you must describe the complete image, not just the delta.""",
 
+    "ai_edit_image": """\
+```ai_edit_image
+{"prompt": "<description of desired result>"}
+```
+Edit an existing image (uploaded or previously generated) using AI. You do NOT need to provide image_id — it is auto-resolved from the conversation context. Just describe the desired changes in `prompt`. The model cannot see the original, so describe the full image you want, incorporating the changes. Optional: `model` (auto), `size` (e.g. 1024x1024).""",
+
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
     "list_models": "- ```list_models``` — Show all available AI models across all endpoints. Use when user asks what models are available.",
@@ -919,7 +925,7 @@ def _build_system_prompt(
         _ov_sig = _hl.sha256(_json.dumps(get_builtin_overrides() or {}, sort_keys=True).encode()).hexdigest()
     except Exception:
         _ov_sig = ""
-    cache_key = (frozenset(disabled_tools or []), bool(mcp_mgr), needs_admin, _rt_key, compact, _ov_sig, suppress_local_context)
+    cache_key = (frozenset(disabled_tools or []), bool(mcp_mgr), needs_admin, _rt_key, compact, _ov_sig, owner, suppress_local_context)
     if _cached_base_prompt and _cached_base_prompt_key == cache_key and not active_document:
         agent_prompt = _cached_base_prompt
         # Skill index is user-editable (name + description), so it must never
@@ -927,7 +933,7 @@ def _build_system_prompt(
         # when the cache hits.
         _, _skill_index_block = _build_base_prompt(
             disabled_tools, mcp_mgr, needs_admin, relevant_tools,
-            mcp_disabled_map=mcp_disabled_map, compact=compact,
+            mcp_disabled_map=mcp_disabled_map, compact=compact, owner=owner,
             suppress_local_context=suppress_local_context,
         )
     else:
@@ -938,6 +944,7 @@ def _build_system_prompt(
             relevant_tools,
             mcp_disabled_map=mcp_disabled_map,
             compact=compact,
+            owner=owner,
             suppress_local_context=suppress_local_context,
         )
         if not active_document:
@@ -1310,6 +1317,7 @@ def _build_base_prompt(
     relevant_tools=None,
     mcp_disabled_map=None,
     compact: bool = False,
+    owner: Optional[str] = None,
     suppress_local_context: bool = False,
 ):
     """Build the agent prompt with only relevant tools included.
@@ -1363,7 +1371,7 @@ def _build_base_prompt(
             from src.constants import DATA_DIR
             _sm = SkillsManager(DATA_DIR)
             active_tools = list(set(TOOL_SECTIONS.keys()) - set(disabled or []))
-            skill_idx = _sm.index_for(owner=None, active_toolsets=active_tools)
+            skill_idx = _sm.index_for(owner=owner, active_toolsets=active_tools)
             if skill_idx:
                 lines = ["## Available skills",
                          "Procedures the assistant should consult before doing domain work. "
@@ -1771,7 +1779,6 @@ async def stream_agent_loop(
     owner: Optional[str] = None,
     relevant_tools: Optional[Set[str]] = None,
     fallbacks: Optional[List[tuple]] = None,
-    workspace: Optional[str] = None,
     plan_mode: bool = False,
     approved_plan: Optional[str] = None,
     tool_policy: Optional[ToolPolicy] = None,
@@ -1870,10 +1877,10 @@ async def stream_agent_loop(
                         logger.info(f"[tool-rag] Retrieved tools for query: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
                     except asyncio.TimeoutError:
                         logger.warning(
-                            "[tool-rag] Retrieval exceeded %.1fs; falling back to always-available tools",
+                            "[tool-rag] Retrieval exceeded %.1fs; falling back to keyword-based tool selection",
                             _TOOL_SELECTION_TIMEOUT_SECONDS,
                         )
-                        _relevant_tools = set(ALWAYS_AVAILABLE)
+                        _relevant_tools = None
         except Exception as e:
             logger.warning(f"[tool-rag] Retrieval failed, using keyword fallback: {e}")
             _relevant_tools = None
@@ -1888,6 +1895,16 @@ async def stream_agent_loop(
             if any(kw in ql for kw in keywords):
                 _relevant_tools.update(tools)
         logger.info(f"[tool-rag] Keyword fallback selected: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
+
+    # Supplement RAG results with keyword hints so obvious intents (image
+    # generation, email, calendar, etc.) always land even when embedding
+    # retrieval returns a narrow set.
+    if not guide_only and _relevant_tools is not None and _retrieval_query:
+        from src.tool_index import ToolIndex
+        ql = _retrieval_query.lower()
+        for keywords, tools in ToolIndex._KEYWORD_HINTS.items():
+            if any(kw in ql for kw in keywords):
+                _relevant_tools.update(tools)
 
     # If deterministic domain detection fired, seed the corresponding domain
     # tools into the selected tool set. This is not direct prompt-pack
@@ -1999,27 +2016,6 @@ async def stream_agent_loop(
         owner=owner,
         suppress_local_context=guide_only,
     )
-    if workspace and not guide_only:
-        # PREPEND (not append) so it dominates the large base prompt — appended
-        # at the end, small models ignored it and asked the user for code. The
-        # folder IS the project; the agent must explore it, not ask.
-        _ws_note = (
-            f"## ACTIVE WORKSPACE — READ FIRST\n"
-            f"The user is working in this folder: {workspace}\n"
-            f"It IS the project. bash/python run with cwd set here and "
-            f"read_file/write_file are confined to it (paths outside are rejected).\n"
-            f"When the user says \"the code\" / \"this project\" / \"the workspace\" "
-            f"or asks to review/find/edit something WITHOUT a path, they mean THIS "
-            f"folder. Do NOT ask the user for code or a path, and do NOT read a file "
-            f"literally named \"workspace\". ALWAYS start by exploring it yourself: "
-            f"run `bash` → `git ls-files` (or `ls -R`) to see the files, then "
-            f"read_file the relevant ones by path RELATIVE to the workspace."
-        )
-        if messages and messages[0].get("role") == "system":
-            messages[0]["content"] = _ws_note + "\n\n" + (messages[0].get("content") or "")
-        else:
-            messages.insert(0, {"role": "system", "content": _ws_note})
-        logger.info("[workspace] active for this turn: %s", workspace)
     if plan_mode and not guide_only:
         # Steer the model to investigate-then-propose. Hard tool gating handles
         # every write path except shell; this directive is what keeps the
@@ -2734,6 +2730,20 @@ async def stream_agent_loop(
                             except Exception:
                                 _image_context = None
                                 _exec_block = block
+                        elif block.tool_type == "ai_edit_image":
+                            try:
+                                _raw = block.content.strip()
+                                _args = json.loads(_raw) if _raw.startswith("{") else {}
+                                # If no image_id provided, auto-collect from conversation context
+                                if not _args.get("image_id"):
+                                    _image_context = _collect_image_context(messages, _args.get("prompt", ""))
+                                    if _image_context:
+                                        # Inject the first resolved image ref as image_id
+                                        _args["image_id"] = _image_context[0]
+                                        _exec_block = ToolBlock("ai_edit_image", json.dumps(_args))
+                            except Exception:
+                                _image_context = None
+                                _exec_block = block
                         return await execute_tool_block(
                             _exec_block,
                             session_id=session_id,
@@ -2741,7 +2751,7 @@ async def stream_agent_loop(
                             tool_policy=tool_policy,
                             owner=owner,
                             progress_cb=_push_progress,
-                            workspace=workspace,
+                            workspace=None,
                             image_context=_image_context,
                         )
                     finally:
