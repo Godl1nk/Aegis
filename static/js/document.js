@@ -6442,16 +6442,16 @@ import * as Modals from './modalManager.js';
     codeEl.textContent = text + '\n';
 
     const lang = document.getElementById('doc-language-select')?.value;
-    // hljs has no 'svg' grammar — highlight it as xml (the dropdown value stays
-    // 'svg' so the preview/run routing still treats it as renderable markup).
-    const _hlLang = lang === 'svg' ? 'xml' : lang;
+    // hljs has no 'svg' or 'pdf' grammar. Keep dropdown value for routing, but
+    // use the closest available highlighter to avoid console warnings.
+    const _hlLang = lang === 'svg' ? 'xml' : (lang === 'pdf' ? 'markdown' : lang);
     codeEl.className = _hlLang ? `language-${_hlLang}` : '';
     if (window.hljs && _hlLang) {
       codeEl.removeAttribute('data-highlighted');
       window.hljs.highlightElement(codeEl);
     }
     // Markdown post-processing: colorize standalone [brackets] and heading markers
-    if (lang === 'markdown') {
+    if (_hlLang === 'markdown') {
       _postProcessMarkdown(codeEl);
     }
 

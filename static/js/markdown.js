@@ -62,6 +62,7 @@ function replaceOutsideInlineCode(text, pattern, replacer) {
 
 const KATEX_RENDER_OPTIONS = {
   throwOnError: false,
+  strict: false,
   macros: {
     "\\cdotp": "\\cdot",
   },

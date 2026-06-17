@@ -12,9 +12,7 @@ from urllib.parse import urlparse
 from fastapi import HTTPException
 from fastapi import UploadFile
 from typing import List, Optional
-
-from src.upload_limits import format_byte_limit, get_chat_upload_max_bytes
-
+from src.upload_limits import format_byte_limit, get_configured_upload_max_bytes
 logger = logging.getLogger(__name__)
 
 
@@ -210,7 +208,7 @@ def validate_file_upload(file: UploadFile) -> UploadFile:
                 }
             )
 
-        upload_limit = get_chat_upload_max_bytes()
+        upload_limit = get_configured_upload_max_bytes()
         if file_size > upload_limit:
             raise HTTPException(
                 status_code=400,

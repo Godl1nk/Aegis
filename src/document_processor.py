@@ -14,6 +14,16 @@ logger = logging.getLogger(__name__)
 
 VISION_ANALYSIS_TIMEOUT_SECONDS = 300
 
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+PDF_VISION_MAX_IMAGES = max(0, _env_int("ODYSSEUS_PDF_VISION_MAX_IMAGES", 0))
+
 MAX_INLINE_ATTACHMENT_CHARS = 24000
 MIN_INLINE_ATTACHMENT_SLICE = 500
 
@@ -117,25 +127,31 @@ def _process_pdf(path: str, owner: str | None = None) -> str:
         from pypdf import PdfReader
         pdf_text = ""
         reader = PdfReader(path)
+        pdf_vision_used = 0
 
         for page_num, page in enumerate(reader.pages):
             page_text = (page.extract_text() or "").strip()
             if page_text:
                 pdf_text += f"\n\n[Page {page_num + 1} text]:\n{page_text}"
 
-            # For pages with images but little text, try VL model
+            # Optional: OCR image-only PDF pages with the vision model. Default
+            # is off because lecture/slide PDFs can contain hundreds of images,
+            # and model calls here run during chat/document preprocessing.
             try:
                 images = list(page.images)
             except Exception:
                 images = []
-            if images and len(page_text) < 50:
+            if PDF_VISION_MAX_IMAGES > 0 and images and len(page_text) < 50:
                 for img_index, img in enumerate(images[:3]):  # cap at 3 images per page
+                    if pdf_vision_used >= PDF_VISION_MAX_IMAGES:
+                        break
                     try:
                         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
                             temp_img_path = tmp.name
                         try:
                             img.image.save(temp_img_path, "PNG")  # pypdf -> PIL image
                             ocr_text = analyze_image_with_vl(temp_img_path, owner=owner)
+                            pdf_vision_used += 1
                             if ocr_text and "unavailable" not in ocr_text.lower():
                                 pdf_text += f"\n\n[Page {page_num + 1} image {img_index + 1} text]: {ocr_text}"
                         finally:
@@ -312,6 +328,13 @@ def _resolve_vl_model(configured: str, owner: str | None = None) -> tuple:
     of known vision-capable models across configured endpoints.
     """
     from src.ai_interaction import _resolve_model
+
+    if (configured or "").strip() == "__same_as_chat__":
+        from src.endpoint_resolver import resolve_endpoint
+        url, model, headers = resolve_endpoint("default", owner=owner)
+        if url and model:
+            return url, model, headers
+        raise ValueError("No default chat model available")
 
     if configured:
         return _resolve_model(configured, owner=owner)

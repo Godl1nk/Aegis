@@ -17,13 +17,6 @@ faster-whisper
 # Alternatives: SearXNG, Brave, Tavily, Serper, Google PSE.
 ddgs
 
-# PDF form-filling feature (fillable AcroForm detection, field extraction,
-# value/annotation/signature stamping, page rendering for the form overlay).
-# NOTE: PyMuPDF is AGPL-3.0. Installing it brings AGPL obligations for a
-# network-served app — see ACKNOWLEDGMENTS.md. The MIT core (PDF *text*
-# extraction via pypdf) works without it; this only unlocks form-filling.
-PyMuPDF
-
 # Office / EPUB document text extraction (chat attachments + the personal-docs
 # RAG index). markitdown (MIT, Microsoft) converts .docx/.xlsx/.pptx/.xls/.epub
 # to Markdown — more token-efficient and model-legible than a raw dump. Optional

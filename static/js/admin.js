@@ -2970,6 +2970,49 @@ function initLogsView() {
   loadLogs(false);
 }
 
+async function loadUploadLimits() {
+  const input = el('set-maxUploadSizeMb');
+  if (!input) return;
+  try {
+    const res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    const data = await res.json();
+    if (data.max_upload_size_mb) {
+      input.value = data.max_upload_size_mb;
+    }
+  } catch (e) { console.error('Failed to load upload limits:', e); }
+}
+
+function initUploadLimits() {
+  const input = el('set-maxUploadSizeMb');
+  const msg = el('set-uploadLimitsMsg');
+  if (!input) return;
+
+  input.addEventListener('change', async () => {
+    try {
+      msg.textContent = 'Saving...';
+      msg.style.color = 'var(--fg)';
+      const val = parseInt(input.value, 10);
+      const res = await fetch('/api/auth/settings', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ max_upload_size_mb: val })
+      });
+      if (res.ok) {
+        msg.textContent = 'Saved';
+        msg.style.color = 'var(--green, #50fa7b)';
+      } else {
+        const d = await res.json();
+        msg.textContent = d.detail || 'Failed';
+        msg.style.color = 'var(--red)';
+      }
+      setTimeout(() => { if (msg.textContent === 'Saved' || msg.textContent === 'Failed') msg.textContent = ''; }, 2000);
+    } catch (e) {
+      msg.textContent = 'Error: ' + e.message;
+      msg.style.color = 'var(--red)';
+    }
+  });
+}
+
 /* ═══════════════════════════════════════════
    INIT & REFRESH
    ═══════════════════════════════════════════ */
@@ -2978,6 +3021,7 @@ function initAll() {
   const inits = [
     initSignupToggle, initAddUser, initEndpointForm, initMcpForm,
     initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView,
+    initUploadLimits,
     () => settingsModule.initIntegrations()
   ];
   for (const fn of inits) {
@@ -2994,6 +3038,7 @@ function refreshAll() {
   loadMcpServers();
   loadTokens();
   loadLogs(false);
+  loadUploadLimits();
 }
 
 /* ═══════════════════════════════════════════

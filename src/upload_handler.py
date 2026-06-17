@@ -599,10 +599,12 @@ class UploadHandler:
         if file_size == 0:
             raise HTTPException(400, "File is empty")
             
-        if file_size > self.max_upload_size:
+        from src.upload_limits import get_configured_upload_max_bytes
+        dynamic_max = get_configured_upload_max_bytes()
+        if file_size > dynamic_max:
             raise HTTPException(
                 status_code=400,
-                detail=f"File size exceeds {format_byte_limit(self.max_upload_size)} limit"
+                detail=f"File size exceeds {format_byte_limit(dynamic_max)} limit"
             )
         
         # Get original filename and sanitize it

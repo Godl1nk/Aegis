@@ -33,6 +33,16 @@ def get_chat_upload_max_bytes() -> int:
     return read_byte_limit_env(CHAT_UPLOAD_MAX_BYTES_ENV, DEFAULT_CHAT_UPLOAD_MAX_BYTES)
 
 
+def get_configured_upload_max_bytes() -> int:
+    from src.settings import get_setting, is_setting_overridden
+
+    if is_setting_overridden("max_upload_size_mb"):
+        mb = get_setting("max_upload_size_mb")
+        if isinstance(mb, (int, float)) and mb > 0:
+            return int(mb * 1024 * 1024)
+    return get_chat_upload_max_bytes()
+
+
 # Per-route upload byte-limits, single-sourced here (issue #3364). Each is
 # validated + env-overridable via read_byte_limit_env: set the matching
 # ODYSSEUS_*_MAX_BYTES env var to an integer byte count to tune it; an invalid

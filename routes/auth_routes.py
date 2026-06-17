@@ -22,6 +22,7 @@ from src.settings import (
     load_features as _load_features,
     save_features as _save_features,
     DEFAULT_SETTINGS,
+    is_setting_overridden,
 )
 from src.integrations import (
     load_integrations,
@@ -621,6 +622,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         _INT_RANGES = {
             "agent_max_rounds": (1, 200),
             "agent_max_tool_calls": (0, 1000),  # 0 = unlimited
+            "max_upload_size_mb": (1, 500),
         }
         for key in DEFAULT_SETTINGS:
             if key not in body:
@@ -634,6 +636,8 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                     raise HTTPException(400, f"{key} must be an integer")
                 val = max(lo, min(val, hi))
             current[key] = val
+        if "max_upload_size_mb" not in body and not is_setting_overridden("max_upload_size_mb"):
+            current.pop("max_upload_size_mb", None)
         _save_settings(current)
         return current
 

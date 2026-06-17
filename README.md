@@ -66,7 +66,7 @@ cd Aegis
 cp .env.example .env       # optional, but recommended for explicit defaults
 docker compose up -d --build
 ```
-To include optional extras in the image (PDF viewer, Office extraction; includes AGPL PyMuPDF), build with `docker compose build --build-arg INSTALL_OPTIONAL=true` before `up`.
+To include optional extras in the image (local STT, DuckDuckGo search, Office extraction), build with `docker compose build --build-arg INSTALL_OPTIONAL=true` before `up`.
 
 Open `http://localhost:7000` when the containers are healthy. Docker Compose
 binds the web UI to `127.0.0.1` by default. If the port is taken, set
@@ -330,7 +330,6 @@ To expose Odysseus on a local network or Tailscale with HTTPS:
 |---------|-----------------|
 | `faster-whisper` | Local speech-to-text (microphone -> text) via the "local" STT provider. |
 | `duckduckgo-search` | DuckDuckGo as a search provider option. |
-| `PyMuPDF` | PDF page rendering in the side viewer panel and form-filling. (Note: AGPL-3.0) |
 | `markitdown` | Office/EPUB document text extraction (converts .docx/.xlsx/.pptx/.xls/.epub to Markdown). |
 
 ### Outlook / Office 365 email

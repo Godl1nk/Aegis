@@ -213,6 +213,7 @@ DEFAULT_SETTINGS = {
         "admin_panel": "ctrl+shift+u",
         "cancel": "escape",
     },
+    "max_upload_size_mb": 10,
 }
 
 DEFAULT_FEATURES = {
@@ -273,7 +274,7 @@ def is_setting_overridden(key: str) -> bool:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             saved = json.load(f)
         return isinstance(saved, dict) and key in saved
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, PermissionError, json.JSONDecodeError, ValueError):
         return False
 
 

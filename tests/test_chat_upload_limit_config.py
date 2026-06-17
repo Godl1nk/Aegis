@@ -4,16 +4,27 @@ import pytest
 from fastapi import HTTPException, UploadFile
 
 from src.chat_helpers import validate_file_upload
+from src import settings as settings_mod
 from src.upload_handler import UploadHandler
 from src.upload_limits import (
     DEFAULT_CHAT_UPLOAD_MAX_BYTES,
     get_chat_upload_max_bytes,
+    get_configured_upload_max_bytes,
     read_byte_limit_env,
 )
 
 
 def _upload(name: str, data: bytes) -> UploadFile:
     return UploadFile(filename=name, file=io.BytesIO(data))
+
+
+@pytest.fixture()
+def isolated_settings(monkeypatch, tmp_path):
+    settings_file = tmp_path / "settings.json"
+    monkeypatch.setattr(settings_mod, "SETTINGS_FILE", str(settings_file))
+    monkeypatch.setattr(settings_mod, "_settings_cache", None)
+    yield settings_file
+    monkeypatch.setattr(settings_mod, "_settings_cache", None)
 
 
 def test_chat_upload_limit_defaults_to_10mb(monkeypatch):
@@ -42,7 +53,31 @@ def test_read_byte_limit_env_rejects_non_positive(monkeypatch):
         read_byte_limit_env("ODYSSEUS_CHAT_UPLOAD_MAX_BYTES", 10)
 
 
-def test_validate_file_upload_uses_configured_chat_limit(monkeypatch):
+def test_configured_upload_limit_uses_env_until_admin_setting_saved(monkeypatch, isolated_settings):
+    monkeypatch.setenv("ODYSSEUS_CHAT_UPLOAD_MAX_BYTES", "4")
+
+    assert get_configured_upload_max_bytes() == 4
+
+    settings_mod.save_settings({"max_upload_size_mb": 2})
+
+    assert get_configured_upload_max_bytes() == 2 * 1024 * 1024
+
+
+def test_configured_upload_limit_saved_default_value_overrides_env(monkeypatch, isolated_settings):
+    monkeypatch.setenv("ODYSSEUS_CHAT_UPLOAD_MAX_BYTES", "4")
+    settings_mod.save_settings({"max_upload_size_mb": 10})
+
+    assert get_configured_upload_max_bytes() == 10 * 1024 * 1024
+
+
+def test_configured_upload_limit_prefers_saved_setting_over_invalid_env(monkeypatch, isolated_settings):
+    monkeypatch.setenv("ODYSSEUS_CHAT_UPLOAD_MAX_BYTES", "not-bytes")
+    settings_mod.save_settings({"max_upload_size_mb": 2})
+
+    assert get_configured_upload_max_bytes() == 2 * 1024 * 1024
+
+
+def test_validate_file_upload_uses_configured_chat_limit(monkeypatch, isolated_settings):
     monkeypatch.setenv("ODYSSEUS_CHAT_UPLOAD_MAX_BYTES", "4")
 
     with pytest.raises(HTTPException) as exc:
@@ -53,7 +88,7 @@ def test_validate_file_upload_uses_configured_chat_limit(monkeypatch):
     assert exc.value.detail["message"] == "File size exceeds 4 bytes limit"
 
 
-def test_upload_handler_uses_configured_chat_limit(monkeypatch, tmp_path):
+def test_upload_handler_uses_configured_chat_limit(monkeypatch, tmp_path, isolated_settings):
     monkeypatch.setenv("ODYSSEUS_CHAT_UPLOAD_MAX_BYTES", "4")
     handler = UploadHandler(base_dir=str(tmp_path), upload_dir=str(tmp_path / "uploads"))
 

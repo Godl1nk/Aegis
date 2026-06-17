@@ -9,25 +9,23 @@ import logging
 import re
 from typing import Any
 
-# PyMuPDF is an OPTIONAL dependency (AGPL-3.0), required ONLY for the PDF
-# form-filling feature implemented in this module. The MIT core imports fine
-# without it; calling these functions without PyMuPDF raises a clear error.
-# See requirements-optional.txt.
+# PyMuPDF is AGPL-3.0 and is installed with the core requirements because the
+# PDF viewer and PDF form-filling paths both need it.
 try:
-    import fitz  # PyMuPDF — optional, AGPL-3.0
+    import fitz  # PyMuPDF, AGPL-3.0
 except ImportError:  # pragma: no cover
     fitz = None
 
 logger = logging.getLogger(__name__)
 
 _PYMUPDF_MISSING = (
-    "PDF form features require PyMuPDF, an optional dependency. Install it with "
-    "`pip install -r requirements-optional.txt` (note: PyMuPDF is AGPL-3.0)."
+    "PDF form features require PyMuPDF. Install it with "
+    "`pip install -r requirements.txt` (note: PyMuPDF is AGPL-3.0)."
 )
 
 
 def _require_fitz():
-    """Raise a clear error if the optional PyMuPDF dependency is absent."""
+    """Raise a clear error if PyMuPDF is absent."""
     if fitz is None:
         raise RuntimeError(_PYMUPDF_MISSING)
     return fitz

@@ -44,6 +44,23 @@ def test_auto_detected_vision_model_resolution_passes_owner(monkeypatch):
     assert all(owner == "alice" for _spec, owner in seen)
 
 
+def test_same_as_chat_vision_model_resolution_uses_default_endpoint(monkeypatch):
+    seen = []
+
+    def fake_resolve_endpoint(prefix, owner=None):
+        seen.append((prefix, owner))
+        return ("http://default.test/chat/completions", "chat-model", {"X-Test": "default"})
+
+    monkeypatch.setattr("src.endpoint_resolver.resolve_endpoint", fake_resolve_endpoint)
+
+    assert dp._resolve_vl_model("__same_as_chat__", owner="alice") == (
+        "http://default.test/chat/completions",
+        "chat-model",
+        {"X-Test": "default"},
+    )
+    assert seen == [("default", "alice")]
+
+
 def test_vision_analysis_uses_owner_scoped_primary_and_fallback(monkeypatch, tmp_path):
     seen = {}
 
