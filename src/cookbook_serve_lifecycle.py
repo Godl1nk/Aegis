@@ -37,6 +37,13 @@ async def _delete_endpoint_for_task(task: dict) -> None:
     the picker (probe goes offline; chats still try to route there) and
     the user has to delete it by hand in Settings -> Endpoints.
     """
+    endpoint_id = (task.get("_endpointId") or task.get("endpointId") or "").strip()
+    if not endpoint_id:
+        logger.info(
+            "cookbook_serve_lifecycle: task %s has no endpoint id; skipping endpoint deletion",
+            task.get("sessionId") or task.get("id") or "",
+        )
+        return
     import re as _re
     payload = task.get("payload") or {}
     cmd = str(payload.get("_cmd") or "")
@@ -66,13 +73,10 @@ async def _delete_endpoint_for_task(task: dict) -> None:
             if r.status_code >= 400:
                 return
             eps = r.json() if r.content else []
-            # Prefer exact URL match; fall back to host:port substring so we
-            # still catch the case where 0.0.0.0 vs the registered host
-            # representation diverged.
-            ep = next((e for e in eps if e.get("base_url") == base_url), None)
-            if not ep:
-                hostport = f"{host}:{port}"
-                ep = next((e for e in eps if hostport in (e.get("base_url") or "")), None)
+            # Delete only the endpoint created by this scheduled serve. URL
+            # matching is unsafe because a later scheduled serve can reuse the
+            # same host:port after an older task has gone stale.
+            ep = next((e for e in eps if e.get("id") == endpoint_id), None)
             if ep:
                 await client.delete(
                     f"{internal_api_base()}/api/model-endpoints/{ep['id']}",
@@ -161,11 +165,13 @@ async def _tick() -> None:
     # Re-read state once before writing so we capture any updates from
     # concurrent UI syncs.
     stopped_any = False
+    successfully_stopped_sids = set()
     for sid, host, port in to_stop:
         ok = await _stop_serve(sid, host, port)
         logger.info(f"cookbook_serve_lifecycle: stop {sid} (host={host or 'local'}): {'ok' if ok else 'failed'}")
         if ok:
             stopped_any = True
+            successfully_stopped_sids.add(sid)
             # Drop the auto-registered endpoint so the model picker and
             # the chat router don't keep pointing at a dead server.
             for t in tasks:
@@ -188,12 +194,11 @@ async def _tick() -> None:
             except Exception:
                 fresh = state
                 fresh_tasks = tasks
-            stopped_sids = {sid for sid, _, _ in to_stop}
             for ft in fresh_tasks:
                 if not isinstance(ft, dict):
                     continue
                 ft_sid = ft.get("sessionId") or ft.get("id")
-                if ft_sid in stopped_sids:
+                if ft_sid in successfully_stopped_sids:
                     ft["status"] = "stopped"
                     ft["_scheduledStopAtMs"] = None
                     ft["_lastStatusFlipAt"] = now_ms
