@@ -34,7 +34,7 @@ def repo():
         os.mkdir(g)
         with open(os.path.join(g, "config"), "w") as f:
             f.write("needle in git\n")
-        yield root
+        yield root.replace('\\', '/')
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -160,7 +160,7 @@ def test_ls_path_outside_rejected(repo):
 # ── read_file line range ───────────────────────────────────────────────────
 
 def test_read_file_offset_limit(repo):
-    p = os.path.join(repo, "lines.txt")
+    p = os.path.join(repo, "lines.txt").replace('\\', '/')
     with open(p, "w") as f:
         f.write("\n".join(f"line{i}" for i in range(1, 11)) + "\n")
     r = _run("read_file", f'{{"path": "{p}", "offset": 3, "limit": 2}}')
@@ -169,6 +169,6 @@ def test_read_file_offset_limit(repo):
 
 
 def test_read_file_plain_path_backcompat(repo):
-    r = _run("read_file", os.path.join(repo, "a.py"))
+    r = _run("read_file", os.path.join(repo, "a.py").replace('\\', '/'))
     assert r["exit_code"] == 0
     assert "needle" in r["output"]

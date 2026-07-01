@@ -2126,7 +2126,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                       var nearBottom = thinkBox.scrollHeight - thinkBox.clientHeight - thinkBox.scrollTop < 80;
                       _followThinking = nearBottom;
                     }
-                    }
                   }
                   if (_followThinking) uiModule.scrollHistory();
                   continue;

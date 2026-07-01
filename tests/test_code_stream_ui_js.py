@@ -85,9 +85,9 @@ def test_standalone_code_request_uses_direct_chat_without_document_tools():
 
 
 def test_existing_session_document_does_not_hide_create_document_tool():
-    start = AGENT_LOOP.index("# If a document is open the model needs")
+    start = AGENT_LOOP.index("# If this turn targets the open document, keep editing tools available")
     end = AGENT_LOOP.index("# The skill index injected", start)
     tool_gate = AGENT_LOOP[start:end]
 
-    assert "if _relevant_tools is not None and active_document is not None:" in tool_gate
+    assert "if _relevant_tools is not None and _active_document_relevant:" in tool_gate
     assert "\n    if (\n        _relevant_tools is not None\n        and _code_artifact" in tool_gate
