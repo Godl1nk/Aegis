@@ -500,6 +500,7 @@ def _promote_image_fields(result: Dict) -> None:
         ("image_prompt", r'^Generated image for:\s*(.+)$'),
         ("image_model", r'^model:\s*(.+)$'),
         ("image_size", r'^size:\s*(.+)$'),
+        ("image_id", r'^image_id:\s*(.+)$'),
     ):
         fm = re.search(pat, out, re.M)
         if fm:
@@ -761,6 +762,7 @@ async def _execute_tool_block_impl(
         )
         if "exit_code" not in result:
             result["exit_code"] = 1 if result.get("error") else 0
+        return desc, result
     # Route MCP-extracted tools through the MCP manager. Forward
     # the progress callback so long-running subprocess tools
     # (bash, python) can stream `tool_progress` events to the UI.
