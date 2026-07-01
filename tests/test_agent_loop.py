@@ -37,6 +37,9 @@ try:
     from src.agent_loop import (
         _detect_admin_intent,
         _classify_agent_request,
+        _classify_code_artifact_request,
+        _is_incomplete_document_tool_call,
+        _document_block_as_chat_code,
         _compute_final_metrics,
         _append_tool_results,
         _MCP_KEYWORDS,
@@ -71,6 +74,55 @@ def test_polish_internet_search_request_classifies_as_web():
 
     assert intent["low_signal"] is False
     assert "web" in intent["domains"]
+
+
+def test_code_generation_request_classifies_as_document():
+    text = "Using HTML, CSS and JS, generate a browser OS in a single script."
+    intent = _classify_agent_request([], text)
+    artifact = _classify_code_artifact_request(text)
+
+    assert intent["low_signal"] is False
+    assert "documents" in intent["domains"]
+    assert artifact == {
+        "requested": True,
+        "standalone": True,
+        "language": "html",
+        "title": "Generating HTML",
+    }
+
+
+def test_conceptual_code_question_does_not_open_artifact_editor():
+    artifact = _classify_code_artifact_request(
+        "How does a browser execute JavaScript code?"
+    )
+
+    assert artifact["requested"] is False
+
+
+def test_incomplete_parameter_style_document_call_is_detected():
+    text = (
+        "```create_document\n"
+        "<parameter=language>html</parameter>\n"
+        "<parameter=title>BrowserOS</parameter>\n"
+        "</function></tool_call>"
+    )
+
+    assert _is_incomplete_document_tool_call(text) is True
+
+
+def test_document_tool_body_can_be_recovered_as_direct_chat_code():
+    block = type(
+        "Block",
+        (),
+        {
+            "tool_type": "create_document",
+            "content": "BrowserOS\nhtml\n<!doctype html><title>OS</title>",
+        },
+    )()
+
+    assert _document_block_as_chat_code(block, "text") == (
+        "```html\n<!doctype html><title>OS</title>\n```"
+    )
 
 
 # ---------------------------------------------------------------------------

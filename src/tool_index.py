@@ -47,6 +47,9 @@ ALWAYS_AVAILABLE = frozenset({
     # retrieve them by embedding similarity.
     "generate_image",
     "ai_edit_image",
+    # Web search and fetch are always available so the model can decide when to use them.
+    "web_search",
+    "web_fetch",
 })
 
 # Tools that the Personal Assistant always has access to during scheduled
@@ -451,6 +454,16 @@ class ToolIndex:
                    "replace", "add a", "tweak", "modify", "rename", "paragraph",
                    "section", "line", "the doc", "the docs", "the document", "the documents", "in the doc", "in the docs", "in document"}):
             {"edit_document", "update_document", "create_document", "suggest_document"},
+        # New standalone code artifacts belong in the live document editor.
+        # Keep phrases specific so conceptual questions about programming do
+        # not open an empty editor panel.
+        frozenset({"generate code", "write code", "create code", "build an app",
+                   "build a app", "create an app", "create a app", "make an app",
+                   "build a website", "create a website", "make a website",
+                   "generate a script", "write a script", "create a script",
+                   "single file", "single-file", "html css", "html, css",
+                   "browser game", "browser os", "web app", "webapp"}):
+            {"create_document"},
         # Document deletion / management — include generic open/find/read/show
         # verbs + file/doc synonyms so "open my <X>", "find the <X>", "delete
         # <X>" reach manage_documents even without the literal word "document".

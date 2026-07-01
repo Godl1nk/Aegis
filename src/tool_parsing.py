@@ -47,6 +47,17 @@ _XML_PARAM_RE = re.compile(
     r'<parameter\s+name=["\'](\w+)["\']>([\s\S]*?)</parameter>',
     re.IGNORECASE,
 )
+_HYBRID_PARAM_RE = re.compile(
+    r'<parameter(?:\s+name\s*=\s*|\s*=\s*)["\']?(\w+)["\']?\s*>'
+    r'([\s\S]*?)</parameter>',
+    re.IGNORECASE,
+)
+_HYBRID_FENCED_DOC_ENVELOPE_RE = re.compile(
+    r"```create_document\s*\r?\n"
+    r"(?=\s*<parameter(?:\s+name\s*=|\s*=))"
+    r"(?P<body>[\s\S]*?)</tool_call>\s*(?:```)?",
+    re.IGNORECASE,
+)
 
 # Pattern 4: <tool_code> blocks (MiniMax-M2.5 style)
 # {tool => 'tool_name', args => '<param>value</param>'}
@@ -529,12 +540,33 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
     # XML patterns below catch it.
     text = _normalize_dsml(text)
 
+    # Hybrid local-model document calls use a create_document fence but close
+    # with </tool_call> instead of ```. Parse these independently so a missing
+    # backtick fence cannot turn the raw parameter envelope into document text.
+    for match in _HYBRID_FENCED_DOC_ENVELOPE_RE.finditer(text):
+        params = {
+            pm.group(1).lower(): pm.group(2).strip()
+            for pm in _HYBRID_PARAM_RE.finditer(match.group("body"))
+        }
+        body = params.get("content", "")
+        if body:
+            parts = [params.get("title") or "Untitled"]
+            if params.get("language"):
+                parts.append(params["language"])
+            parts.append(body)
+            blocks.append(ToolBlock("create_document", "\n".join(parts)))
+
     # Pattern 1: fenced code blocks (skipped when `skip_fenced` — see docstring).
     if not skip_fenced:
         for m in _TOOL_BLOCK_RE.finditer(text):
             tag = m.group(1).lower()
             content = m.group(2).strip()
             if not content:
+                continue
+            if tag == "create_document" and _HYBRID_PARAM_RE.search(content):
+                # Some local tool templates combine our fenced syntax with
+                # their own <parameter=name> envelope. It was handled above;
+                # never fall through and execute the raw wrapper as content.
                 continue
             # If a code block's content is an <invoke> XML call (some models wrap
             # tool calls in ```python or ```xml fences), parse the invoke instead.
@@ -609,7 +641,8 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
     # Normalize DSML first so its markup gets stripped by the <invoke>
     # / <tool_call> removers below instead of leaking to the user.
     text = _normalize_dsml(text)
-    cleaned = text if skip_fenced else _TOOL_BLOCK_RE.sub('', text)
+    cleaned = _HYBRID_FENCED_DOC_ENVELOPE_RE.sub('', text)
+    cleaned = cleaned if skip_fenced else _TOOL_BLOCK_RE.sub('', cleaned)
     cleaned = _TOOL_CALL_RE.sub('', cleaned)
     cleaned = _XML_TOOL_CALL_RE.sub('', cleaned)
     cleaned = _TOOL_CODE_RE.sub('', cleaned)

@@ -1233,6 +1233,7 @@ def setup_chat_routes(
                                     yield chunk
                                 elif data.get("type") in (
                                     "tool_start", "tool_output", "agent_step",
+                                    "doc_stream_phase", "doc_stream_cancel",
                                     "doc_stream_open", "doc_stream_delta",
                                     "doc_update", "doc_suggestions", "ui_control",
                                     "rounds_exhausted",

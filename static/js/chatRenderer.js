@@ -408,6 +408,7 @@ function _openVisionEditor(att, userMsgEl) {
 const TOOL_CALL_RE = /\[TOOL_CALL\][\s\S]*?\[\/TOOL_CALL\]/gi;
 // Only strip fenced tool-call blocks that look like structured invocations, not regular code examples
 const EXEC_FENCE_RE = /```(?:web_search|read_file|write_file|create_document|edit_document|update_document|generate_image|ai_edit_image)\s*\n[\s\S]*?```/gi;
+const HYBRID_DOC_ENVELOPE_RE = /```create_document\s*\r?\n(?=\s*<parameter(?:\s+name\s*=|\s*=))[\s\S]*?<\/tool_call>\s*(?:```)?/gi;
 // XML-style tool calls: <minimax:tool_call>, <tool_call>, <function_call>, bare <invoke>
 const XML_TOOL_CALL_RE = /<(?:[\w]+:)?(?:tool_call|function_call)>[\s\S]*?<\/(?:[\w]+:)?(?:tool_call|function_call)>/gi;
 const XML_INVOKE_RE = /<invoke\s+name=['"][^'"]*['"]>[\s\S]*?<\/invoke>/gi;
@@ -852,6 +853,7 @@ export function roleTimestamp(when) {
  */
 export function stripToolBlocks(text) {
   let cleaned = text.replace(TOOL_CALL_RE, '');
+  cleaned = cleaned.replace(HYBRID_DOC_ENVELOPE_RE, '');
   cleaned = cleaned.replace(EXEC_FENCE_RE, '');
   cleaned = cleaned.replace(DSML_TOOL_RE, '');
   cleaned = cleaned.replace(DSML_STRAY_RE, '');

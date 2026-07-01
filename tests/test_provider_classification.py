@@ -157,6 +157,17 @@ class TestFormatUpstreamError:
         assert "OpenAI is having an outage (HTTP 500)." in msg
         assert "upstream exploded" in msg
 
+    def test_local_endpoint_5xx_is_not_reported_as_cloud_outage(self):
+        msg = _format_upstream_error(
+            500,
+            "unspecific error: upstream command exited prematurely",
+            "http://host.docker.internal:1234/v1/chat/completions",
+        )
+        assert msg == (
+            "local endpoint returned HTTP 500. "
+            "unspecific error: upstream command exited prematurely"
+        )
+
     def test_bytes_body_is_decoded(self):
         msg = _format_upstream_error(
             401, b'{"error": {"message": "nope"}}', "https://api.openai.com/v1"
