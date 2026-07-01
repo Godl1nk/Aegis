@@ -2174,6 +2174,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   }
                   if (_liveThinkHeader) _liveThinkHeader.textContent = 'View thinking process';
                   if (_liveThinkSpinnerSlot) _liveThinkSpinnerSlot.remove();
+                  if (_liveThinkToggle) _liveThinkToggle.classList.remove('expanded');
+                  if (_liveThinkContent) _liveThinkContent.classList.remove('expanded');
                   // Move timer to right side of header
                   if (_liveThinkTimerEl && elapsed) {
                     _liveThinkTimerEl.textContent = _formatThinkStats(elapsed, _liveThinkTokenCount);
