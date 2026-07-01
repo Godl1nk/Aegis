@@ -875,6 +875,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     let processingProbeTimer = null;
     let processingProbeAbort = null;
     let _renderStream = () => {};
+    let _docFenceOpened = false;
+    let _docFenceContentStart = 0;
     let _cancelThinkingTimer = () => {};
     let _removeThinkingSpinner = () => {};
     let timeoutId = null;
