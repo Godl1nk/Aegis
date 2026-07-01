@@ -2636,6 +2636,27 @@ body.bg-pattern-sparkles {
       opacity: 1 !important;
       background: color-mix(in srgb, var(--fg) 9%, transparent) !important;
     }
+    #doc-indicator-btn.doc-writing,
+    #rail-documents.doc-writing {
+      color: var(--accent, var(--red)) !important;
+      opacity: 1 !important;
+      background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent) !important;
+      animation: doc-writing-indicator-pulse 1.4s ease-in-out infinite;
+    }
+    #doc-indicator-btn.doc-writing::after,
+    #rail-documents.doc-writing::after {
+      content: "";
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent);
+      flex: 0 0 auto;
+    }
+    @keyframes doc-writing-indicator-pulse {
+      0%, 100% { filter: brightness(0.9); }
+      50% { filter: brightness(1.35); }
+    }
     #overflow-doc-btn.has-docs,
     #overflow-doc-btn.active {
       color: var(--accent, var(--red));
@@ -4159,6 +4180,113 @@ body.bg-pattern-sparkles {
       border-color: var(--accent-primary, var(--red));
       color: var(--accent-primary, var(--red));
     }
+
+    /* ── Live Code Preview Panel ──────────────────────────────────────────── */
+    .live-preview-panel {
+      position: fixed;
+      top: 0; right: 0; bottom: 0;
+      width: 42vw;
+      min-width: 320px;
+      max-width: 900px;
+      background: var(--bg);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      z-index: 1100;
+      box-shadow: -4px 0 24px rgba(0,0,0,.18);
+      transform: translateX(100%);
+      transition: transform .28s cubic-bezier(0.22, 1, 0.36, 1),
+                  box-shadow .28s ease;
+      will-change: transform;
+    }
+    .live-preview-panel.visible {
+      transform: translateX(0);
+    }
+    .live-preview-resize-handle {
+      position: absolute;
+      left: -4px; top: 0; bottom: 0;
+      width: 8px;
+      cursor: col-resize;
+      z-index: 2;
+      background: transparent;
+      transition: background .15s;
+    }
+    .live-preview-resize-handle:hover,
+    .live-preview-panel.resizing .live-preview-resize-handle {
+      background: color-mix(in srgb, var(--accent, var(--red)) 40%, transparent);
+    }
+    .live-preview-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 10px 0 14px;
+      height: 40px;
+      min-height: 40px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+      flex-shrink: 0;
+    }
+    .live-preview-title {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: .03em;
+      color: var(--fg);
+      opacity: 0.8;
+      user-select: none;
+    }
+    .live-preview-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--accent, var(--red));
+      display: inline-block;
+      flex-shrink: 0;
+      animation: live-preview-pulse 2.2s ease-in-out infinite;
+    }
+    @keyframes live-preview-pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.7); }
+    }
+    .live-preview-panel:not(.streaming) .live-preview-dot {
+      animation: none;
+      opacity: 0.4;
+    }
+    .live-preview-header-actions {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+    }
+    .live-preview-btn {
+      background: none;
+      border: none;
+      color: var(--fg);
+      cursor: pointer;
+      opacity: 0.5;
+      padding: 5px 6px;
+      border-radius: 5px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: opacity .15s, background .15s;
+      line-height: 1;
+    }
+    .live-preview-btn:hover { opacity: 1; background: var(--hover); }
+    .live-preview-close-btn:hover { color: var(--red); opacity: 1; }
+    .live-preview-iframe {
+      flex: 1 1 0;
+      width: 100%;
+      border: none;
+      background: #fff;
+      display: block;
+    }
+    /* Nudge chat container to not overlap panel when preview is open */
+    body.live-preview-open .chat-container,
+    body.live-preview-open nav {
+      transition: padding-right .28s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
     /* Reserve room on the right so the output text doesn't slide under
        either the Copy pill or the Close X. Applies to both the chat run
        panel AND the document panel (doc-run-output reuses the same children). */
@@ -10451,6 +10579,7 @@ details a:hover {
   color: var(--fg);
   font-weight: 500;
   margin: 0;
+  margin-right: auto;
 }
 
 .preset-slider-value {
@@ -23759,6 +23888,135 @@ body:not(.welcome-ready) #welcome-screen {
 .tasks-activity-list {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+}
+
+.humanize-modal-content {
+  width: min(980px, 94vw);
+  height: min(680px, 88vh);
+  max-width: 94vw;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+.humanize-modal-content .modal-header h4 {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 auto 0 0;
+}
+.humanize-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.humanize-toolbar select { flex: 1 1 220px; min-width: 150px; }
+.humanize-progress[hidden] { display: none !important; }
+.humanize-progress {
+  margin: 0 0 10px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 30%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 82%, var(--accent, var(--red)) 6%);
+}
+.humanize-progress-head {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+}
+.humanize-progress-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent, var(--red));
+  animation: humanize-dot-pulse 1.2s ease-in-out infinite;
+}
+.humanize-progress-label { font-weight: 600; }
+.humanize-progress-step {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.82;
+}
+.humanize-progress-elapsed { opacity: 0.58; font-variant-numeric: tabular-nums; }
+.humanize-progress-track {
+  position: relative;
+  height: 3px;
+  margin: 8px 0 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+}
+.humanize-progress-fill {
+  display: block;
+  height: 100%;
+  width: 18%;
+  border-radius: inherit;
+  background: var(--accent, var(--red));
+  transition: width 0.35s ease;
+}
+.humanize-progress-fill.is-indeterminate {
+  position: relative;
+  width: 34%;
+  animation: humanize-progress-sweep 1.25s ease-in-out infinite;
+}
+.humanize-progress-detail {
+  overflow: hidden;
+  color: color-mix(in srgb, var(--fg) 58%, transparent);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.humanize-progress.is-done .humanize-progress-dot { animation: none; background: #22c55e; }
+.humanize-progress.is-error { border-color: color-mix(in srgb, var(--color-error, var(--red)) 55%, var(--border)); }
+.humanize-progress.is-error .humanize-progress-dot,
+.humanize-progress.is-error .humanize-progress-fill { animation: none; background: var(--color-error, var(--red)); }
+.humanize-body {
+  min-height: 0;
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+}
+.humanize-pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+.humanize-pane > span { opacity: 0.68; }
+.humanize-pane textarea {
+  min-height: 280px;
+  max-height: none;
+  flex: 1;
+  resize: none;
+  line-height: 1.5;
+  background: color-mix(in srgb, var(--panel) 70%, var(--bg));
+}
+@keyframes humanize-dot-pulse {
+  0%, 100% { opacity: 0.65; box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, var(--red)) 42%, transparent); }
+  50% { opacity: 1; box-shadow: 0 0 0 5px transparent; }
+}
+@keyframes humanize-progress-sweep {
+  from { left: -38%; }
+  to { left: 104%; }
+}
+@media (max-width: 768px) {
+  .humanize-modal-content {
+    width: 100vw;
+    height: 100dvh;
+    max-width: none;
+    max-height: none;
+  }
+  .humanize-body { grid-template-columns: 1fr; }
+  .humanize-pane textarea { min-height: 180px; }
 }
 
 /* Tasks tabs reuse the .memory-tab look. The Brain window's tab bar is

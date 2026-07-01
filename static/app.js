@@ -25,6 +25,7 @@ import galleryModule from './js/gallery.js';
 import tasksModule from './js/tasks.js?v=20260630tasksactivity';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
+import humanizeModule from './js/humanize.js';
 import adminModule from './js/admin.js';
 import settingsModule from './js/settings.js';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
@@ -981,6 +982,14 @@ function initializeEventListeners() {
       }
     });
   }
+
+  const toolHumanizeBtn = el('tool-humanize-btn');
+  if (toolHumanizeBtn) {
+    toolHumanizeBtn.addEventListener('click', async () => {
+      const Modals = await import('./js/modalManager.js');
+      if (!Modals.toggle('humanize-modal')) humanizeModule.open();
+    });
+  }
   // Refresh notes due-reminder badge on load and every 5 minutes
   if (notesModule && notesModule.refreshDueBadge) {
     notesModule.refreshDueBadge();
@@ -1388,6 +1397,7 @@ function initializeEventListeners() {
         deep_research:   ['research-toggle-btn', 'tool-research-btn', 'overflow-research-btn', 'rail-research'],
         document_editor: ['overflow-doc-btn', 'rail-documents'],
         gallery:         ['tool-gallery-btn', 'rail-gallery'],
+        humanize:        ['tool-humanize-btn'],
       };
       Object.entries(map).forEach(([key, ids]) => {
         if (features[key] === false) {
@@ -1807,6 +1817,10 @@ function initializeEventListeners() {
   const docIndicatorBtn = el('doc-indicator-btn');
   if (docIndicatorBtn) {
     docIndicatorBtn.addEventListener('click', () => {
+      if (docIndicatorBtn.classList.contains('doc-writing')) {
+        documentModule?.ensurePaneMounted?.();
+        return;
+      }
       const ob = el('overflow-doc-btn');
       if (ob) ob.click();
     });
@@ -2505,6 +2519,7 @@ function initializeEventListeners() {
     'tool-library':        '#tool-library-btn',
     'tool-memory':         '#tool-memory-btn',
     'tool-notes':          '#tool-notes-btn',
+    'tool-humanize':       '#tool-humanize-btn',
     'tool-tasks':          '#tool-tasks-btn',
     'tool-theme':          '#tool-theme-btn',
     'user-bar':            '#user-bar-profile',
@@ -2849,10 +2864,10 @@ function initializeEventListeners() {
   // entry restores the modal. Works for hand-rolled and dynamically-created
   // modals via a MutationObserver on document.body.
   (function initModalMinimize() {
-    // custom-preset-modal (the Prompt window) is handled by the new
+    // custom-preset-modal (the Prompt window) and humanize-modal are handled by the new
     // modalManager dock (registered in _AUTO_WIRE), so the legacy dock must
     // not also inject a `_`/chip for it.
-    const SKIP_IDS = new Set(['styled-confirm-overlay', 'custom-preset-modal']);
+    const SKIP_IDS = new Set(['styled-confirm-overlay', 'custom-preset-modal', 'humanize-modal']);
     const dockEntries = new Map(); // modal element -> dock entry element
 
     let dock = document.getElementById('modal-dock');
@@ -3582,6 +3597,10 @@ function startAegisApp() {
   const _railDocsBtn = el('rail-documents');
   if (_railDocsBtn) {
     _railDocsBtn.addEventListener('click', () => {
+      if (_railDocsBtn.classList.contains('doc-writing')) {
+        documentModule?.ensurePaneMounted?.();
+        return;
+      }
       const ob = el('overflow-doc-btn');
       if (ob) ob.click();
     });

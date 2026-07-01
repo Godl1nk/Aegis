@@ -1035,6 +1035,104 @@ def _assistant_requested_followup(messages: List[Dict]) -> bool:
     return False
 
 
+_CODE_ARTIFACT_ACTION_RE = re.compile(
+    r"\b(?:build|create|generate|write|make|implement|develop|scaffold|code)\b",
+    re.IGNORECASE,
+)
+_CODE_ARTIFACT_NOUN_RE = re.compile(
+    r"\b(?:code|script|program|app|application|website|web\s*page|component|"
+    r"game|demo|prototype|single[- ]file|html|css|javascript|typescript|"
+    r"python|java|rust|golang|react|vue|svelte)\b",
+    re.IGNORECASE,
+)
+_CODE_ARTIFACT_CONCEPT_RE = re.compile(
+    r"^\s*(?:how|why|what|when|where|explain|describe|compare|review)\b",
+    re.IGNORECASE,
+)
+
+
+def _classify_code_artifact_request(text: str) -> Dict[str, object]:
+    """Return conservative UI hints for an explicit code-generation request."""
+    value = str(text or "").strip()
+    requested = bool(
+        value
+        and _CODE_ARTIFACT_ACTION_RE.search(value)
+        and _CODE_ARTIFACT_NOUN_RE.search(value)
+        and not _CODE_ARTIFACT_CONCEPT_RE.search(value)
+    )
+    lower = value.lower()
+    standalone = bool(
+        requested
+        and (
+            re.search(r"\bsingle[- ](?:file|script)\b", lower)
+            or re.search(r"\bopen(?:ed)?\s+in\s+(?:a\s+)?(?:chrome|browser)\b", lower)
+            or "browser os" in lower
+        )
+    )
+    language = ""
+    if requested:
+        if any(token in lower for token in ("html", "web page", "website", "browser")):
+            language = "html"
+        elif "typescript" in lower:
+            language = "typescript"
+        elif "javascript" in lower or re.search(r"\bjs\b", lower):
+            language = "javascript"
+        elif "python" in lower:
+            language = "python"
+        elif "rust" in lower:
+            language = "rust"
+        elif "golang" in lower or re.search(r"\bgo\b", lower):
+            language = "go"
+        elif "java" in lower:
+            language = "java"
+    label = language.upper() if language else "code"
+    return {
+        "requested": requested,
+        "standalone": standalone,
+        "language": language,
+        "title": f"Generating {label}",
+    }
+
+
+def _is_incomplete_document_tool_call(text: str) -> bool:
+    """Detect a hybrid create_document envelope that omitted its content."""
+    value = str(text or "")
+    if "create_document" not in value.lower():
+        return False
+    names = {
+        match.lower()
+        for match in re.findall(
+            r"<parameter(?:\s+name\s*=\s*|\s*=\s*)[\"']?(\w+)",
+            value,
+            re.IGNORECASE,
+        )
+    }
+    return bool(names & {"title", "language"}) and "content" not in names
+
+
+def _document_block_as_chat_code(block: ToolBlock, fallback_language: str) -> str:
+    """Convert a model-ignored create_document call into visible chat code."""
+    if block.tool_type != "create_document":
+        return ""
+    lines = str(block.content or "").strip().splitlines()
+    if len(lines) < 2:
+        return ""
+    known_languages = {
+        "python", "py", "javascript", "js", "typescript", "ts", "html",
+        "css", "json", "yaml", "bash", "sql", "rust", "go", "java",
+        "c", "cpp", "markdown", "text", "svg", "xml",
+    }
+    language = str(fallback_language or "text").lower()
+    content_start = 1
+    if lines[1].strip().lower() in known_languages:
+        language = lines[1].strip().lower()
+        content_start = 2
+    body = "\n".join(lines[content_start:]).strip()
+    if not body:
+        return ""
+    return f"```{language}\n{body}\n```"
+
+
 def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, object]:
     """Classify only whether this turn deserves domain tool retrieval.
 
@@ -1058,6 +1156,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         }
 
     domains: Set[str] = set()
+    code_artifact = _classify_code_artifact_request(retrieval_query)
 
     def has(*patterns: str) -> bool:
         return any(re.search(p, q) for p in patterns)
@@ -1078,6 +1177,8 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         r"\b(?:code|script|program|game|function|class|module|app)\b",
     )
     if has(r"\b(documents?|docs?|draft|compose|poem|story|essay|outline|letter|edit|rewrite|proofread|suggest|feedback|review this|make a file)\b"):
+        domains.add("documents")
+    if code_artifact["requested"]:
         domains.add("documents")
     if "notes_calendar_tasks" not in domains and has(r"\bwrite\b"):
         domains.add("documents")
@@ -2465,6 +2566,7 @@ async def stream_agent_loop(
     _t0 = time.time()
     _needs_admin = _detect_admin_intent(messages)
     _last_user = _extract_last_user_message(messages)
+    _code_artifact = _classify_code_artifact_request(_last_user)
     _intent = _classify_agent_request(messages, _last_user)
     _low_signal_turn = bool(_intent.get("low_signal"))
     _casual_low_signal_turn = _is_casual_low_signal(_last_user)
@@ -2686,6 +2788,20 @@ async def stream_agent_loop(
     # panel is open.
     if _relevant_tools is not None and _active_document_relevant:
         _relevant_tools.update({"edit_document", "update_document", "suggest_document"})
+    if (
+        _relevant_tools is not None
+        and _code_artifact["requested"]
+    ):
+        if _code_artifact["standalone"]:
+            # Standalone artifacts are returned directly in chat. Do not expose
+            # any document or workspace mutation route: weak local models loop
+            # while debating which tool syntax to use instead of writing code.
+            _relevant_tools.difference_update({
+                "create_document", "update_document", "edit_document",
+                "suggest_document", "write_file", "edit_file", "bash", "python",
+            })
+        elif "create_document" not in disabled_tools:
+            _relevant_tools.add("create_document")
 
     # Current-turn chat uploads are real files under the upload/data root. Make
     # the read-side file/document tools visible immediately so the agent can
@@ -2842,17 +2958,70 @@ async def stream_agent_loop(
     else:
         _is_api_model = any(h in endpoint_url for h in _API_HOSTS) or _model_supports_tools
     _compact_agent_prompt = _is_api_model or _is_ollama_native or _ollama_openai_compat
+    _code_chat_direct = bool(
+        _code_artifact["requested"]
+        and _code_artifact["standalone"]
+        and not guide_only
+        and not plan_mode
+    )
+    _code_stream_enabled = bool(
+        _code_artifact["requested"]
+        and not _code_artifact["standalone"]
+        and not guide_only
+        and not plan_mode
+        and "create_document" not in disabled_tools
+    )
     messages, mcp_schemas = _build_system_prompt(
-        messages, model, _prompt_active_document, mcp_mgr, disabled_tools,
+        messages, model, None if _code_chat_direct else _prompt_active_document, mcp_mgr, disabled_tools,
         needs_admin=_needs_admin, relevant_tools=_relevant_tools,
         mcp_disabled_map=_mcp_disabled_map,
         compact=_compact_agent_prompt,
         owner=owner,
         suppress_local_context=guide_only,
         suppress_skills=_low_signal_turn,
-        active_email=active_email,
+        active_email=None if _code_chat_direct else active_email,
     )
-    if workspace and not guide_only:
+    if _code_chat_direct:
+        _tool_language = str(_code_artifact["language"] or "text")
+        _code_chat_directive = (
+            "## STANDALONE CODE ARTIFACT — DIRECT CHAT OUTPUT\n"
+            "Return the complete implementation directly in this chat as one "
+            f"fenced `{_tool_language}` code block. Do not call create_document, "
+            "write_file, edit_file, bash, Python, or any other tool. Do not "
+            "announce a plan or say that you will write it later. Start the "
+            "finished code in this response and include all required HTML, CSS, "
+            "and JavaScript inline when the requested format is HTML."
+        )
+        # This is deliberately a clean system prompt, not a prefix on the
+        # agent prompt. The generic agent rules say large code must use
+        # create_document, which directly contradicts direct-chat mode and
+        # sends weaker models back into the tool-planning loop.
+        if messages and messages[0].get("role") == "system":
+            messages[0]["content"] = _code_chat_directive
+        else:
+            messages.insert(0, {"role": "system", "content": _code_chat_directive})
+    elif _code_stream_enabled:
+        _tool_language = str(_code_artifact["language"] or "text")
+        _code_tool_directive = (
+            "## CODE ARTIFACT — TOOL FIRST\n"
+            "The user explicitly requested a new code artifact. Do not announce, "
+            "describe, estimate, plan, or promise that you will create it. Your "
+            "first visible response must be the actual `create_document` call "
+            "containing the complete implementation. For fenced-tool models, "
+            "begin exactly with:\n"
+            f"```create_document\n{_code_artifact['title']}\n{_tool_language}\n"
+            "<complete implementation>\n```\n"
+            "Do not emit prose before the tool call."
+        )
+        if messages and messages[0].get("role") == "system":
+            messages[0]["content"] = _code_tool_directive + "\n\n" + (messages[0].get("content") or "")
+        else:
+            messages.insert(0, {"role": "system", "content": _code_tool_directive})
+    if (
+        workspace
+        and not guide_only
+        and not _code_chat_direct
+    ):
         # PREPEND (not append) so it dominates the large base prompt — appended
         # at the end, small models ignored it and asked the user for code. The
         # folder IS the project; the agent must explore it, not ask.
@@ -2980,6 +3149,9 @@ async def stream_agent_loop(
     )
     yield f"data: {json.dumps({'type': 'agent_prep', 'data': {k: round(v, 3) for k, v in prep_timings.items()}})}\n\n"
 
+    _code_stream_started = False
+    _code_stream_completed = False
+
     full_response = ""
     total_start = time.time()
     time_to_first_token = None
@@ -3018,6 +3190,8 @@ async def stream_agent_loop(
     # that *can't* call the tool from looping forever.
     _intent_nudge_count = 0
     _MAX_INTENT_NUDGES = 2
+    _malformed_doc_nudge_count = 0
+    _direct_code_retry_count = 0
 
     # "I said I would, then didn't" detector. The pattern that breaks debug
     # loops on weak models (deepseek-v4-flash mid-2026): the model writes
@@ -3032,7 +3206,8 @@ async def stream_agent_loop(
         r"(?:tail|check|investigate|look at|see|tail|read|fetch|inspect|"
         r"verify|diagnose|examine|debug|capture|grab|pull|view|run|call|"
         r"trigger|launch|start|kick off|stop|kill|restart|adopt|serve|"
-        r"register|adopt|list|search|find|query|hit|ping|test|use|perform|do)"
+        r"register|adopt|list|search|find|query|hit|ping|test|use|perform|do|"
+        r"build|create|write|generate|implement|develop|scaffold|code)"
         r"\b[^.\n]{0,140}",
         re.IGNORECASE,
     )
@@ -3067,7 +3242,9 @@ async def stream_agent_loop(
         # Merge native tool schemas with MCP tool schemas, filtering out
         # Only send function schemas for API models (OpenAI, Anthropic, etc.).
         # Local models use fenced code blocks or <tool_code> — schemas add overhead.
-        if _force_answer:
+        if _code_chat_direct:
+            all_tool_schemas = []
+        elif _force_answer:
             # Loop-breaker decided the model has enough info but keeps
             # calling tools. Send NO tools this round so it's forced to
             # write the answer instead of flailing further.
@@ -3186,17 +3363,25 @@ async def stream_agent_loop(
                     if data.get("type") == "tool_call_delta":
                         if tool_policy and tool_policy.blocks(data.get("name")):
                             continue
+                        if _code_chat_direct:
+                            # Direct-chat mode never exposes document lifecycle
+                            # events. The finalized native call, if any, is
+                            # recovered into ordinary fenced code below.
+                            continue
                         # Stream document content to frontend as AI generates it
                         logger.debug(f"tool_call_delta: name={data.get('name')}, len(arg_delta)={len(data.get('arg_delta', ''))}")
                         _doc_acc += data.get("arg_delta", "")
                         if not _doc_opened:
                             tm = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', _doc_acc)
-                            if tm:
+                            cm = re.search(r'"content"\s*:\s*"', _doc_acc)
+                            if tm or cm:
                                 _doc_opened = True
-                                try:
-                                    title = json.loads('"' + tm.group(1) + '"')
-                                except Exception:
-                                    title = tm.group(1)
+                                title = ""
+                                if tm:
+                                    try:
+                                        title = json.loads('"' + tm.group(1) + '"')
+                                    except Exception:
+                                        title = tm.group(1)
                                 lm = re.search(r'"language"\s*:\s*"((?:[^"\\]|\\.)*)"', _doc_acc)
                                 lang = ""
                                 if lm:
@@ -3281,22 +3466,27 @@ async def stream_agent_loop(
                         # Detect text-fence doc streaming. Normal agent prompts
                         # use ```create_document; the doc LoRA streaming path
                         # uses neutral ```document to avoid triggering learned
-                        # hidden native tool-call output.
+                        # hidden native tool-call output. Standalone direct-chat
+                        # code must never activate the document UI.
                         if (
-                            (round_num > 1 or _ody_doc_stream_create_mode)
+                            not _code_chat_direct
+                            and (round_num > 1 or _ody_doc_stream_create_mode)
                             and not _doc_acc
                             and not (tool_policy and tool_policy.blocks("create_document"))
                         ):
                             _fence_markers = (
                                 ('```document\n', '```documen\n')
                                 if _ody_doc_stream_create_mode
-                                else ('```create_document\n',)
+                                else ('```create_document\r\n', '```create_document\n')
                             )
                             _fence_marker = None
+                            _nl = '\n'
                             for _mk in _fence_markers:
                                 _candidate = _mk[0] if isinstance(_mk, tuple) else _mk
                                 if _candidate in round_response[_doc_scan_from:]:
                                     _fence_marker = _candidate
+                                    if '\r' in _candidate:
+                                        _nl = '\r\n'
                                     break
                             # Open a new block if we're not currently inside one
                             # and there's an unstreamed marker in the response.
@@ -3308,20 +3498,30 @@ async def stream_agent_loop(
                             if not _doc_opened and _fence_marker:
                                 _fi = round_response.index(_fence_marker, _doc_scan_from)
                                 _fa = round_response[_fi + len(_fence_marker):]
-                                _fl = _fa.split('\n')
-                                if _fl and _fl[0].strip():
+                                _fl = _fa.split(_nl)
+                                if (
+                                    _fl
+                                    and _fl[0].strip()
+                                    and not re.match(
+                                        r"<parameter(?:\s+name\s*=|\s*=)",
+                                        _fl[0].strip(),
+                                        re.IGNORECASE,
+                                    )
+                                ):
                                     _doc_opened = True
                                     _ft = _fl[0].strip()
                                     _kl = {'python','py','javascript','js','typescript','ts','html','css','json','yaml','bash','sql','rust','go','java','c','cpp','markdown','text'}
                                     _flang = _fl[1].strip() if len(_fl) > 1 and _fl[1].strip().lower() in _kl else ''
-                                    _doc_fence_offset = _fi + len(_fence_marker) + len(_fl[0]) + 1
+                                    _doc_fence_offset = _fi + len(_fence_marker) + len(_fl[0]) + len(_nl)
                                     if _flang:
-                                        _doc_fence_offset += len(_fl[1]) + 1
+                                        _doc_fence_offset += len(_fl[1]) + len(_nl)
                                     _doc_last_len = 0
                                     yield f'data: {json.dumps({"type": "doc_stream_open", "title": _ft, "language": _flang})}\n\n'
                             if _doc_opened:
                                 _rc = round_response[_doc_fence_offset:]
-                                _ci = _rc.find('\n```')
+                                _ci = _rc.find('\r\n```')
+                                if _ci == -1:
+                                    _ci = _rc.find('\n```')
                                 if _ci >= 0:
                                     _rc = _rc[:_ci]
                                 if len(_rc) > _doc_last_len:
@@ -3397,6 +3597,41 @@ async def stream_agent_loop(
                     else converted_calls[:1]
                 )
 
+        if _code_chat_direct and tool_blocks:
+            # Runtime backstop: even if a local model ignores the clean prompt
+            # and emits create_document syntax from its chat template, never
+            # execute it or activate document UI. Recover its completed body as
+            # ordinary fenced code in chat.
+            direct_code = next(
+                (
+                    _document_block_as_chat_code(
+                        block,
+                        str(_code_artifact["language"] or "text"),
+                    )
+                    for block in tool_blocks
+                    if block.tool_type == "create_document"
+                ),
+                "",
+            )
+            tool_blocks = []
+            native_tool_calls = []
+            if direct_code:
+                direct_delta = ("\n\n" if round_response.strip() else "") + direct_code
+                round_response += direct_delta
+                full_response += direct_delta
+                yield f'data: {json.dumps({"delta": direct_delta})}\n\n'
+            elif _direct_code_retry_count < 1:
+                _direct_code_retry_count += 1
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "Do not emit any tool syntax. Output the complete code "
+                        "directly in one ordinary fenced code block now."
+                    ),
+                })
+                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                continue
+
         # Force-answer round: we told the model to STOP calling tools and
         # answer. If it ignored that and emitted a (possibly DSML) tool
         # call anyway, discard it — don't execute, don't re-loop. Keep
@@ -3450,7 +3685,15 @@ async def stream_agent_loop(
             tc.get("name") in ("create_document", "update_document")
             for tc in native_tool_calls
         )
-        if not has_doc_tool and session_id and "create_document" not in (disabled_tools or set()):
+        if has_doc_tool and _code_stream_enabled:
+            _code_stream_started = True
+            yield f'data: {json.dumps({"type": "doc_stream_phase", "phase": "generating"})}\n\n'
+        if (
+            not _code_chat_direct
+            and not has_doc_tool
+            and session_id
+            and "create_document" not in (disabled_tools or set())
+        ):
             _code_block_re = re.compile(r'```(\w*)\n([\s\S]*?)```')
             for m in _code_block_re.finditer(round_response):
                 lang_tag = m.group(1).lower()
@@ -3466,6 +3709,9 @@ async def stream_agent_loop(
                 doc_title = f"Code ({doc_lang})"
                 tb = ToolBlock("create_document", f"{doc_title}\n{doc_lang}\n{code_body}")
                 tool_blocks.append(tb)
+                if _code_stream_enabled:
+                    _code_stream_started = True
+                    yield f'data: {json.dumps({"type": "doc_stream_phase", "phase": "generating"})}\n\n'
                 # Stream the document open event
                 yield f'data: {json.dumps({"type": "doc_stream_open", "title": doc_title, "language": doc_lang})}\n\n'
                 yield f'data: {json.dumps({"type": "doc_stream_delta", "content": code_body})}\n\n'
@@ -3483,6 +3729,24 @@ async def stream_agent_loop(
         round_texts.append(cleaned_round)
 
         if not tool_blocks:
+            if (
+                _code_stream_enabled
+                and _is_incomplete_document_tool_call(round_response)
+                and _malformed_doc_nudge_count < 2
+            ):
+                _malformed_doc_nudge_count += 1
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "Your create_document call was rejected because it contained "
+                        "title/language metadata but NO document content. Retry now "
+                        "with one complete create_document call. The content argument "
+                        "must contain the full implementation; do not close the tool "
+                        "call immediately after title or language."
+                    ),
+                })
+                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                continue
             # ── Completion verifier (mechanism 3a) ────────────────────
             # The model is finishing. If this was an effectful agentic turn,
             # have a fresh-context verifier independently check the work
@@ -3560,6 +3824,20 @@ async def stream_agent_loop(
                         "session_id from the serve/list result. Never answer with "
                         "\"check logs\" when those tools are available."
                     )
+                _tool_language = str(_code_artifact["language"] or "text")
+                _tool_instruction = (
+                    " For this standalone code artifact, do NOT call a tool. "
+                    f"Output the complete implementation directly now in one "
+                    f"```{_tool_language} fenced code block."
+                    if _code_chat_direct
+                    else (
+                        " For this code artifact, emit a create_document tool call now. "
+                        "If fenced tools are required, use exactly: "
+                        f"```create_document\\nTitle\\n{_tool_language}\\n<complete code>\\n```."
+                        if _code_artifact["requested"]
+                        else ""
+                    )
+                )
                 messages.append({
                     "role": "system",
                     "content": (
@@ -3571,6 +3849,7 @@ async def stream_agent_loop(
                         f"{_cookbook_log_hint}"
                         "If you decided not to do it after all, say so plainly in "
                         "one sentence instead of restating the plan."
+                        + _tool_instruction
                     ),
                 })
                 # Visible signal in the stream so the user knows we caught it.
@@ -3701,6 +3980,8 @@ async def stream_agent_loop(
                 }
                 logger.info("Tool blocked before start by policy: %s", block.tool_type)
             else:
+                if is_doc_tool and _code_stream_enabled:
+                    yield f'data: {json.dumps({"type": "doc_stream_phase", "phase": "saving"})}\n\n'
                 yield (
                     f'data: {json.dumps({"type": "tool_start", "tool": block.tool_type, "command": cmd_display, "full_command": full_command, "round": round_num})}\n\n'
                 )
@@ -3986,6 +4267,10 @@ async def stream_agent_loop(
             # back as active_doc_id next turn (otherwise the agent can't "see"
             # the document it just created on the follow-up message).
             if block.tool_type in ("create_document", "update_document", "edit_document") and result.get("doc_id"):
+                if _code_stream_enabled:
+                    _code_stream_started = True
+                    _code_stream_completed = True
+                    yield f'data: {json.dumps({"type": "doc_stream_phase", "phase": "complete"})}\n\n'
                 yield (
                     'data: ' + json.dumps({
                         "type": "doc_update",
@@ -4119,6 +4404,10 @@ async def stream_agent_loop(
     if _exhausted_rounds:
         logger.info("[agent] round cap (%d) reached mid-task — emitting rounds_exhausted", max_rounds)
         yield f'data: {json.dumps({"type": "rounds_exhausted", "rounds": max_rounds})}\n\n'
+
+    if _code_stream_enabled and not _code_stream_completed:
+        _reason = "Generation stopped" if _code_stream_started else "No code document was produced"
+        yield f'data: {json.dumps({"type": "doc_stream_cancel", "reason": _reason})}\n\n'
 
     # If the response is completely empty and no tools were executed,
     # yield a fallback message so the user is not left hanging.

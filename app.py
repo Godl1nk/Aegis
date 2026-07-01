@@ -180,6 +180,7 @@ _TIMEOUT_EXEMPT_PREFIXES = (
     "/api/upload",          # large files
     "/api/image",           # diffusion proxies (inpaint/harmonize/upscale/etc.) — own 120s httpx timeout
     "/api/memory/audit",    # retains own 120s LLM inactivity timeout
+    "/api/humanize",        # LLM rewrite; route owns a 120s upstream timeout
 )
 
 
@@ -757,6 +758,9 @@ app.include_router(setup_backup_routes(memory_manager, preset_manager, skills_ma
 
 from routes.font_routes import setup_font_routes
 app.include_router(setup_font_routes())
+
+from routes.humanize_routes import setup_humanize_routes
+app.include_router(setup_humanize_routes())
 
 
 # MCP (Model Context Protocol)

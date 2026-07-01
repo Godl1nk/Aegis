@@ -533,17 +533,22 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
     @router.delete("/{memory_id}")
     def delete_memory(request: Request, memory_id: str):
         """Delete a memory item by its ID."""
+        from src.auth_helpers import require_privilege
+        require_privilege(request, "can_manage_memory")
         user = _owner(request)
         all_mem = memory_manager.load_all()
 
         # Find and verify ownership before deleting
         target = next((m for m in all_mem if m["id"] == memory_id), None)
         if not target:
-            raise HTTPException(404, f"Memory item {memory_id} not found")
+            return {"ok": True, "already_deleted": True, "message": "Memory already deleted"}
         _verify_memory_owner(target, user)
 
-        all_mem = [m for m in all_mem if m["id"] != memory_id]
-        memory_manager.save(all_mem)
+        if not memory_manager.delete_entry(memory_id, owner=user):
+            if not any(m.get("id") == memory_id for m in memory_manager.load(owner=user)):
+                return {"ok": True, "already_deleted": True, "message": "Memory already deleted"}
+            raise HTTPException(500, f"Failed to delete memory item {memory_id}")
+
         # Sync vector index
         if memory_vector and memory_vector.healthy:
             memory_vector.remove(memory_id)

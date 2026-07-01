@@ -195,6 +195,55 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     }
   }
 
+  // Exposed on window._livePreview so the streaming loop can call it without
+  // tightly coupling to DOM structure. Handles the popout iframe logic.
+  (function() {
+    var _panel, _iframe;
+    function _ensureRefs() {
+      if (!_panel) _panel = document.getElementById('live-preview-panel');
+      if (!_iframe) _iframe = document.getElementById('live-preview-iframe');
+    }
+    function _syncBodyPadding() {
+      if (document.body.classList.contains('live-preview-open')) {
+        document.body.style.paddingRight = '450px';
+      } else {
+        document.body.style.paddingRight = '';
+      }
+    }
+    function _open() {
+      _ensureRefs();
+      if (!_panel) return;
+      _panel.style.display = '';
+      // Force reflow for transition
+      void _panel.offsetWidth;
+      _panel.classList.add('visible', 'streaming');
+      document.body.classList.add('live-preview-open');
+      _syncBodyPadding();
+    }
+    function _close() {
+      _ensureRefs();
+      if (!_panel) return;
+      _panel.classList.remove('visible', 'streaming');
+      document.body.classList.remove('live-preview-open');
+      _syncBodyPadding();
+      setTimeout(function() {
+        if (_panel && !_panel.classList.contains('visible')) {
+          _panel.style.display = 'none';
+        }
+      }, 320);
+      if (_iframe) _iframe.srcdoc = '';
+    }
+    function _update(code) {
+      _ensureRefs();
+      if (!_panel || !_iframe) return;
+      if (_iframe.srcdoc !== code) _iframe.srcdoc = code;
+    }
+    function _done() {
+      _ensureRefs();
+      if (_panel) _panel.classList.remove('streaming');
+    }
+    window._livePreview = { open: _open, close: _close, update: _update, done: _done };
+  })();
   let currentAccumulated = ''; // Track accumulated text across function scope
   let currentHolder = null; // Track current message holder
   let currentSpinner = null; // Track current spinner for stop cleanup
@@ -1554,9 +1603,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         if (_textPauseTimer) { clearTimeout(_textPauseTimer); _textPauseTimer = null; }
       };
 
-      // Document streaming state (text-fence detection)
-      let _docFenceOpened = false;
-      let _docFenceContentStart = -1;
+      let _lpFenceDetected = false;
+      let _lpLastCode = '';
+      let _lpLang = '';
+      let _lpRafId = 0;
+      const _lpFenceRe = /```(html|svg|xml)\r?\n([\s\S]*?)(?:\n```|$)/i;
       let _liveThinkSection = null;
       let _liveThinkContent = null;
       let _liveThinkInner = null;
@@ -1825,7 +1876,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 roundHolder.querySelector('.body').innerHTML = markdownModule.mdToHtml(markdownModule.squashOutsideCode(errMsg));
                 break;
               }
-              if (json.delta || json.type === 'agent_prep' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
+              if (json.delta || json.type === 'agent_prep' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'doc_stream_phase' || json.type === 'doc_stream_cancel' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
                 clearResponseTimeout();
                 clearProcessingProbe();
                 clearFirstTokenWaitTimers();
@@ -1859,6 +1910,40 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 accumulated += _delta;
                 roundText += _delta;
                 currentAccumulated = accumulated; // Update global tracker
+
+                // ── Live Code Preview ──────────────────────────────────────
+                // Only scan the non-thinking portion of the accumulated text.
+                // Strip <think>…</think> wrappers so we don't mistake thinking
+                // content for HTML code fences.
+                if (!_isBg) {
+                  var _lpText = accumulated.replace(/<(?:think(?:ing)?|thought)(?:\s[^>]*)?>[\s\S]*?<\/(?:think(?:ing)?|thought)>/gi, '');
+                  // Also strip an unclosed <think> block still streaming
+                  _lpText = _lpText.replace(/<(?:think(?:ing)?|thought)(?:\s[^>]*)?>[\s\S]*/i, '');
+                  // Re-extract the code block from _lpText each frame.
+                  // A stale char-index would drift as thinking blocks grow,
+                  // so we always regex-match fresh.
+                  var _lpMatch = _lpFenceRe.exec(_lpText);
+                  if (_lpMatch) {
+                    if (!_lpFenceDetected) {
+                      _lpFenceDetected = true;
+                      _lpLang = _lpMatch[1].toLowerCase();
+                      // Keep fenced code in chat; previews are user-opened only.
+                    }
+                    var _lpCode = _lpMatch[2];
+                    if (_lpCode !== _lpLastCode && !_lpRafId) {
+                      // Capture by value so the rAF callback uses the right snapshot
+                      var _lpSnap = _lpCode;
+                      _lpRafId = requestAnimationFrame(function() {
+                        _lpRafId = 0;
+                        if (_lpSnap !== _lpLastCode) {
+                          _lpLastCode = _lpSnap;
+                          window._livePreview && window._livePreview.update(_lpSnap);
+                        }
+                      });
+                    }
+                  }
+                }
+
                 // First token arrived — switch stop button from processing to streaming
                 if (wasEmpty && submitBtn && !_isBg) {
                   submitBtn.dataset.phase = 'receiving';
@@ -1894,7 +1979,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   if (closeIdx >= 0) raw = raw.slice(0, closeIdx);
                   documentModule.streamDocDelta(raw);
                 }
-
                 // Detect thinking-in-progress:
                 // 1. Normal: <think>...no closing tag yet
                 // 2. Malformed: <think></think>\n...text but no second </think> yet
@@ -1949,7 +2033,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                     const _afterClose = normalizedRoundText.replace(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>([\s\S]*?)<\/(?:think(?:ing)?|thought)>/i, '').trim();
                     // Only keep waiting if there's trailing text that looks like thinking (not tool calls)
                     const _hasToolCall = /```(?:bash|python|web_search|read_file|write_file|create_document|edit_document|manage_|generate_image)/i.test(_afterClose);
-                    const _hasOrphanClose = /<\/(?:think(?:ing)?|thought)>/i.test(_afterClose);
+                    const _hasOrphanClose = /<\/(?:think(?:ing)?|thought)\s*>/i.test(_afterClose);
                     if (!_hasToolCall && (_hasOrphanClose || (Date.now() - thinkingStartTime) < 500)) {
                       hasUnclosedThink = true; // keep waiting for real </think>
                     }
@@ -2006,9 +2090,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   }
                 } else if (hasUnclosedThink && isThinking) {
                   if (_liveThinkInner) {
-                    // Extract raw thinking text (strip known thinking wrappers and prefixes)
-                    var thinkText = markdownModule.normalizeThinkingMarkup(roundText)
-                      .replace(/<\/?(?:think(?:ing)?|thought)(?:\s+[^>]*)?>/gi, '')
+                    // Extract raw thinking text for the CURRENT block
+                    var normalized = markdownModule.normalizeThinkingMarkup(roundText);
+                    var thinkBlocks = normalized.split(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>/i);
+                    var thinkText = thinkBlocks.length > 1 ? thinkBlocks[thinkBlocks.length - 1] : normalized;
+                    var closeIdx = thinkText.search(/<\/(?:think(?:ing)?|thought)\s*>/i);
+                    if (closeIdx >= 0) thinkText = thinkText.substring(0, closeIdx);
+
+                    thinkText = thinkText
                       .replace(/<\|channel>thought\s*\n?/gi, '')
                       .replace(/<\|channel>response\s*\n?/gi, '')
                       .replace(/<channel\|>/gi, '');
@@ -2769,6 +2858,18 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 _scheduleThinkingSpinner();
                 uiModule.scrollHistory();
 
+              } else if (json.type === 'doc_stream_phase') {
+                if (_isBg) continue;
+                if (documentModule?.streamDocPhase) {
+                  documentModule.streamDocPhase(json.phase || 'generating');
+                }
+
+              } else if (json.type === 'doc_stream_cancel') {
+                if (_isBg) continue;
+                if (documentModule?.streamDocCancel) {
+                  documentModule.streamDocCancel(json.reason || '');
+                }
+
               } else if (json.type === 'doc_stream_open') {
                 if (_isBg) {
                   // Store for replay when user returns to this session
@@ -2841,8 +2942,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 currentToolBubble = null;
                 roundFinalized = false;
                 isThinking = false;
-                _docFenceOpened = false;
-                _docFenceContentStart = -1;
                 const box = document.getElementById('chat-history');
                 const newWrap = document.createElement('div');
                 newWrap.className = 'msg msg-ai msg-continuation streaming';
@@ -3479,6 +3578,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       }
       spinner = null;
       currentSpinner = null;
+      // Mark live preview stream as done (removes pulsing dot)
+      if (window._livePreview) window._livePreview.done();
+
 
       // Only reset UI state if still on the stream's session and was never backgrounded
       const _isBgFinally = (sessionModule.getCurrentSessionId() !== streamSessionId);

@@ -191,6 +191,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // Show/hide the toolbar doc indicator when docs exist
     const indicator = document.getElementById('doc-indicator-btn');
     if (indicator) indicator.classList.toggle('visible', hasDocs);
+    const railIndicator = document.getElementById('rail-documents');
+    if (railIndicator) railIndicator.style.display = hasDocs ? '' : 'none';
     // Hide overflow menu item when indicator is shown outside
     if (btn) btn.style.display = hasDocs ? 'none' : '';
     // Update session list icon
@@ -4769,7 +4771,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       });
       const _endDrag = () => {
         if (_pid !== null) {
-          try { _divCollapse.releasePointerCapture?.(_pid); } catch {}
+          try { _divCollapse.releasePointerCapture?.(_pid); } catch (e) {}
           _pid = null;
         }
       };
@@ -7691,7 +7693,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       _suggestionTotal = _activeSuggestions.length;
       _suggestionIndex = 0;
       _showCurrentSuggestion();
-    } catch {}
+    } catch (e) {}
   }
 
   /** Handle doc_suggestions SSE event — show one suggestion at a time.
@@ -7714,15 +7716,16 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // re-sent batch doesn't duplicate.
     let added = 0;
     for (const sugg of data.suggestions) {
-      if (existingIds.has(sugg.id)) continue;
-      _activeSuggestions.push({
-        id: sugg.id,
-        find: sugg.find,
-        replace: sugg.replace,
-        reason: sugg.reason,
-        cardEl: null,
-      });
-      added++;
+      if (!existingIds.has(sugg.id)) {
+        _activeSuggestions.push({
+          id: sugg.id,
+          find: sugg.find,
+          replace: sugg.replace,
+          reason: sugg.reason,
+          cardEl: null,
+        });
+        added++;
+      }
     }
     _suggestionTotal = (_suggestionTotal || 0) + added;
 
@@ -9750,8 +9753,49 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     }
     _syncHeaderActions();
   }
+  function _setStreamPhase(phase) {
+    const indicator = document.getElementById('doc-stream-indicator');
+    if (!indicator) return;
+    const labels = {
+      generating: 'generating',
+      saving: 'saving',
+      complete: 'saved',
+      error: 'stopped',
+    };
+    indicator.innerHTML = `<span class="doc-stream-dot"></span> ${labels[phase] || 'editing'}`;
+    indicator.style.display = phase === 'complete' ? 'none' : '';
+    indicator.dataset.phase = phase || '';
+  }
 
-  /** Open the document panel immediately for a doc being streamed in */
+  function _setDocWritingIndicator(active, phase = 'generating') {
+    const label = phase === 'saving' ? 'Saving document' : 'AI is writing — open document';
+    for (const id of ['doc-indicator-btn', 'rail-documents']) {
+      const indicator = document.getElementById(id);
+      if (!indicator) continue;
+      indicator.classList.toggle('doc-writing', active);
+      if (active) indicator.style.display = '';
+      indicator.title = active ? label : 'Open document';
+      indicator.setAttribute('aria-label', active ? label : 'Open document');
+    }
+    const textLabel = document.querySelector('#doc-indicator-btn .doc-indicator-label');
+    if (textLabel) textLabel.textContent = active ? (phase === 'saving' ? 'Saving' : 'Writing') : 'Document';
+  }
+
+  export function streamDocPhase(phase) {
+    if (!_streamDocId) return;
+    _setStreamPhase(phase);
+    _setDocWritingIndicator(phase !== 'complete' && phase !== 'error', phase);
+  }
+
+  /** Preserve any real streamed document and mark an interrupted stream. */
+  export function streamDocCancel(reason) {
+    if (!_streamDocId) return;
+    _setStreamPhase('error');
+    _setDocWritingIndicator(false, 'error');
+    if (reason && uiModule) uiModule.showToast(reason);
+  }
+
+  /** Track a streamed document without forcing the editor panel open. */
   export function streamDocOpen(title, language) {
     // Discard any pending AI-edit diff before this stream changes the active
     // document. When the AI streams a NEW document while an unapproved diff is
@@ -9761,6 +9805,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // points at the previously-active doc here, so exitDiffMode(true) restores
     // and saves THAT doc — same guard handleDocUpdate/switchToDoc use.
     if (_diffModeActive) exitDiffMode(true);
+    _setDocWritingIndicator(true, 'generating');
     // If already streaming a doc, reuse it (don't create a second temp doc)
     if (_streamDocId && docs.has(_streamDocId)) {
       const existing = docs.get(_streamDocId);
@@ -9804,8 +9849,6 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     _streamDocId = docId;
     activeDocId = docId;
     _syncDocIndicator();
-
-    if (!isOpen) openPanel();
 
     // Force doc button visible
     const toggleBtn = document.getElementById('overflow-doc-btn');
@@ -9972,6 +10015,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       _renderStreamingEmailBody(fields.body || '', { immediate: true });
     }
     _streamDocId = null;
+    _setDocWritingIndicator(false, 'complete');
     // Hide streaming indicator + cursor
     const indicator = document.getElementById('doc-stream-indicator');
     if (indicator) indicator.style.display = 'none';
@@ -10138,8 +10182,6 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
     // Auto-title from content if still "Untitled" and AI didn't provide a title
     if (!data.title) autoTitleFromContent(newContent, docId);
-
-    if (!isOpen) openPanel();
 
     // Force doc button visible (overrides appearance settings & toolbar collapse)
     const toggleBtn = document.getElementById('overflow-doc-btn');
@@ -10604,6 +10646,8 @@ const documentModule = {
   saveDocument,
   handleDocUpdate,
   handleDocSuggestions,
+  streamDocPhase,
+  streamDocCancel,
   streamDocOpen,
   streamDocDelta,
   streamDocFinalize,

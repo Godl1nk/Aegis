@@ -205,7 +205,7 @@ export function hasUnclosedThinkTag(text) {
     (text.match(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>/gi) || []).length
     + (text.match(/<\|channel>thought/gi) || []).length;
   const closeCount =
-    (text.match(/<\/(?:think(?:ing)?|thought)>/gi) || []).length
+    (text.match(/<\/(?:think(?:ing)?|thought)\s*>/gi) || []).length
     + (text.match(/<channel\|>/gi) || []).length;
   return openCount > closeCount;
 }
@@ -539,7 +539,7 @@ export function mdToHtml(src, opts) {
   // ___ALLOWED_HTML_0___) can leak into quoted HTML/JS samples, because the
   // placeholder gets captured as literal code content and never restored inside
   // the final <pre><code> block.
-  s = s.replace(/```(\w+)?\n([\s\S]*?)```/g, (_, lang, code) => {
+  s = s.replace(/```([a-zA-Z0-9_-]+)?\r?\n([\s\S]*?)```/g, (_, lang, code) => {
     const cleaned = code
       .replace(/\r\n/g, '\n')
       .replace(/[ \t]+$/gm, '')

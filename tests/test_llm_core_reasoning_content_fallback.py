@@ -69,6 +69,30 @@ def test_llm_call_async_returns_reasoning_content_when_content_empty(monkeypatch
     assert result == "async reasoning text"
 
 
+def test_llm_call_async_can_omit_generation_params(monkeypatch):
+    captured = {}
+
+    class _FakeAsyncClient:
+        async def post(self, *a, **kw):
+            captured["json"] = kw["json"]
+            req = httpx.Request("POST", "http://test-omit/v1/chat/completions")
+            return httpx.Response(200, request=req, json=_openai_msg("ok"))
+
+    monkeypatch.setattr(llm_core, "_get_http_client", lambda: _FakeAsyncClient())
+
+    result = asyncio.run(llm_core.llm_call_async(
+        "http://test-omit/v1/chat/completions",
+        "writer-model",
+        [{"role": "user", "content": "rewrite"}],
+        omit_generation_params=True,
+    ))
+
+    assert result == "ok"
+    assert "temperature" not in captured["json"]
+    assert "max_tokens" not in captured["json"]
+    assert "max_completion_tokens" not in captured["json"]
+
+
 # ---------------------------------------------------------------------------
 # 3. Normal content takes priority over reasoning_content when both present
 # ---------------------------------------------------------------------------

@@ -262,6 +262,17 @@ class CreateDocumentTool:
         raw = content or ""
         session_id = ctx.get("session_id")
         owner = ctx.get("owner")
+        if _re.search(
+            r"<parameter(?:\s+name\s*=\s*|\s*=\s*)",
+            raw,
+            _re.IGNORECASE,
+        ):
+            return {
+                "error": (
+                    "Malformed create_document call: parameter wrappers must be "
+                    "parsed before document execution"
+                )
+            }
 
         # Known languages the editor understands (match the <select> in HTML)
         _KNOWN_LANGS = {
@@ -305,6 +316,8 @@ class CreateDocumentTool:
             # No explicit language — sniff it from the content so an SVG / HTML / JSON
             # / code document isn't silently saved as markdown. Prose → markdown.
             language = _sniff_doc_language(content)
+        if not (content or "").strip():
+            return {"error": "Cannot create an empty document"}
         if _looks_like_email_document(content, title):
             language = "email"
 

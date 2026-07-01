@@ -34,6 +34,7 @@ def _capture_openai_payload(
     model,
     temperature,
     url="https://api.openai.com/v1/chat/completions",
+    **kwargs,
 ):
     """Run a synchronous OpenAI-compatible call and return the posted JSON body."""
     llm_core._response_cache.clear()
@@ -55,6 +56,7 @@ def _capture_openai_payload(
         [{"role": "user", "content": "Say OK"}],
         temperature=temperature,
         max_tokens=5,
+        **kwargs,
     )
     assert result == "OK"
     return seen["json"]
@@ -84,6 +86,46 @@ def test_normal_model_payload_keeps_temperature_above_one(monkeypatch):
     # is Anthropic-only and must not touch this path.
     payload = _capture_openai_payload(monkeypatch, "gpt-4o", 1.2)
     assert payload["temperature"] == 1.2
+
+
+def test_openai_compatible_payload_keeps_sampling_params(monkeypatch):
+    payload = _capture_openai_payload(
+        monkeypatch,
+        "local-llama",
+        0.9,
+        url="http://127.0.0.1:8080/v1/chat/completions",
+        top_p=0.73,
+        top_k=42,
+        min_p=0.05,
+        repeat_penalty=1.08,
+        presence_penalty=0.3,
+        frequency_penalty=0.2,
+    )
+    assert payload["temperature"] == 0.9
+    assert payload["top_p"] == 0.73
+    assert payload["top_k"] == 42
+    assert payload["min_p"] == 0.05
+    assert payload["repeat_penalty"] == 1.08
+    assert payload["presence_penalty"] == 0.3
+    assert payload["frequency_penalty"] == 0.2
+
+
+def test_cache_key_includes_sampling_params():
+    messages = [{"role": "user", "content": "Say OK"}]
+    base = llm_core._get_cache_key(
+        "u", "m", messages, 0.9, 10,
+        top_p=0.9, top_k=40, min_p=0.05, repeat_penalty=1.08,
+        presence_penalty=0.3, frequency_penalty=0.2,
+    )
+    variants = [
+        llm_core._get_cache_key("u", "m", messages, 0.9, 10, top_p=0.7, top_k=40, min_p=0.05, repeat_penalty=1.08, presence_penalty=0.3, frequency_penalty=0.2),
+        llm_core._get_cache_key("u", "m", messages, 0.9, 10, top_p=0.9, top_k=80, min_p=0.05, repeat_penalty=1.08, presence_penalty=0.3, frequency_penalty=0.2),
+        llm_core._get_cache_key("u", "m", messages, 0.9, 10, top_p=0.9, top_k=40, min_p=0.03, repeat_penalty=1.08, presence_penalty=0.3, frequency_penalty=0.2),
+        llm_core._get_cache_key("u", "m", messages, 0.9, 10, top_p=0.9, top_k=40, min_p=0.05, repeat_penalty=1.10, presence_penalty=0.3, frequency_penalty=0.2),
+        llm_core._get_cache_key("u", "m", messages, 0.9, 10, top_p=0.9, top_k=40, min_p=0.05, repeat_penalty=1.08, presence_penalty=0.5, frequency_penalty=0.2),
+        llm_core._get_cache_key("u", "m", messages, 0.9, 10, top_p=0.9, top_k=40, min_p=0.05, repeat_penalty=1.08, presence_penalty=0.3, frequency_penalty=0.3),
+    ]
+    assert all(base != variant for variant in variants)
 
 
 def test_chatgpt_subscription_payload_omits_max_output_tokens():

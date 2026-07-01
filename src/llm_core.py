@@ -44,8 +44,13 @@ def _stream_timeout(read_timeout) -> httpx.Timeout:
 
 
 # Cache for LLM responses
-def _get_cache_key(url: str, model: str, messages: List[Dict], 
-                   temperature: float, max_tokens: int) -> str:
+def _get_cache_key(url: str, model: str, messages: List[Dict],
+                   temperature: float, max_tokens: int,
+                   top_p: Optional[float] = None, top_k: Optional[int] = None,
+                   min_p: Optional[float] = None,
+                   repeat_penalty: Optional[float] = None,
+                   presence_penalty: Optional[float] = None,
+                   frequency_penalty: Optional[float] = None) -> str:
     """Generate cache key for LLM requests."""
     hashable_messages = []
     for msg in messages:
@@ -57,6 +62,12 @@ def _get_cache_key(url: str, model: str, messages: List[Dict],
         'model': model, 
         'messages': hashable_messages,
         'temp': temperature,
+        'top_p': top_p,
+        'top_k': top_k,
+        'min_p': min_p,
+        'repeat_penalty': repeat_penalty,
+        'presence_penalty': presence_penalty,
+        'frequency_penalty': frequency_penalty,
         'max_tokens': max_tokens
     }, sort_keys=True)
     return hashlib.sha256(content.encode()).hexdigest()
@@ -471,6 +482,12 @@ def _build_ollama_payload(
     stream: bool = False,
     tools: Optional[List[Dict]] = None,
     num_ctx: Optional[int] = None,
+    top_p: Optional[float] = None,
+    top_k: Optional[int] = None,
+    min_p: Optional[float] = None,
+    repeat_penalty: Optional[float] = None,
+    presence_penalty: Optional[float] = None,
+    frequency_penalty: Optional[float] = None,
 ) -> Dict:
     """Build the JSON payload for Ollama's /api/chat endpoint.
 
@@ -495,6 +512,18 @@ def _build_ollama_payload(
         options["num_predict"] = max_tokens
     if num_ctx is not None and num_ctx > 0 and num_ctx != DEFAULT_CONTEXT:
         options["num_ctx"] = num_ctx
+    if top_p is not None:
+        options["top_p"] = top_p
+    if top_k is not None:
+        options["top_k"] = top_k
+    if min_p is not None:
+        options["min_p"] = min_p
+    if repeat_penalty is not None:
+        options["repeat_penalty"] = repeat_penalty
+    if presence_penalty is not None:
+        options["presence_penalty"] = presence_penalty
+    if frequency_penalty is not None:
+        options["frequency_penalty"] = frequency_penalty
     if options:
         payload["options"] = options
     if tools:
@@ -803,19 +832,23 @@ def _provider_label(url: str) -> str:
             pass
     if _is_ollama_native_url(url): return "Ollama"
     try:
-        _parsed_local = urlparse(url)
-        host = (_parsed_local.hostname or "").lower()
-        port = _parsed_local.port
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
     except Exception:
         return "provider"
-    if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
-        # A port alone is not authoritative: vLLM, SGLang, llama.cpp and plain
-        # OpenAI-compatible servers all routinely share 8000/8080, so naming the
-        # serving tool from the port here would mislabel real setups. The tool is
-        # identified by probing llama-server's native /props endpoint during
-        # discovery (see ModelDiscovery._fingerprint_provider); this stays neutral.
+    if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0", "host.docker.internal"}:
+        if parsed.port == 11434:
+            return "Ollama"
         return "local endpoint"
     return host or "provider"
+
+
+def _is_loopback_model_endpoint(url: str) -> bool:
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return host in {"localhost", "127.0.0.1", "::1", "0.0.0.0", "host.docker.internal"}
 
 
 def _normalize_chatgpt_subscription_url(url: str) -> str:
@@ -927,6 +960,8 @@ def _format_upstream_error(status: int, body: bytes | str, url: str) -> str:
         return f"{provider} returned 404 — check the base URL and model name." + (f" ({detail})" if detail else "")
     if status == 429:
         return f"{provider} rate-limited the request (429)." + (f" {detail}" if detail else "")
+    if status >= 500 and _is_loopback_model_endpoint(url):
+        return f"{provider} returned HTTP {status}." + (f" {detail}" if detail else "")
     if status >= 500:
         return f"{provider} is having an outage (HTTP {status})." + (f" {detail}" if detail else "")
     return f"{provider} returned HTTP {status}" + (f": {detail}" if detail else "")
@@ -1148,7 +1183,7 @@ def _build_anthropic_payload(model, messages, temperature, max_tokens, stream=Fa
     }
     # Opus 4.7+ removed the sampling parameters — sending `temperature` (even 0.0)
     # returns HTTP 400. Omit it for those models; older Claude models still take it.
-    if not _anthropic_rejects_temperature(model):
+    if temperature is not None and not _anthropic_rejects_temperature(model):
         payload["temperature"] = temperature
     if system_parts:
         system_text = "\n\n".join(system_parts)
@@ -1538,8 +1573,11 @@ def normalize_model_id(
     return None
 
 def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
-             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None, 
-             timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None) -> str:
+             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
+             timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None,
+             top_p: Optional[float] = None, top_k: Optional[int] = None,
+             min_p: Optional[float] = None, repeat_penalty: Optional[float] = None,
+             presence_penalty: Optional[float] = None, frequency_penalty: Optional[float] = None) -> str:
     """Synchronous LLM call with optional prompt type enhancement."""
     h = _provider_headers(_detect_provider(url))
     # Tolerate headers that arrive as a JSON string (some sessions stored them
@@ -1569,7 +1607,11 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         messages_copy = non_sys
 
     provider = _detect_provider(url)
-    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
+    cache_key = _get_cache_key(
+        url, model, messages_copy, temperature, max_tokens,
+        top_p=top_p, top_k=top_k, min_p=min_p, repeat_penalty=repeat_penalty,
+        presence_penalty=presence_penalty, frequency_penalty=frequency_penalty,
+    )
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
@@ -1584,6 +1626,8 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         payload = _build_ollama_payload(
             model, messages_copy, temperature, max_tokens,
             stream=False, num_ctx=get_context_length(url, model),
+            top_p=top_p, top_k=top_k, min_p=min_p, repeat_penalty=repeat_penalty,
+            presence_penalty=presence_penalty, frequency_penalty=frequency_penalty,
         )
     else:
         target_url = _normalize_openai_chat_url(url)
@@ -1597,6 +1641,18 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         }
         if _omit_temperature(provider, model):
             payload.pop("temperature", None)
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if top_k is not None:
+            payload["top_k"] = top_k
+        if min_p is not None:
+            payload["min_p"] = min_p
+        if repeat_penalty is not None:
+            payload["repeat_penalty"] = repeat_penalty
+        if presence_penalty is not None:
+            payload["presence_penalty"] = presence_penalty
+        if frequency_penalty is not None:
+            payload["frequency_penalty"] = frequency_penalty
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = max_tokens
@@ -1709,10 +1765,19 @@ async def llm_call_async(
     max_retries: int = LLMConfig.MAX_RETRIES,
     prompt_type: Optional[str] = None,
     session_id: Optional[str] = None,
+    top_p: Optional[float] = None,
+    top_k: Optional[int] = None,
+    min_p: Optional[float] = None,
+    repeat_penalty: Optional[float] = None,
+    presence_penalty: Optional[float] = None,
+    frequency_penalty: Optional[float] = None,
+    omit_generation_params: bool = False,
 ) -> str:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
     provider = _detect_provider(url)
     messages_copy = _sanitize_llm_messages(messages)
+    effective_temperature = None if omit_generation_params else temperature
+    effective_max_tokens = 0 if omit_generation_params else max_tokens
 
     # Consolidate multiple system messages into one at the start.
     sys_parts = []
@@ -1727,7 +1792,11 @@ async def llm_call_async(
     else:
         messages_copy = non_sys
 
-    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
+    cache_key = _get_cache_key(
+        url, model, messages_copy, effective_temperature, effective_max_tokens,
+        top_p=top_p, top_k=top_k, min_p=min_p, repeat_penalty=repeat_penalty,
+        presence_penalty=presence_penalty, frequency_penalty=frequency_penalty,
+    )
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
@@ -1779,15 +1848,17 @@ async def llm_call_async(
     if provider == "anthropic":
         target_url = _normalize_anthropic_url(url)
         h = _build_anthropic_headers(headers)
-        payload = _build_anthropic_payload(model, messages_copy, temperature, max_tokens)
+        payload = _build_anthropic_payload(model, messages_copy, effective_temperature, effective_max_tokens)
     elif provider == "ollama":
         target_url = _normalize_ollama_url(url)
         h = {"Content-Type": "application/json"}
         if headers:
             h.update(headers)
         payload = _build_ollama_payload(
-            model, messages_copy, temperature, max_tokens,
-            stream=False, num_ctx=get_context_length(url, model),
+            model, messages_copy, effective_temperature, effective_max_tokens,
+            stream=False, num_ctx=None if omit_generation_params else get_context_length(url, model),
+            top_p=top_p, top_k=top_k, min_p=min_p, repeat_penalty=repeat_penalty,
+            presence_penalty=presence_penalty, frequency_penalty=frequency_penalty,
         )
     else:
         target_url = _normalize_openai_chat_url(url)
@@ -1798,13 +1869,26 @@ async def llm_call_async(
         payload = {
             "model": model,
             "messages": messages_copy,
-            "temperature": temperature,
         }
+        if effective_temperature is not None:
+            payload["temperature"] = effective_temperature
         if _omit_temperature(provider, model):
             payload.pop("temperature", None)
-        if max_tokens and max_tokens > 0:
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if top_k is not None:
+            payload["top_k"] = top_k
+        if min_p is not None:
+            payload["min_p"] = min_p
+        if repeat_penalty is not None:
+            payload["repeat_penalty"] = repeat_penalty
+        if presence_penalty is not None:
+            payload["presence_penalty"] = presence_penalty
+        if frequency_penalty is not None:
+            payload["frequency_penalty"] = frequency_penalty
+        if effective_max_tokens and effective_max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
-            payload[tok_key] = max_tokens
+            payload[tok_key] = effective_max_tokens
         # Suppress thinking for qwen3/gemma4 on Ollama /v1 — same as stream_llm.
         if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
             payload["think"] = False
@@ -1869,7 +1953,10 @@ async def _stream_llm_impl(url: str, model: str, messages: List[Dict], temperatu
                            max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                            timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                            tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                           tool_choice_none: bool = False):
+                           tool_choice_none: bool = False,
+                           top_p: Optional[float] = None, top_k: Optional[int] = None,
+                           min_p: Optional[float] = None, repeat_penalty: Optional[float] = None,
+                           presence_penalty: Optional[float] = None, frequency_penalty: Optional[float] = None):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -1907,6 +1994,8 @@ async def _stream_llm_impl(url: str, model: str, messages: List[Dict], temperatu
         payload = _build_ollama_payload(
             model, messages_copy, temperature, max_tokens,
             stream=True, tools=tools, num_ctx=get_context_length(url, model),
+            top_p=top_p, top_k=top_k, min_p=min_p, repeat_penalty=repeat_penalty,
+            presence_penalty=presence_penalty, frequency_penalty=frequency_penalty,
         )
     elif provider == "chatgpt-subscription":
         target_url = _normalize_chatgpt_subscription_url(url)
@@ -1922,6 +2011,18 @@ async def _stream_llm_impl(url: str, model: str, messages: List[Dict], temperatu
         }
         if _omit_temperature(provider, model):
             payload.pop("temperature", None)
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if top_k is not None:
+            payload["top_k"] = top_k
+        if min_p is not None:
+            payload["min_p"] = min_p
+        if repeat_penalty is not None:
+            payload["repeat_penalty"] = repeat_penalty
+        if presence_penalty is not None:
+            payload["presence_penalty"] = presence_penalty
+        if frequency_penalty is not None:
+            payload["frequency_penalty"] = frequency_penalty
         if provider not in {"openrouter", "groq"}:
             payload["stream_options"] = {"include_usage": True}
         if max_tokens and max_tokens > 0:

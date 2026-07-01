@@ -63,3 +63,12 @@ def test_plain_tell_request_stays_minimal():
     assert not (_EMAIL_TOOLS & tools)
     # Always-available baseline is still there.
     assert set(ALWAYS_AVAILABLE) <= tools
+
+
+def test_standalone_html_app_request_gets_document_tool():
+    ti = _index_without_embeddings()
+    tools = ti.get_tools_for_query(
+        "Using html css and js, generate a browser OS as a single file"
+    )
+
+    assert "create_document" in tools
