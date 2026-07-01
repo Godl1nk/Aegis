@@ -1,8 +1,20 @@
 import subprocess
 from pathlib import Path
+import pytest
 
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "check-docker-amd-gpu.sh"
+
+
+def _has_functional_bash():
+    try:
+        proc = subprocess.run(["bash", "-c", "echo hello"], capture_output=True, text=True, check=False)
+        return proc.returncode == 0 and "hello" in proc.stdout
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(not _has_functional_bash(), reason="Requires a functional bash environment")
 
 
 def test_amd_gpu_check_rejects_unknown_extra_arg_before_diagnostics():

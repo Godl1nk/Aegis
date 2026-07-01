@@ -31,7 +31,7 @@ def test_background_status_poll_reconciles_into_local_tasks():
 def test_windows_session_commands_use_shared_powershell_wrapper_and_local_log_dir():
     source = _read("static/js/cookbookRunning.js")
 
-    assert "const host = task.remoteHost;" in source
+    assert "const host = _taskRemoteHost(task);" in source
     assert "host ? '$env:TEMP\\\\odysseus-sessions' : '$env:TEMP\\\\odysseus-tmux'" in source
     assert "function _winPowerShellCmd(task, ps)" in source
     assert "const command = `powershell -Command \"${ps}\"`;" in source

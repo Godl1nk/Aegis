@@ -78,12 +78,16 @@ Use for focused git checks.
 
 
 def test_collect_skill_dir_skips_symlinked_skill_markdown(tmp_path):
+    import pytest
     migration = load_module()
     outside = tmp_path / "outside.md"
     outside.write_text("private skill content", encoding="utf-8")
     skill_path = tmp_path / "skills" / "bad" / "SKILL.md"
     skill_path.parent.mkdir(parents=True)
-    skill_path.symlink_to(outside)
+    try:
+        skill_path.symlink_to(outside)
+    except OSError:
+        pytest.skip("Symlink creation not supported")
 
     items, warnings = migration.collect_skill_dir(tmp_path / "skills", "example-agent")
 
@@ -92,11 +96,15 @@ def test_collect_skill_dir_skips_symlinked_skill_markdown(tmp_path):
 
 
 def test_collect_skill_dir_skips_symlinked_root(tmp_path):
+    import pytest
     migration = load_module()
     real_skills = tmp_path / "real-skills"
     real_skills.mkdir()
     linked_skills = tmp_path / "skills"
-    linked_skills.symlink_to(real_skills, target_is_directory=True)
+    try:
+        linked_skills.symlink_to(real_skills, target_is_directory=True)
+    except OSError:
+        pytest.skip("Symlink creation not supported")
 
     items, warnings = migration.collect_skill_dir(linked_skills, "example-agent")
 
@@ -118,13 +126,17 @@ def test_archive_content_is_optional(tmp_path):
 
 
 def test_archive_skips_symlinked_file(tmp_path):
+    import pytest
     migration = load_module()
     outside = tmp_path / "outside.md"
     outside.write_text("private archive content", encoding="utf-8")
     archive_dir = tmp_path / "archive"
     archive_dir.mkdir()
     linked_file = archive_dir / "leak.md"
-    linked_file.symlink_to(outside)
+    try:
+        linked_file.symlink_to(outside)
+    except OSError:
+        pytest.skip("Symlink creation not supported")
 
     items, warnings = migration.collect_archive_paths([archive_dir], "example-agent", include_content=True)
 
@@ -133,11 +145,15 @@ def test_archive_skips_symlinked_file(tmp_path):
 
 
 def test_archive_skips_symlinked_root(tmp_path):
+    import pytest
     migration = load_module()
     archive = tmp_path / "notes.md"
     archive.write_text("# Notes\n\nUseful context.", encoding="utf-8")
     linked_archive = tmp_path / "linked-notes.md"
-    linked_archive.symlink_to(archive)
+    try:
+        linked_archive.symlink_to(archive)
+    except OSError:
+        pytest.skip("Symlink creation not supported")
 
     items, warnings = migration.collect_archive_paths([linked_archive], "example-agent", include_content=True)
 

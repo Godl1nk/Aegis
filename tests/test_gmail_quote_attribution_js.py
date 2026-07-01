@@ -29,12 +29,12 @@ def _meta(html: str) -> str:
         "globalThis.document = { createElement() { return {"
         " set textContent(v) { this._t = v; },"
         " get innerHTML() { return this._t || ''; } }; } };"
-        f"const {{ _extractQuoteMeta }} = await import('{_HELPER.as_posix()}');"
+        f"const {{ _extractQuoteMeta }} = await import('{_HELPER.as_uri()}');"
         f"console.log(JSON.stringify(_extractQuoteMeta({json.dumps(html)})));"
     )
     proc = subprocess.run(
         ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, cwd=str(_REPO), timeout=30,
+        input=js, capture_output=True, encoding="utf-8", cwd=str(_REPO), timeout=30,
     )
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())
@@ -51,14 +51,14 @@ def test_us_gmail_attribution_with_weekday_extracts_sender_and_date():
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_gmail_attribution_without_time_extracts_sender():
     meta = _meta("On Wed, Jan 1, 2025, Jane wrote:")
-    assert meta == "Jane · Wed, Jan 1, 2025"
+    assert meta == "Jane " + chr(183) + " Wed, Jan 1, 2025"
 
 
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_previously_working_formats_still_match():
     # No weekday (single comma before the year).
     meta = _meta("On Apr 18, 2026 at 9:31 AM, Jane Doe wrote:")
-    assert meta.startswith("Jane Doe · Apr 18, 2026")
+    assert meta.startswith("Jane Doe " + chr(183) + " Apr 18, 2026")
     # UK/intl day-before-month order.
     meta = _meta("On Mon, 18 Apr 2026 at 09:31, Jane Doe &lt;jane@example.com&gt; wrote:")
     assert meta.startswith("Jane Doe jane@example.com")

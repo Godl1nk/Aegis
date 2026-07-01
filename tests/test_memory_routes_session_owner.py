@@ -222,11 +222,12 @@ def test_timeline_does_not_expose_other_users_session_name():
 def test_delete_memory_is_idempotent_for_stale_rows(monkeypatch):
     mem = MagicMock()
     mem.load.return_value = []
+    mem.load_all.return_value = []
     mem.delete_entry.return_value = False
     router = _memory_delete_router(monkeypatch, caller="alice", mem=mem)
 
     delete = _route(router, "/api/memory/{memory_id}", "DELETE")
-    out = delete(request=None, memory_id="stale-id")
+    out = delete(request=_request("alice"), memory_id="stale-id")
 
     assert out["ok"] is True
     assert out["already_deleted"] is True
@@ -236,12 +237,13 @@ def test_delete_memory_is_idempotent_for_stale_rows(monkeypatch):
 def test_delete_memory_reports_storage_failure_for_visible_rows(monkeypatch):
     mem = MagicMock()
     mem.load.return_value = [{"id": "m1", "text": "keep", "owner": "alice"}]
+    mem.load_all.return_value = [{"id": "m1", "text": "keep", "owner": "alice"}]
     mem.delete_entry.return_value = False
     router = _memory_delete_router(monkeypatch, caller="alice", mem=mem)
 
     delete = _route(router, "/api/memory/{memory_id}", "DELETE")
     with pytest.raises(HTTPException) as exc:
-        delete(request=None, memory_id="m1")
+        delete(request=_request("alice"), memory_id="m1")
 
     assert exc.value.status_code == 500
     mem.delete_entry.assert_called_once_with("m1", owner="alice")
