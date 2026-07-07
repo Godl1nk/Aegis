@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'aegis-v342';
+const CACHE_NAME = 'aegis-v344';
 
 // Core shell precached on install so repeat opens are instant without any
 // network wait. Keep this list in sync with the <script type="module"> tags
@@ -15,15 +15,10 @@ const CACHE_NAME = 'aegis-v342';
 const PRECACHE = [
   '/',
   '/static/style.css',
-  '/static/aegis-icon.svg',
-  '/static/aegis-icon-180.png',
-  '/static/aegis-icon-192.png',
-  '/static/aegis-icon-512.png',
   '/static/app.js',
   '/static/js/storage.js',
   '/static/js/ui.js',
   '/static/js/markdown.js',
-  '/static/js/emojiShortcodes.js',
   '/static/js/dragSort.js',
   '/static/js/sessions.js',
   '/static/js/memory.js',
