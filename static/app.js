@@ -223,7 +223,7 @@ async function _createDirectChatFromPreferredModel() {
   if (!sessionModule) return false;
 
   const pending = sessionModule.getPendingChat && sessionModule.getPendingChat();
-  if (pending && pending.url && pending.modelId && pending.endpointId) {
+  if (pending && pending.url && pending.modelId) {
     sessionModule.createDirectChat(pending.url, pending.modelId, pending.endpointId);
     return true;
   }
@@ -231,7 +231,7 @@ async function _createDirectChatFromPreferredModel() {
   const sessions = sessionModule.getSessions();
   const currentId = sessionModule.getCurrentSessionId();
   const current = sessions.find(s => s.id === currentId);
-  if (current && current.endpoint_url && current.model && current.endpoint_id) {
+  if (current && current.endpoint_url && current.model) {
     sessionModule.createDirectChat(current.endpoint_url, current.model, current.endpoint_id);
     return true;
   }

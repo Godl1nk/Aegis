@@ -12,6 +12,18 @@ var escapeHtml = uiModule.esc;
 const CDOT_COMMAND_RE = /\\(?:cdot|cdotp)\b/g;
 const CDOT_COMMAND_ONLY_RE = /^\\(?:cdot|cdotp)\b$/;
 
+// Unicode vulgar fraction → LaTeX \frac mapping. Models often emit ½, ⅓
+// etc. instead of \frac{}{} in prose. Converted to KaTeX inline math.
+const UNICODE_FRACTIONS = {
+  '\u00BC': '\\frac{1}{4}', '\u00BD': '\\frac{1}{2}', '\u00BE': '\\frac{3}{4}',
+  '\u2153': '\\frac{1}{3}', '\u2154': '\\frac{2}{3}',
+  '\u2155': '\\frac{1}{5}', '\u2156': '\\frac{2}{5}', '\u2157': '\\frac{3}{5}', '\u2158': '\\frac{4}{5}',
+  '\u2159': '\\frac{1}{6}', '\u215A': '\\frac{5}{6}',
+  '\u215B': '\\frac{1}{8}', '\u215C': '\\frac{3}{8}', '\u215D': '\\frac{5}{8}', '\u215E': '\\frac{7}{8}',
+  '\u2150': '\\frac{1}{7}', '\u2151': '\\frac{1}{9}', '\u2152': '\\frac{1}{10}',
+};
+const FRACTION_CHARS_RE = new RegExp('[' + Object.keys(UNICODE_FRACTIONS).join('') + ']', 'g');
+
 function safeLinkUrl(rawUrl) {
   const url = String(rawUrl || '').trim();
   if (url.startsWith('#')) {
@@ -59,6 +71,24 @@ function generatedImageLinkHtml(text, url, title) {
     return safeText;
   }
   return `<a href="${escapeHtml(safeUrl)}" class="generated-image-markdown-link" data-image-url="${escapeHtml(safeUrl)}" data-image-prompt="${safeText}">${safeText}</a>`;
+}
+
+export function normalizeHighlightLanguage(lang) {
+  const raw = String(lang || '').trim().toLowerCase();
+  if (!raw) return '';
+  const aliases = {
+    py: 'python',
+    js: 'javascript',
+    ts: 'typescript',
+    yml: 'yaml',
+    sh: 'bash',
+    shell: 'bash',
+  };
+  const candidate = aliases[raw] || raw;
+  if (window.hljs && typeof window.hljs.getLanguage === 'function') {
+    return window.hljs.getLanguage(candidate) ? candidate : '';
+  }
+  return candidate;
 }
 
 function replaceOutsideInlineCode(text, pattern, replacer) {
@@ -717,6 +747,63 @@ export function mdToHtml(src, opts) {
         mathBlocks.push(renderKatexToString(raw, { displayMode: false }));
         return placeholder;
       } catch (e) { return match; }
+    });
+    // ── Bare LaTeX outside math delimiters ──────────────────────────────────────────
+    // Models sometimes emit LaTeX in prose without $...$ wrappers. Catch the
+    // unambiguous patterns here so they still render through KaTeX.
+
+    // \begin{env}...\end{env} → display math (align, cases, matrix, gather...)
+    s = s.replace(/\\begin\{(\w+\*?)\}([\s\S]*?)\\end\{\1\}/g, (match) => {
+      try {
+        const raw = match.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+        const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
+        mathBlocks.push(renderKatexToString(raw, { displayMode: true }));
+        return placeholder;
+      } catch (e) { return match; }
+    });
+
+    // Bare two-arg commands: \frac{...}{...}, \binom{...}{...}, etc.
+    // Brace-content regex handles up to 2 levels of nesting.
+    const _B = '(?:[^{}]|[{](?:[^{}]|[{][^{}]*[}])*[}])*';
+    const _twoArgRe = new RegExp(
+      '\\\\(?:frac|dfrac|tfrac|cfrac|binom|dbinom|tbinom|overset|underset)' +
+      '[{](' + _B + ')[}][{](' + _B + ')[}]', 'g'
+    );
+    s = s.replace(_twoArgRe, (match) => {
+      try {
+        const raw = match.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+        const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
+        mathBlocks.push(renderKatexToString(raw, { displayMode: false }));
+        return placeholder;
+      } catch (e) { return match; }
+    });
+
+    // Bare one-arg commands: \sqrt{...}, \vec{...}, \mathbb{...}, etc.
+    // Also handles optional arg: \sqrt[3]{8}
+    const _oneArgRe = new RegExp(
+      '\\\\(?:sqrt|boxed|vec|hat|bar|dot|ddot|tilde|widetilde|widehat' +
+      '|overline|underline|overbrace|underbrace|overrightarrow|overleftarrow' +
+      '|mathbf|mathit|mathrm|mathbb|mathcal|mathsf|mathfrak|mathscr|boldsymbol' +
+      '|cancel|bcancel|xcancel|operatorname)' +
+      '(?:\\[[^\\]]*\\])?' +
+      '[{](' + _B + ')[}]', 'g'
+    );
+    s = s.replace(_oneArgRe, (match) => {
+      try {
+        const raw = match.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+        const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
+        mathBlocks.push(renderKatexToString(raw, { displayMode: false }));
+        return placeholder;
+      } catch (e) { return match; }
+    });
+
+    // Unicode vulgar fractions → KaTeX inline math (½ → \frac{1}{2} etc.)
+    s = replaceOutsideInlineCode(s, FRACTION_CHARS_RE, (ch) => {
+      try {
+        const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
+        mathBlocks.push(renderKatexToString(UNICODE_FRACTIONS[ch], { displayMode: false }));
+        return placeholder;
+      } catch (e) { return ch; }
     });
   }
   s = replaceOutsideInlineCode(s, CDOT_COMMAND_RE, '&centerdot;');

@@ -20,7 +20,7 @@ from src.agent_loop import stream_agent_loop
 from src import agent_runs
 from src.model_context import estimate_tokens
 from src.chat_helpers import coerce_message_and_session
-from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_url
+from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_url, build_headers
 from src.session_search import search_session_messages
 from src.prompt_security import untrusted_context_message
 from core.exceptions import SessionNotFoundError
@@ -226,6 +226,75 @@ def _endpoint_cache_contains_model(endpoint, model: str) -> bool:
         return True
     wanted = (model or "").strip()
     return wanted in {str(item).strip() for item in models}
+
+
+def _apply_client_model_selection(
+    sess,
+    session_id: str,
+    selected_model: str,
+    selected_endpoint_url: str = "",
+    selected_endpoint_id: str = "",
+    owner: str | None = None,
+) -> bool:
+    selected_model = (selected_model or "").strip()
+    if not selected_model:
+        return False
+    selected_endpoint_url = (selected_endpoint_url or "").strip()
+    selected_endpoint_id = (selected_endpoint_id or "").strip()
+    current_model = (getattr(sess, "model", "") or "").strip()
+    current_url = (getattr(sess, "endpoint_url", "") or "").strip()
+    if (
+        selected_model == current_model
+        and (not selected_endpoint_url or selected_endpoint_url.rstrip("/") == current_url.rstrip("/"))
+    ):
+        return False
+
+    db = SessionLocal()
+    try:
+        q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+        if owner:
+            from src.auth_helpers import owner_filter
+            q = owner_filter(q, ModelEndpoint, owner)
+        endpoints = q.all()
+        endpoint = None
+        if selected_endpoint_id:
+            endpoint = next((ep for ep in endpoints if str(ep.id) == selected_endpoint_id), None)
+        if endpoint is None and selected_endpoint_url:
+            endpoint = next(
+                (
+                    ep for ep in endpoints
+                    if _session_url_matches_endpoint(selected_endpoint_url, ep.base_url or "")
+                ),
+                None,
+            )
+        if endpoint is None:
+            raise HTTPException(400, "Selected model endpoint was removed. Pick another model in Settings.")
+        if not _endpoint_cache_contains_model(endpoint, selected_model):
+            raise HTTPException(400, "Selected model is not available on that endpoint. Pick another model.")
+
+        base = _normalize_base(endpoint.base_url or "")
+        endpoint_url = build_chat_url(base)
+        headers = build_headers(endpoint.api_key, base) if endpoint.api_key else {}
+        sess.model = selected_model
+        sess.endpoint_url = endpoint_url
+        sess.headers = headers
+
+        db_session = db.query(DBSession).filter(DBSession.id == session_id).first()
+        if db_session:
+            db_session.model = selected_model
+            db_session.endpoint_url = endpoint_url
+            db_session.updated_at = datetime.utcnow()
+            db.commit()
+        return True
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.warning("Failed to apply client-selected model", exc_info=e)
+        raise HTTPException(400, "Could not apply selected model. Pick another model.")
+    finally:
+        db.close()
 
 
 
@@ -651,6 +720,14 @@ def setup_chat_routes(
             _verify_session_owner(request, session)
             sess = session_manager.get_session(session)
             owner = effective_user(request)
+            _apply_client_model_selection(
+                sess,
+                session,
+                form_data.get("selected_model") or (body or {}).get("selected_model") or "",
+                form_data.get("selected_endpoint_url") or (body or {}).get("selected_endpoint_url") or "",
+                form_data.get("selected_endpoint_id") or (body or {}).get("selected_endpoint_id") or "",
+                owner=owner,
+            )
             if _clear_orphaned_session_endpoint(sess, owner=owner):
                 raise HTTPException(400, "Selected model endpoint was removed. Pick another model in Settings.")
             # Issue #587: picker shows a model from the endpoint cache but

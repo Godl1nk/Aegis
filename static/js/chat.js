@@ -1166,6 +1166,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       const fd = new FormData();
       fd.append('message', _finalMsgWithInject);
       fd.append('session', streamSessionId);
+      const pickerLabel = document.getElementById('model-picker-label');
+      const selectedModel = pickerLabel?.dataset?.modelId || '';
+      const selectedEndpointUrl = pickerLabel?.dataset?.endpointUrl || '';
+      const selectedEndpointId = pickerLabel?.dataset?.endpointId || '';
+      if (selectedModel) fd.append('selected_model', selectedModel);
+      if (selectedEndpointUrl) fd.append('selected_endpoint_url', selectedEndpointUrl);
+      if (selectedEndpointId) fd.append('selected_endpoint_id', selectedEndpointId);
       if (ids.length) fd.append('attachments', JSON.stringify(ids));
       // Auto-save & send active doc ID so the backend sees latest content
       if (documentModule && activeDocIdForSend) {
@@ -4681,6 +4688,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         return; // 404 = no research for this session
       }
       const data = await res.json();
+      if (data.status === 'not_found') {
+        if (sessionModule && sessionModule.clearResearching) sessionModule.clearResearching(sessionId);
+        return;
+      }
 
       if (data.status === 'done') {
         // Fetch and render the completed result

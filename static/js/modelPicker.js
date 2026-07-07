@@ -592,7 +592,7 @@ function _initModelPickerDropdown() {
         }
         const sessions = _deps.getSessions();
         const s = sessions.find(x => x.id === currentSessionId);
-        if (s) { s.model = m.mid; s.endpoint_url = m.url; }
+        if (s) { s.model = m.mid; s.endpoint_url = m.url; s.endpoint_id = m.endpointId || ''; }
         // Header stays as session name — model info shown in picker only
       } catch (e) {
         uiModule.showError('Failed to set model: ' + e);
@@ -736,16 +736,26 @@ export function updateModelPicker() {
   const _pendingChat = _deps.getPendingChat();
   const s = sessions.find(x => x.id === currentSessionId);
   let modelId = null;
+  let endpointUrl = '';
+  let endpointId = '';
   if (s && s.model) {
     modelId = s.model;
+    endpointUrl = s.endpoint_url || '';
+    endpointId = s.endpoint_id || '';
     if (!_modelExists(modelId, s.endpoint_url || '')) {
       modelId = null;
+      endpointUrl = '';
+      endpointId = '';
     }
   } else if (_pendingChat && _pendingChat.modelId) {
     modelId = _pendingChat.modelId;
+    endpointUrl = _pendingChat.url || '';
+    endpointId = _pendingChat.endpointId || '';
     if (!_modelExists(modelId, _pendingChat.url || '')) {
       _deps.setPendingChat(null);
       modelId = null;
+      endpointUrl = '';
+      endpointId = '';
     }
   }
   // SECURITY: deliberately NOT auto-injecting `odysseus-model-favorites[0]`
@@ -755,6 +765,20 @@ export function updateModelPicker() {
   // we have no session model and no pending-chat pick, fall through to
   // the "Select model" placeholder below.
   //
+  // But if the server model cache already has an online endpoint, make the
+  // same safe fallback visible in the picker immediately. The send path can
+  // already resolve a usable model; the UI should not sit on "Select model"
+  // and make it look broken.
+  if (!modelId && !currentSessionId && window.modelsModule && window.modelsModule.getCachedItems) {
+    const fallback = _firstAvailableModel();
+    if (fallback) {
+      _deps.setPendingChat(fallback);
+      modelId = fallback.modelId;
+      endpointUrl = fallback.url || '';
+      endpointId = fallback.endpointId || '';
+    }
+  }
+
   // Check if selected model is still available — fall back ONLY for pending chats with no user selection
   // Never override an existing session's model — the user explicitly chose it
   if (modelId && !currentSessionId && _pendingChat && window.modelsModule && window.modelsModule.getCachedItems) {
@@ -770,6 +794,8 @@ export function updateModelPicker() {
       if (fallback) {
         modelId = fallback.models[0];
         _deps.setPendingChat({ url: fallback.url, modelId, endpointId: fallback.endpoint_id, source: 'fallback' });
+        endpointUrl = fallback.url || '';
+        endpointId = fallback.endpoint_id || '';
       }
     }
   }
@@ -785,6 +811,14 @@ export function updateModelPicker() {
   }
 
   const displayName = modelId ? modelId.split('/').pop() : 'Select model';
+  label.dataset.modelId = modelId || '';
+  label.dataset.endpointUrl = endpointUrl || '';
+  label.dataset.endpointId = endpointId || '';
+  if (wrap) {
+    wrap.dataset.modelId = modelId || '';
+    wrap.dataset.endpointUrl = endpointUrl || '';
+    wrap.dataset.endpointId = endpointId || '';
+  }
   // The header indicator clips long names with ellipsis; show the full model
   // identifier on hover (#1982). No tooltip on the "Select model" placeholder.
   label.title = modelId || '';

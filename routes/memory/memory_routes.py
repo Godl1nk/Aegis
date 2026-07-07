@@ -66,6 +66,19 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         if memory.get("owner") != user:
             raise HTTPException(404, "Memory not found")
 
+    def _memory_v2_or_404():
+        v2 = getattr(memory_manager, "_v2", None)
+        if v2 is None:
+            raise HTTPException(404, "Memory summary store unavailable")
+        return v2
+
+    async def _request_json(request: Request) -> dict:
+        try:
+            data = await request.json()
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
     @router.post("/debug")
     def debug_memory_relevance(request: Request, query: str = Form(...)):
         """Debug which memories would be triggered for a query"""
@@ -482,6 +495,53 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         except Exception as e:
             logger.error(f"Memory import extraction failed: {e}")
             raise HTTPException(502, f"LLM extraction failed: {str(e)}")
+
+    @router.get("/summary")
+    def memory_summary(request: Request):
+        """Return the active memory summary for the current user."""
+        return _memory_v2_or_404().get_summary(_owner(request))
+
+    @router.get("/summary/history")
+    def memory_summary_history(request: Request):
+        """Return recent memory summary versions for restore UI."""
+        return {"history": _memory_v2_or_404().summary_history(_owner(request))}
+
+    @router.post("/summary/restore")
+    async def restore_memory_summary(request: Request):
+        """Restore a previous memory summary version."""
+        data = await _request_json(request)
+        summary_id = str(data.get("summary_id") or "").strip()
+        if not summary_id:
+            raise HTTPException(400, "summary_id required")
+        if not _memory_v2_or_404().restore_summary(_owner(request), summary_id):
+            raise HTTPException(404, "Summary not found")
+        return {"ok": True}
+
+    @router.get("/dream/status")
+    def memory_dream_status(request: Request):
+        """Return the latest memory dreaming job status."""
+        return _memory_v2_or_404().job_status(_owner(request))
+
+    @router.post("/dream/run")
+    async def run_memory_dream(request: Request):
+        """Run memory dreaming for the current chat session."""
+        data = await _request_json(request)
+        session_id = str(data.get("session_id") or data.get("session") or "").strip()
+        if not session_id:
+            raise HTTPException(400, "session_id required")
+        try:
+            sess = session_manager.get_session(session_id)
+        except KeyError:
+            raise HTTPException(404, "Session not found")
+        _assert_session_owner(sess, _owner(request))
+        from services.memory.dreamer import dream_from_session
+        result = await dream_from_session(
+            sess,
+            memory_manager,
+            memory_vector,
+            owner=_owner(request),
+        )
+        return result if isinstance(result, dict) else {"ok": True, "result": result}
 
     @router.post("/{memory_id}/pin")
     def pin_memory(request: Request, memory_id: str, pinned: bool = Form(True)):

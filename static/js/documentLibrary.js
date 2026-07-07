@@ -776,8 +776,9 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     const pre = document.createElement('pre');
     const code = document.createElement('code');
     try {
-      if (doc.language && doc.language !== 'text' && window.hljs && !_librarySearch) {
-        code.innerHTML = window.hljs.highlight(doc.preview || '', { language: doc.language }).value;
+      const highlightLang = markdownModule.normalizeHighlightLanguage?.(doc.language) || '';
+      if (highlightLang && window.hljs && !_librarySearch) {
+        code.innerHTML = window.hljs.highlight(doc.preview || '', { language: highlightLang }).value;
       } else if (_librarySearch) {
         // While searching, highlight matched terms in the preview (plain
         // text) rather than syntax-highlighting — the match is what matters.
@@ -955,8 +956,9 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
       // highlighting anyway, so skip it there.
       const HL_CAP = 20000;
       try {
-        if (lang && lang !== 'text' && lang !== 'markdown' && window.hljs && content.length <= HL_CAP) {
-          code.innerHTML = window.hljs.highlight(content, { language: lang }).value;
+        const highlightLang = markdownModule.normalizeHighlightLanguage?.(lang) || '';
+        if (highlightLang && highlightLang !== 'markdown' && window.hljs && content.length <= HL_CAP) {
+          code.innerHTML = window.hljs.highlight(content, { language: highlightLang }).value;
         } else {
           code.textContent = content;
         }

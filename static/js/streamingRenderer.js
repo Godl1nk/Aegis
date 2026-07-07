@@ -20,6 +20,7 @@
 // is deliberately mechanical. If anything throws, it latches into a full-re-render
 // fallback so a bug can never produce broken output — only today's behavior.
 
+import { normalizeHighlightLanguage } from './markdown.js';
 import { splitFinalized, describeOpenFence } from './streamingSegmenter.js';
 
 // Compile-time escape hatch: set to false to force the plain full-re-render path.
@@ -88,7 +89,9 @@ export function createStreamRenderer(contentEl, { render, hljs } = {}) {
       clearTail();
       const pre = document.createElement('pre');
       const code = document.createElement('code');
-      if (fence.lang) code.className = `language-${fence.lang}`;
+      const highlightLang = normalizeHighlightLanguage(fence.lang);
+      if (highlightLang) code.className = `language-${highlightLang}`;
+      if (fence.lang) code.dataset.lang = fence.lang;
       const textNode = document.createTextNode('');
       code.appendChild(textNode);
       pre.appendChild(code);

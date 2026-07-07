@@ -1068,6 +1068,104 @@ def _assistant_requested_followup(messages: List[Dict]) -> bool:
     return False
 
 
+_CODE_ARTIFACT_ACTION_RE = re.compile(
+    r"\b(?:build|create|generate|write|make|implement|develop|scaffold|code)\b",
+    re.IGNORECASE,
+)
+_CODE_ARTIFACT_NOUN_RE = re.compile(
+    r"\b(?:code|script|program|app|application|website|web\s*page|component|"
+    r"game|demo|prototype|single[- ]file|html|css|javascript|typescript|"
+    r"python|java|rust|golang|react|vue|svelte)\b",
+    re.IGNORECASE,
+)
+_CODE_ARTIFACT_CONCEPT_RE = re.compile(
+    r"^\s*(?:how|why|what|when|where|explain|describe|compare|review)\b",
+    re.IGNORECASE,
+)
+
+
+def _classify_code_artifact_request(text: str) -> Dict[str, object]:
+    """Return conservative UI hints for an explicit code-generation request."""
+    value = str(text or "").strip()
+    requested = bool(
+        value
+        and _CODE_ARTIFACT_ACTION_RE.search(value)
+        and _CODE_ARTIFACT_NOUN_RE.search(value)
+        and not _CODE_ARTIFACT_CONCEPT_RE.search(value)
+    )
+    lower = value.lower()
+    standalone = bool(
+        requested
+        and (
+            re.search(r"\bsingle[- ](?:file|script)\b", lower)
+            or re.search(r"\bopen(?:ed)?\s+in\s+(?:a\s+)?(?:chrome|browser)\b", lower)
+            or "browser os" in lower
+        )
+    )
+    language = ""
+    if requested:
+        if any(token in lower for token in ("html", "web page", "website", "browser")):
+            language = "html"
+        elif "typescript" in lower:
+            language = "typescript"
+        elif "javascript" in lower or re.search(r"\bjs\b", lower):
+            language = "javascript"
+        elif "python" in lower:
+            language = "python"
+        elif "rust" in lower:
+            language = "rust"
+        elif "golang" in lower or re.search(r"\bgo\b", lower):
+            language = "go"
+        elif "java" in lower:
+            language = "java"
+    label = language.upper() if language else "code"
+    return {
+        "requested": requested,
+        "standalone": standalone,
+        "language": language,
+        "title": f"Generating {label}",
+    }
+
+
+def _is_incomplete_document_tool_call(text: str) -> bool:
+    """Detect a hybrid create_document envelope that omitted its content."""
+    value = str(text or "")
+    if "create_document" not in value.lower():
+        return False
+    names = {
+        match.lower()
+        for match in re.findall(
+            r"<parameter(?:\s+name\s*=\s*|\s*=\s*)[\"']?(\w+)",
+            value,
+            re.IGNORECASE,
+        )
+    }
+    return bool(names & {"title", "language"}) and "content" not in names
+
+
+def _document_block_as_chat_code(block: ToolBlock, fallback_language: str) -> str:
+    """Convert a model-ignored create_document call into visible chat code."""
+    if block.tool_type != "create_document":
+        return ""
+    lines = str(block.content or "").strip().splitlines()
+    if len(lines) < 2:
+        return ""
+    known_languages = {
+        "python", "py", "javascript", "js", "typescript", "ts", "html",
+        "css", "json", "yaml", "bash", "sql", "rust", "go", "java",
+        "c", "cpp", "markdown", "text", "svg", "xml",
+    }
+    language = str(fallback_language or "text").lower()
+    content_start = 1
+    if lines[1].strip().lower() in known_languages:
+        language = lines[1].strip().lower()
+        content_start = 2
+    body = "\n".join(lines[content_start:]).strip()
+    if not body:
+        return ""
+    return f"```{language}\n{body}\n```"
+
+
 def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, object]:
     """Classify only whether this turn deserves domain tool retrieval.
 
@@ -1091,6 +1189,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         }
 
     domains: Set[str] = set()
+    code_artifact = _classify_code_artifact_request(retrieval_query)
 
     def has(*patterns: str) -> bool:
         return any(re.search(p, q) for p in patterns)
@@ -1111,6 +1210,8 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         r"\b(?:code|script|program|game|function|class|module|app)\b",
     )
     if has(r"\b(documents?|docs?|draft|compose|poem|story|essay|outline|letter|edit|rewrite|proofread|suggest|feedback|review this|make a file)\b"):
+        domains.add("documents")
+    if code_artifact["requested"]:
         domains.add("documents")
     if "notes_calendar_tasks" not in domains and has(r"\bwrite\b"):
         domains.add("documents")

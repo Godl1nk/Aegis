@@ -66,6 +66,98 @@ def _allow_memory_management(monkeypatch):
     monkeypatch.setattr("src.auth_helpers.require_privilege", lambda request, privilege: "alice")
 
 
+class _FakeMemoryV2:
+    def __init__(self):
+        self.restored = []
+
+    def get_summary(self, owner):
+        return {"id": "sum-active", "summary": f"summary for {owner}"}
+
+    def summary_history(self, owner):
+        return [{"id": "sum-active", "summary": f"summary for {owner}", "active": True}]
+
+    def restore_summary(self, owner, summary_id):
+        self.restored.append((owner, summary_id))
+        return summary_id == "sum-old"
+
+    def job_status(self, owner):
+        return {"status": "idle", "owner": owner}
+
+
+class _JsonRequest:
+    def __init__(self, user, data):
+        self.state = SimpleNamespace(current_user=user)
+        self.app = SimpleNamespace(state=SimpleNamespace(auth_manager=None))
+        self._data = data
+
+    async def json(self):
+        return self._data
+
+
+def test_memory_summary_routes_are_registered_before_wildcard(monkeypatch):
+    mem = MagicMock()
+    mem._v2 = _FakeMemoryV2()
+    router = mr.setup_memory_routes(mem, MagicMock())
+    paths = [route.path for route in router.routes]
+
+    for path, method in [
+        ("/api/memory/summary", "GET"),
+        ("/api/memory/summary/history", "GET"),
+        ("/api/memory/summary/restore", "POST"),
+        ("/api/memory/dream/status", "GET"),
+        ("/api/memory/dream/run", "POST"),
+    ]:
+        _route(router, path, method)
+        assert paths.index(path) < paths.index("/api/memory/{memory_id}")
+
+
+def test_memory_summary_routes_use_memory_v2(monkeypatch):
+    monkeypatch.setattr(mr, "get_current_user", lambda request: "alice", raising=False)
+    mem = MagicMock()
+    mem._v2 = _FakeMemoryV2()
+    router = mr.setup_memory_routes(mem, MagicMock())
+
+    request = _request("alice")
+    summary = _route(router, "/api/memory/summary", "GET")(request)
+    history = _route(router, "/api/memory/summary/history", "GET")(request)
+    status = _route(router, "/api/memory/dream/status", "GET")(request)
+    restored = asyncio.run(
+        _route(router, "/api/memory/summary/restore", "POST")(
+            _JsonRequest("alice", {"summary_id": "sum-old"})
+        )
+    )
+
+    assert summary["summary"] == "summary for alice"
+    assert history["history"][0]["id"] == "sum-active"
+    assert status["status"] == "idle"
+    assert restored == {"ok": True}
+    assert mem._v2.restored == [("alice", "sum-old")]
+
+
+def test_memory_dream_run_owner_scopes_session(monkeypatch):
+    monkeypatch.setattr(mr, "get_current_user", lambda request: "alice", raising=False)
+
+    async def fake_dream_from_session(session, memory_manager, memory_vector=None, *, owner=None):
+        return {"ok": True, "status": "success", "session": session.session_id, "owner": owner}
+
+    import services.memory.dreamer as dreamer
+    monkeypatch.setattr(dreamer, "dream_from_session", fake_dream_from_session)
+
+    mem = MagicMock()
+    mem._v2 = _FakeMemoryV2()
+    sm = MagicMock()
+    sm.get_session.return_value = SimpleNamespace(session_id="s1", owner="alice")
+    router = mr.setup_memory_routes(mem, sm)
+
+    result = asyncio.run(
+        _route(router, "/api/memory/dream/run", "POST")(
+            _JsonRequest("alice", {"session_id": "s1"})
+        )
+    )
+
+    assert result == {"ok": True, "status": "success", "session": "s1", "owner": "alice"}
+
+
 def test_extract_rejects_other_users_session(monkeypatch):
     router = _router(monkeypatch, caller="bob")
     extract = _route(router, "/api/memory/extract", "POST")
