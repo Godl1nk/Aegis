@@ -588,7 +588,7 @@ export function processWithThinking(text) {
     if (hadTrailingDone) html += createTaskCompletedMarker();
   }
 
-  return _useSvgEmoji() ? svgifyEmoji(html) : html;
+  return svgifyEmoji(html);
 }
 
 /**

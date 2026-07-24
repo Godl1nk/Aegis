@@ -77,7 +77,6 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
     try:
         import json
         import re
-        from difflib import SequenceMatcher
         from src.constants import DATA_DIR
         from src.llm_core import llm_call_async_with_fallback
         from src.memory import MemoryManager
@@ -1126,14 +1125,14 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
             conn = _imap_connect(None, owner=owner)
             try:
                 conn.select("INBOX", readonly=True)
-                status, data = conn.uid("SEARCH", None, "ALL")
+                status, data = conn.search(None, "ALL")
                 if status != "OK" or not data or not data[0]:
                     return results
                 uids = data[0].split()[-300:][::-1]  # newest 300
                 for uid in uids:
                     try:
-                        st, msg_data = conn.uid(
-                            "FETCH", uid, "(BODY.PEEK[HEADER.FIELDS (FROM)])"
+                        st, msg_data = conn.fetch(
+                            uid, "(BODY.PEEK[HEADER.FIELDS (FROM)])"
                         )
                         if st != "OK" or not msg_data or not msg_data[0]:
                             continue
@@ -1215,7 +1214,7 @@ async def action_learn_sender_signatures(owner: str, **kwargs) -> Tuple[str, boo
                     conn2.select("INBOX", readonly=True)
                     for mm in _msgs:
                         try:
-                            st, data = conn2.uid("FETCH", mm["uid"], "(BODY.PEEK[TEXT])")
+                            st, data = conn2.fetch(mm["uid"], "(BODY.PEEK[TEXT])")
                             if st != "OK" or not data or not data[0]:
                                 continue
                             raw = data[0][1] if isinstance(data[0], tuple) else None
@@ -1357,13 +1356,13 @@ async def action_daily_brief(owner: str, **kwargs) -> Tuple[str, bool]:
             conn = _imap_connect(None)
             try:
                 conn.select("INBOX", readonly=True)
-                status, data = conn.uid("SEARCH", None, "UNSEEN")
+                status, data = conn.search(None, "UNSEEN")
                 uids = (data[0].split() if status == "OK" and data and data[0] else [])
                 unread_count = len(uids)
                 # Grab headers for the most recent 5 unread (UIDs increase with arrival)
                 for uid in uids[-5:][::-1]:
                     try:
-                        _, msg_data = conn.uid("FETCH", uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")
+                        _, msg_data = conn.fetch(uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")
                         if not msg_data or not msg_data[0]:
                             continue
                         hdr = msg_data[0][1] if isinstance(msg_data[0], tuple) else msg_data[0]

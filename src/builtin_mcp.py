@@ -87,77 +87,6 @@ _BUILTIN_NPX_SERVERS = {
 
 # Global flag to disable MCP if there are compatibility issues
 MCP_DISABLED = os.environ.get("ODYSSEUS_DISABLE_MCP", "").lower() in ("1", "true", "yes")
-BROWSER_MCP_REQUIRE_CACHE = os.environ.get("ODYSSEUS_BROWSER_MCP_REQUIRE_CACHE", "").lower() in ("1", "true", "yes")
-
-
-# Strong references to the fire-and-forget startup tasks scheduled below.
-# asyncio only keeps weak references to tasks created via create_task, so
-# without this the GC can collect a task mid-execution and the server
-# registration silently never runs. Mirrors _spawn_bg in routes/chat_helpers.py.
-_BG_TASKS: set[asyncio.Task] = set()
-
-
-def _spawn_bg(coro) -> asyncio.Task:
-    """Schedule a background task and hold a strong reference until it finishes."""
-    task = asyncio.create_task(coro)
-    _BG_TASKS.add(task)
-    task.add_done_callback(_BG_TASKS.discard)
-    return task
-
-def _find_browser_executable() -> str:
-    """Find a browser binary for the built-in Playwright MCP server.
-
-    Docker images ship Debian's `chromium`; desktop installs may already have
-    Chrome/Chromium in a conventional location. If nothing is found, return an
-    empty string and let Playwright MCP use its own default browser/channel.
-    """
-    configured = os.environ.get("ODYSSEUS_BROWSER_EXECUTABLE", "").strip()
-    if configured:
-        return configured
-    for name in ("google-chrome", "chromium", "chromium-browser"):
-        path = shutil.which(name)
-        if path:
-            return path
-    for candidate in (
-        "/opt/google/chrome/chrome",
-        "/usr/bin/google-chrome",
-        "/usr/bin/chromium",
-        "/usr/bin/chromium-browser",
-    ):
-        if os.path.isfile(candidate):
-            return candidate
-    return ""
-
-
-def _browser_mcp_args(args: list[str]) -> list[str]:
-    """Return Playwright MCP args with a concrete browser executable when found."""
-    out = list(args or [])
-    if "--executable-path" not in out:
-        browser = _find_browser_executable()
-        if browser:
-            out.extend(["--executable-path", browser])
-    if os.environ.get("ODYSSEUS_BROWSER_ISOLATED", "1").lower() not in ("0", "false", "no"):
-        if "--isolated" not in out and "--user-data-dir" not in out:
-            out.append("--isolated")
-    if os.environ.get("ODYSSEUS_BROWSER_NO_SANDBOX", "1").lower() not in ("0", "false", "no"):
-        if "--no-sandbox" not in out and "--sandbox" not in out:
-            out.append("--no-sandbox")
-    return out
-
-
-def builtin_python_env(base_dir: str) -> dict[str, str]:
-    """Environment for built-in Python MCP subprocesses.
-
-    The app root must be importable so mcp_servers can import local modules, but
-    replacing PYTHONPATH entirely hides site-packages in container/dev launches
-    that rely on PYTHONPATH for their active environment.
-    """
-    existing = os.environ.get("PYTHONPATH", "")
-    parts = [base_dir]
-    for item in existing.split(os.pathsep):
-        if item and item not in parts:
-            parts.append(item)
-    return {"PYTHONPATH": os.pathsep.join(parts)}
 
 
 # Strong references to the fire-and-forget startup tasks scheduled below.
@@ -192,7 +121,7 @@ async def register_builtin_servers(mcp_manager):
                 transport="stdio",
                 command=python,
                 args=[script_path],
-                env=builtin_python_env(base_dir),
+                env={"PYTHONPATH": base_dir},
             )
             if ok:
                 logger.info(f"Built-in MCP server registered: {name}")

@@ -2662,7 +2662,6 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     h = apply_kimi_code_headers(h, target_url)
     try:
         client = _get_http_client()
-        h = await apply_kimi_code_headers_async(client, h, target_url)
         async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
             _clear_host_dead(target_url)
             if r.status_code != 200:
@@ -2934,9 +2933,8 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
     """Wrap stream_llm with an ordered fallback chain.
 
     `candidates` is a list of (url, model, headers). Each is tried in order,
-    but only retried on a *pre-content* failure — an ``event: error`` or an
-    empty completion before any assistant text / completed tool call is yielded.
-    Metadata is held until substantive output commits the candidate.
+    but only retried on a *pre-content* failure — i.e. an ``event: error``
+    that arrives before any assistant text / tool-call data has been yielded.
     Once a candidate has emitted real output we never switch (that would
     duplicate streamed tokens); a later error from that candidate passes
     through unchanged. The dead-host cooldown in stream_llm makes repeat
@@ -2955,7 +2953,6 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
         is_last = (i == len(cands) - 1)
         emitted = False
         retried = False
-        pending_metadata = []
         async for chunk in stream_llm(url, model, messages, headers=headers, **kwargs):
             if chunk.startswith("event: error"):
                 if not emitted and not is_last:
@@ -2968,11 +2965,6 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
                     else:
                         logger.warning(f"[fallback] candidate {model} failed; trying next")
                     break
-                if not emitted:
-                    # A last-candidate error is already the clearest terminal
-                    # result; do not append an empty-completion error as well.
-                    yield chunk
-                    return
                 yield chunk
                 continue
             # Any data chunk other than the terminal [DONE] means real output.
@@ -2998,20 +2990,9 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
                         "reason": _summarize_stream_error(last_error),
                     }) + '\n\n')
                 emitted = True
-
-            if substantive or emitted:
-                yield chunk
-            elif not is_done:
-                pending_metadata.append(chunk)
-
-        if emitted:
-            return
-        if retried:
-            continue
-        if not is_last:
-            last_error = f'event: error\ndata: {json.dumps({"error": f"Model {model} returned no substantive output", "status": 502})}\n\n'
-            tag = "primary" if i == 0 else "candidate"
-            logger.warning(f"[fallback] {tag} {model} returned no substantive output; trying next")
-            continue
-        yield f'event: error\ndata: {json.dumps({"error": "All model candidates returned no substantive output", "status": 502})}\n\n'
-        return
+            yield chunk
+        if not retried:
+            return  # candidate finished (success, or terminal error already sent)
+    # Every candidate failed pre-content — surface the last error.
+    if last_error:
+        yield last_error

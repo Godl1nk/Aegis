@@ -513,30 +513,8 @@ export function _detectBackend(model) {
   const isGgufLike = model.is_gguf || hasGgufFile || /^Q[2-8]/.test(q) || /^IQ/.test(q) || q === 'GGUF' || _nm.includes('gguf');
 
   // Image gen models → diffusers
-  if (isImageModel) {
-    if (/\bmlx\b|mlx-|_mlx|mlx-community\//i.test(_nm) || q.startsWith('MLX') || model.mlx_only) {
-      return { backend: 'mlx_image', label: 'MLX Image' };
-    }
+  if (model.is_image_gen || model.is_diffusion || model._tag === 'image') {
     return { backend: 'diffusers', label: 'Diffusers' };
-  }
-  if (/\bmlx\b|mlx-|_mlx/i.test(_nm) || q.startsWith('MLX')) {
-    return { backend: 'mlx', label: 'MLX' };
-  }
-  const isAwqLike = /^AWQ|^GPTQ|^NVFP4/.test(q) || ['FP8', 'FP4', 'MXFP4', 'NF4', 'INT4', 'INT8', 'W4A16', 'W8A8', 'W8A16'].includes(q) || /\b(awq|gptq|fp8|fp4|nvfp4|mxfp4|nf4|int4|int8|w4a16|w8a8|w8a16)\b/i.test(_nm);
-  const hasGgufFile = Array.isArray(model.gguf_files)
-    && model.gguf_files.some(f => f && typeof f.rel_path === 'string' && /\.gguf$/i.test(f.rel_path));
-  const isGgufLike = model.is_gguf || hasGgufFile || /^Q[2-8]/.test(q) || /^IQ/.test(q) || q === 'GGUF' || _nm.includes('gguf');
-
-  // AWQ / GPTQ / FP8 are safetensors GPU-serving formats. Never route them
-  // through llama.cpp/Ollama just because the host is Mac/Windows; those engines
-  // need GGUF. The UI will warn/block on Metal where vLLM/SGLang aren't viable.
-  if (isAwqLike) {
-    return { backend: 'vllm', label: 'vLLM' };
-  }
-
-  // GGUF → llama.cpp/Ollama-compatible.
-  if (isGgufLike) {
-    return { backend: 'llamacpp', label: 'llama.cpp' };
   }
 
   // AWQ / GPTQ / FP8 are safetensors GPU-serving formats. Never route them
@@ -578,18 +556,6 @@ export function _detectBackend(model) {
 
 export function _shellQuote(value) {
   return "'" + String(value ?? '').replace(/'/g, "'\\''") + "'";
-}
-
-function _listField(value) {
-  return String(value || '')
-    .split(/[\n,]+/)
-    .map(s => s.trim())
-    .filter(Boolean);
-}
-
-function _numField(value) {
-  const s = String(value || '').trim();
-  return /^-?\d+(?:\.\d+)?$/.test(s) ? s : '';
 }
 
 export function _psQuote(value) {
@@ -743,10 +709,6 @@ export function _buildServeCmd(f, modelName, backend) {
     const _kv = (f.vllm_kv_cache_dtype ?? '').toString().trim();
     if (_kv === 'fp8') cmd += ' --kv-cache-dtype fp8';
     if (f.max_seqs && f.max_seqs.toString().trim()) cmd += ` --max-num-seqs ${f.max_seqs.toString().trim()}`;
-    const _vllmLoraModules = _listField(f.vllm_lora_modules);
-    if (_vllmLoraModules.length) {
-      cmd += ` --enable-lora --lora-modules ${_vllmLoraModules.map(_shellQuote).join(' ')}`;
-    }
     if (f.enforce_eager) cmd += ' --enforce-eager';
     if (f.trust_remote) cmd += ' --trust-remote-code';
     if (f.prefix_cache) cmd += ' --enable-prefix-caching';
@@ -972,14 +934,8 @@ export function _buildServeCmd(f, modelName, backend) {
     if (f.diff_dtype && f.diff_dtype !== 'bfloat16') cmd += ` --dtype ${f.diff_dtype}`;
     if (f.diff_device_map && f.diff_device_map !== 'balanced') cmd += ` --device-map ${f.diff_device_map}`;
     if (f.diff_steps) cmd += ` --steps ${f.diff_steps}`;
-    if (f.diff_guidance_scale) cmd += ` --guidance-scale ${_numField(f.diff_guidance_scale) || f.diff_guidance_scale}`;
-    if (String(f.diff_negative_prompt || '').trim()) cmd += ` --negative-prompt ${_shellQuote(String(f.diff_negative_prompt || '').trim())}`;
     if (f.diff_width) cmd += ` --width ${f.diff_width}`;
     if (f.diff_height) cmd += ` --height ${f.diff_height}`;
-    const _diffLoras = _listField(f.diff_lora);
-    if (_diffLoras.length) cmd += ` --lora ${_shellQuote(_diffLoras.join(','))}`;
-    const _diffLoraScale = _numField(f.diff_lora_scale);
-    if (_diffLoraScale) cmd += ` --lora-scale ${_diffLoraScale}`;
     if (f.diff_offload) cmd += ' --cpu-offload';
     if (f.diff_attention_slicing) cmd += ' --attention-slicing';
     if (f.diff_vae_slicing) cmd += ' --vae-slicing';
@@ -1085,35 +1041,19 @@ async function _fetchDependencies() {
   try {
     // Resolve the target server from the deps dropdown so remote-target
     // packages are checked on THAT server's venv (not just the local host).
-    let _depHost = '', _depPort = '', _depVenv = '', _depPlatform = '';
+    let _depHost = '', _depPort = '', _depVenv = '';
     const _dsel = document.getElementById('hwfit-deps-server');
     const _depSrv = _dsel && _dsel.value !== 'local' ? _serverByVal(_dsel.value) : null;
     if (_depSrv) {
-      _depHost = _depSrv.host || ''; _depPort = _depSrv.port || ''; _depVenv = _depSrv.envPath || ''; _depPlatform = _depSrv.platform || '';
+      _depHost = _depSrv.host || ''; _depPort = _depSrv.port || ''; _depVenv = _depSrv.envPath || '';
     } else if (_envState.remoteHost) {
-      _depHost = _envState.remoteHost; _depPort = _getPort(_envState.remoteHost) || ''; _depVenv = _envState.envPath || ''; _depPlatform = _envState.platform || '';
+      _depHost = _envState.remoteHost; _depPort = _getPort(_envState.remoteHost) || ''; _depVenv = _envState.envPath || '';
     }
     const _pkgParams = new URLSearchParams();
     if (_depHost) {
       _pkgParams.set('host', _depHost);
       if (_depPort) _pkgParams.set('ssh_port', _depPort);
       if (_depVenv) _pkgParams.set('venv', _depVenv);
-      if (_depPlatform) _pkgParams.set('platform', _depPlatform);
-    }
-    // Pass the detected backend so the server can build a single
-    // OS+backend-aware install command per row (e.g. add nvidia-cuda-toolkit
-    // on a CUDA-Debian box, vulkan-headers on a Vulkan-Arch box, etc.)
-    // instead of dumping every distro's syntax as a hint.
-    const _depBackend = String(_hwfitCache?.system?.backend || '').toLowerCase();
-    if (_depBackend && _hwfitCache?._scannedHost === _depHost) {
-      _pkgParams.set('backend', _depBackend);
-    }
-    if (_cachedModelIds && _cachedModelIds.size) {
-      const _hint = Array.from(_cachedModelIds)
-        .filter(id => /krea/i.test(String(id || '')))
-        .slice(0, 20)
-        .join(',');
-      if (_hint) _pkgParams.set('model_hint', _hint);
     }
     // Pass the detected backend so the server can build a single
     // OS+backend-aware install command per row (e.g. add nvidia-cuda-toolkit
@@ -1378,7 +1318,7 @@ async function _fetchDependencies() {
       }
       try {
         const reqBody = {
-          repo_id: depTaskId,
+          repo_id: pipName,
           cmd: cmd,
           remote_host: targetRemoteHost || undefined,
           ssh_port: _getPort(targetRemoteHost) || undefined,
@@ -3035,23 +2975,6 @@ function _renderRecipes() {
   html += '<select class="cookbook-field-input hwfit-server-select" id="hwfit-server-select" style="height:28px;min-width:88px;position:relative;top:0px;">';
   html += _buildServerOpts(false);
   html += '</select>';
-  // Keep the main scan toolbar light: server + free-text search. Advanced
-  // levers (Engine / Quant / Context) live behind the cog beside Refresh.
-  html += '<input type="text" class="cookbook-field-input hwfit-search" id="hwfit-search" placeholder="Search models..." style="flex:1;" />';
-  html += '</div>';
-  html += '<div class="hwfit-toolbar" style="margin-top:7px;">';
-  html += '<span class="hwfit-usecase-wrap">';
-  html += '<select class="cookbook-field-input hwfit-usecase" id="hwfit-usecase" style="display:none;height:28px;">';
-  html += '<option value="general" selected>Standard</option>';
-  html += '<option value="multimodal">Vision</option>';
-  html += '<option value="image_gen">Image</option></select>';
-  html += '<button type="button" class="cookbook-field-input hwfit-usecase-btn" data-hwfit-usecase-btn aria-haspopup="listbox" aria-expanded="false" title="Model type">';
-  html += '<span class="hwfit-usecase-btn-icon" data-hwfit-usecase-icon aria-hidden="true"></span>';
-  html += '<span class="hwfit-usecase-btn-label" data-hwfit-usecase-label>Standard</span>';
-  html += '<svg class="hwfit-usecase-caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>';
-  html += '</button>';
-  html += '<div class="hwfit-usecase-menu" data-hwfit-usecase-menu role="listbox" hidden></div>';
-  html += '</span>';
   html += '<div class="hwfit-gpu-toggles" id="hwfit-gpu-toggles"></div>';
   html += '<button type="button" class="hwfit-gpu-btn hwfit-hw-manual-btn" id="hwfit-hw-manual-btn" title="Set hardware manually" style="flex-shrink:0;position:relative;top:-3px;left:-1px;display:inline-flex;align-items:center;gap:3px;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>EDIT</button>';
   html += '<button type="button" class="hwfit-gpu-btn hwfit-hw-refresh-btn" id="hwfit-hw-refresh-btn" title="Refresh selected server hardware and cached models" aria-label="Refresh selected server hardware and cached models" style="flex-shrink:0;position:relative;top:-3px;left:-3px;width:26px;height:26px;padding:0;display:inline-flex;align-items:center;justify-content:center;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10"/><path d="M3.51 15a9 9 0 0 0 14.85 3.36L23 14"/></svg></button>';
@@ -3062,43 +2985,6 @@ function _renderRecipes() {
   html += '<option value="fit">Fit</option><option value="score">Score</option><option value="vram">VRAM</option>';
   html += '<option value="speed">Speed</option><option value="params">Params</option>';
   html += '<option value="context">Context</option></select>';
-  html += '</div>';
-  html += '<div class="hwfit-advanced-panel hidden" id="hwfit-advanced-panel" aria-label="Scan settings">';
-  html += '<span class="hwfit-engine-wrap">';
-  html += '<select class="cookbook-field-input hwfit-engine" id="hwfit-engine" style="display:none;" title="Filter by serving engine">';
-  html += '<option value="">Engine</option>';
-  html += '<option value="llamacpp">llama.cpp</option>';
-  html += '<option value="ollama">Ollama</option>';
-  html += '<option value="mlx">MLX</option>';
-  html += '<option value="vllm">vLLM</option>';
-  html += '<option value="sglang">SGLang</option>';
-  html += '<option value="diffusers">Diffusers</option>';
-  html += '</select>';
-  html += '<button type="button" class="cookbook-field-input hwfit-engine-btn" data-hwfit-engine-btn aria-haspopup="listbox" aria-expanded="false" title="Filter by serving engine">';
-  html += '<span class="hwfit-engine-btn-icon" data-hwfit-engine-icon aria-hidden="true"></span>';
-  html += '<span class="hwfit-engine-btn-label" data-hwfit-engine-label>Engine</span>';
-  html += '<svg class="hwfit-engine-caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>';
-  html += '</button>';
-  html += '<div class="hwfit-engine-menu" data-hwfit-engine-menu role="listbox" hidden></div>';
-  html += '<span class="hwfit-help-chip hwfit-help-chip-inline hwfit-engine-help" title="Rule of thumb: GGUF on single GPU / CPU+RAM → llama.cpp (or Ollama). Safetensors on multi-GPU NVIDIA → vLLM. SGLang is a vLLM-class alternative, sometimes faster on big-MoE / long-context.">?</span>';
-  html += '</span>';
-  // Quant (Q4/Q8/…). Default is "All" so the list shows the best-scoring
-  // quant for every model instead of silently filtering to Q4.
-  html += '<span class="hwfit-quant-wrap">';
-  html += '<select class="cookbook-field-input hwfit-quant" id="hwfit-quant" style="height:28px;">';
-  html += '<option value="" selected>Quant</option>';
-  html += '<option value="Q4_K_M">Q4 / AWQ</option><option value="Q8_0">Q8</option>';
-  html += '<option value="Q6_K">Q6</option><option value="Q5_K_M">Q5</option>';
-  html += '<option value="Q3_K_M">Q3</option><option value="Q2_K">Q2</option>';
-  html += '<option value="AWQ-4bit">AWQ</option><option value="FP8">FP8</option><option value="FP4">FP4</option><option value="NVFP4">NVFP4</option></select>';
-  html += '<span class="hwfit-help-chip hwfit-help-chip-inline hwfit-quant-help" title="Lower quant tiers (Q2/Q3/Q4 / AWQ-4bit) are smaller, faster, and cheaper to run, at some quality loss. Higher tiers (Q8 / FP8 / FP16 / BF16) preserve more quality but need more VRAM. “All” shows the best-scoring quant per model — pick a specific one to filter.">?</span>';
-  html += '</span>';
-  // Ctx slider — lets you target a context length for fit estimates; the
-  // hwfit ranking uses _ctxValue() to factor that into VRAM math, so
-  // dragging this re-sorts the list toward models that fit your chosen ctx.
-  html += '<label class="hwfit-ctx-control" title="Context length for fit estimates. Lower it to find more models that could fit your hardware.">';
-  html += '<span>Context</span><span class="hwfit-help-chip hwfit-help-chip-inline" title="Context length. Lower it to find more models that could fit your hardware; raise it when you need longer chats or documents.">?</span><input type="range" id="hwfit-context" min="0" max="5" step="1" value="3" />';
-  html += '<output id="hwfit-context-label">50k</output></label>';
   html += '</div>';
   html += '<div class="hwfit-manual-panel hidden" id="hwfit-manual-panel">';
   html += '<span class="hwfit-manual-note" style="font-size:10px;opacity:0.6;width:100%;margin-bottom:2px;">Simulator — these values REPLACE detected hardware.</span>';

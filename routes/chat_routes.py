@@ -849,7 +849,6 @@ def setup_chat_routes(
             except Exception as e:
                 logger.warning("Failed to parse attachments JSON, ignoring attachments", exc_info=e)
 
-        image_generation_session = _is_image_generation_session(sess, owner=effective_user(request))
         no_memory = str(form_data.get("no_memory", "")).lower() == "true"
         pre_context_tool_policy = build_effective_tool_policy(
             last_user_message=message,
@@ -1059,26 +1058,6 @@ def setup_chat_routes(
                 "manage_memory",      # persistent memory store
                 "search_chats",       # past chat history
                 "manage_skills",      # skill presets tied to user
-                "create_session",
-                "list_sessions",
-                "manage_session",
-                "send_to_session",
-                "chat_with_model",
-            })
-
-        # Active email reader open → strip the tools that let the agent drift
-        # away from the visible email or skip review. The only allowed compose
-        # path is ui_control open_email_reply, which opens the same draft editor
-        # as the Reply button with the generated body pre-filled. This prevents
-        # the model from falling back to direct SMTP when it botches a draft
-        # call, and prevents fake email-shaped documents.
-        if active_email_ctx and active_email_ctx.get("uid"):
-            disabled_tools.update({
-                "create_document",
-                "send_email",
-                "reply_to_email",
-                "mcp__email__send_email",
-                "mcp__email__reply_to_email",
             })
 
         # Active email reader open → strip the tools that let the agent drift
@@ -1105,7 +1084,7 @@ def setup_chat_routes(
             if not _privs.get("can_use_bash", True):
                 disabled_tools.update({"bash", "python", "read_file", "write_file"})
             if not _privs.get("can_use_browser", True):
-                disabled_tools.update(_BROWSER_MCP_TOOLS)
+                disabled_tools.add("builtin_browser")
             if not _privs.get("can_use_documents", True):
                 disabled_tools.update({"create_document", "edit_document", "update_document", "suggest_document"})
             if not _privs.get("can_generate_images", True):
@@ -1135,12 +1114,10 @@ def setup_chat_routes(
         # the heavy "do things on the computer" tools — otherwise the model
         # tries to shell out for a request that never needed it, then fails
         # (and looks broken when the shell is disabled).
-        if auto_escalated and not _workspace_agent_intent:
+        if auto_escalated:
             disabled_tools.update({
-                "bash", "python", "read_file", "write_file",
+                "bash", "python", "read_file", "write_file", "builtin_browser",
             })
-            if not _allow_browser_for_web_turn:
-                disabled_tools.update(_BROWSER_MCP_TOOLS)
 
         # Disable document tools in compare sessions — they break the pane UI
         if sess.name and sess.name.startswith("[CMP]"):
@@ -1470,7 +1447,6 @@ def setup_chat_routes(
                                     "input_tokens": _est_in,
                                     "output_tokens": _est_out,
                                     "tokens_per_second": _tps,
-                                    "request_context_tokens": _est_in,
                                     "context_percent": _ctx_pct,
                                     "context_length": ctx.context_length,
                                     "model": _actual_model or _answered_by or _requested_model,
@@ -1517,7 +1493,8 @@ def setup_chat_routes(
                             },
                         )
                         sess.add_message(ChatMessage("assistant", _stopped_content, metadata=_stopped_md))
-                        session_manager.save_sessions()
+                        if not incognito:
+                            session_manager.save_sessions()
                     raise
                 finally:
                     _active_streams.pop(session, None)
@@ -1710,7 +1687,8 @@ def setup_chat_routes(
                                 full_response, _stopped_meta,
                             )
                             sess.add_message(ChatMessage("assistant", _stopped_content2, metadata=_stopped_md2))
-                            session_manager.save_sessions()
+                            if not incognito:
+                                session_manager.save_sessions()
                     except Exception:
                         logger.exception("Failed to save partial response on disconnect (session %s)", session)
                     raise

@@ -54,12 +54,12 @@ import {
   buildThumbnail as _buildThumbnailImpl,
   buildMergedMaskCanvas as _buildMergedMaskCanvasImpl,
 } from './editor/composite-helpers.js';
-import { buildToolbar as _buildToolbar } from './editor/build/toolbar.js?v=20260708sam3';
+import { buildToolbar as _buildToolbar } from './editor/build/toolbar.js';
 import { buildTopbar as _buildTopbar } from './editor/build/topbar.js';
 import {
   controlsHTML as _controlsHTML,
   layerPanelHTML as _layerPanelHTML,
-} from './editor/build/controls.js?v=20260708match1';
+} from './editor/build/controls.js';
 import {
   transformPopupHTML as _transformPopupHTML,
   attachSpinRepeat as _attachSpinRepeat,
@@ -96,14 +96,14 @@ import { createShortcutsPopover } from './editor/shortcuts-popover.js';
 import { wireKeyboardShortcuts } from './editor/keyboard-shortcuts.js';
 import { wireClipboardAndDrop } from './editor/clipboard-and-drop.js';
 import { wireAIModelSelectors } from './editor/ai-models.js';
-import { wireInpaintButtons } from './editor/ai-inpaint.js?v=20260708match1';
+import { wireInpaintButtons } from './editor/ai-inpaint.js';
 import { wireAIToolsMisc } from './editor/ai-tools-misc.js';
 import { wireRembgAndSharpen } from './editor/ai-rembg.js';
 import { wireStrokeToolSliders } from './editor/stroke-tool-sliders.js';
 import { wireImport } from './editor/wire-import.js';
 import { wireMergeButtons } from './editor/wire-merge-buttons.js';
 import { wireSelectionControls } from './editor/wire-selection-controls.js';
-import { wireInpaintControls } from './editor/wire-inpaint-controls.js?v=20260708match1';
+import { wireInpaintControls } from './editor/wire-inpaint-controls.js';
 import { wireTopbar, closeOtherTopbarMenus as _closeOtherTopbarMenus } from './editor/wire-topbar.js';
 import { wireTopbarOverflow } from './editor/wire-topbar-overflow.js';
 import { wireTopbarMenus } from './editor/wire-topbar-menus.js';
@@ -125,14 +125,6 @@ function _syncTransformOverlay() { _syncTransformOverlayImpl(_TRANSFORM_OVERLAY_
 // the inpaint tool for the first time in this editor session we bump
 // the slider to this value (without touching other tools).
 const _INPAINT_DEFAULT_BRUSH = 100;
-let _samAbortController = null;
-
-function _cancelSamQuery(showToast = true) {
-  if (!_samAbortController) return false;
-  try { _samAbortController.abort(); } catch {}
-  if (showToast && uiModule) uiModule.showToast('SAM query cancelled');
-  return true;
-}
 
 function _galleryEditMounted() {
   return !!document.querySelector('#gallery-editor-container .gallery-editor');
@@ -141,15 +133,6 @@ function _galleryEditMounted() {
 if (!window.__galleryEditEscHardGuardInstalled) {
   window.__galleryEditEscHardGuardInstalled = true;
   window.addEventListener('keydown', (e) => {
-    const isSamCancel = !!_samAbortController
-      && (e.key === 'Escape' || ((e.ctrlKey || e.metaKey) && String(e.key || '').toLowerCase() === 'c'));
-    if (isSamCancel) {
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
-      _cancelSamQuery();
-      return;
-    }
     if (e.key !== 'Escape') return;
     if (window.__galleryEditLive || _galleryEditMounted()) {
       e.preventDefault();
@@ -1237,7 +1220,6 @@ function _beginDraw(e) {
   // it doesn't mutate the layer until an action (Erase/Copy) is taken.
   // Full implementation in editor/tools/wand.js.
   if (state.tool === 'wand') return _wandTool.click(e);
-  if (state.tool === 'sam') return _runSamSelection(e);
   // Inpaint can create its own layer + mask on the fly, so skip the
   // "no active layer → bail" gate for it specifically.
   if (state.tool !== 'inpaint' && (!layer || layer.locked)) return;
@@ -1758,146 +1740,6 @@ function _runMagicWand(cx, cy, mode = 'replace', opts = {}) {
   _syncToolClearIndicators();
 }
 
-async function _runSamSelection(e) {
-  const layer = activeLayer();
-  if (!layer || layer.locked) {
-    if (uiModule) uiModule.showToast('Select an unlocked layer');
-    return;
-  }
-  const coords = _canvasCoords(e, state.mainCanvas);
-  const off = state.layerOffsets.get(layer.id) || { x: 0, y: 0 };
-  const lx = Math.floor(coords.x - off.x);
-  const ly = Math.floor(coords.y - off.y);
-  if (lx < 0 || ly < 0 || lx >= layer.canvas.width || ly >= layer.canvas.height) return;
-
-  let mode = state.wandMode || 'replace';
-  if (e.shiftKey) mode = 'add';
-  else if (e.altKey) mode = 'subtract';
-
-  _cancelSamQuery(false);
-  const controller = new AbortController();
-  _samAbortController = controller;
-  const cleanup = _showWandLoading();
-  try {
-    await _requestAndApplySamMask(layer, {
-      points: [{ x: lx, y: ly, label: 1 }],
-    }, mode, { x: coords.x, y: coords.y }, { signal: controller.signal });
-  } catch (err) {
-    if (err?.name !== 'AbortError' && uiModule) {
-      uiModule.showToast(err.message || String(err), 7000);
-    }
-  } finally {
-    cleanup();
-    if (_samAbortController === controller) _samAbortController = null;
-  }
-}
-
-async function _runSamTextSelection() {
-  const layer = activeLayer();
-  if (!layer || layer.locked) {
-    if (uiModule) uiModule.showToast('Select an unlocked layer');
-    return;
-  }
-  const input = document.getElementById('ge-sam-query');
-  const text = (input?.value || '').trim();
-  if (!text) {
-    if (uiModule) uiModule.showToast('Type an object to find');
-    input?.focus();
-    return;
-  }
-  const btn = document.getElementById('ge-sam-find');
-  const old = btn?.innerHTML;
-  if (btn) {
-    btn.disabled = true;
-    btn.innerHTML = '<span class="ge-btn-ai-mark" aria-hidden="true">✦</span>Finding…';
-  }
-  _cancelSamQuery(false);
-  const controller = new AbortController();
-  _samAbortController = controller;
-  const cleanup = _showWandLoading();
-  try {
-    await _requestAndApplySamMask(layer, { text }, state.wandMode || 'replace', null, { signal: controller.signal });
-  } catch (err) {
-    if (err?.name !== 'AbortError' && uiModule) {
-      uiModule.showToast(err.message || String(err), 7000);
-    }
-  } finally {
-    cleanup();
-    if (_samAbortController === controller) _samAbortController = null;
-    if (btn) {
-      btn.disabled = false;
-      btn.innerHTML = old || '<span class="ge-btn-ai-mark" aria-hidden="true">✦</span>Find';
-    }
-  }
-}
-
-async function _requestAndApplySamMask(layer, payload, mode, seedPoint, opts = {}) {
-  const res = await fetch('/api/image/mask', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: opts.signal,
-      body: JSON.stringify({
-        image: layer.canvas.toDataURL('image/png').split(',')[1],
-        ...payload,
-      }),
-    });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || !data.mask) {
-    throw new Error(data.detail || data.error || `Mask failed (${res.status})`);
-  }
-  if (!data.bbox) {
-    throw new Error(data.grounding ? `Found ${data.grounding.label || 'object'}, but SAM returned an empty mask` : 'SAM returned an empty mask');
-  }
-
-  const img = new Image();
-  await new Promise((resolve, reject) => {
-    img.onload = resolve;
-    img.onerror = () => reject(new Error('Failed to decode mask'));
-    img.src = 'data:image/png;base64,' + data.mask;
-  });
-  const mask = document.createElement('canvas');
-  mask.width = layer.canvas.width;
-  mask.height = layer.canvas.height;
-  const mctx = mask.getContext('2d');
-  mctx.drawImage(img, 0, 0, mask.width, mask.height);
-  const maskData = mctx.getImageData(0, 0, mask.width, mask.height);
-  const md = maskData.data;
-  for (let i = 0; i < md.length; i += 4) {
-    const alpha = md[i]; // server mask is white selected / black unselected
-    md[i] = 255;
-    md[i + 1] = 255;
-    md[i + 2] = 255;
-    md[i + 3] = alpha;
-  }
-  mctx.putImageData(maskData, 0, 0);
-
-  _saveState();
-  const compatible = state.wandMask && state.wandLayerId === layer.id &&
-    state.wandMask.width === mask.width && state.wandMask.height === mask.height;
-  if (compatible && mode === 'add') {
-    state.wandMask.getContext('2d').drawImage(mask, 0, 0);
-  } else if (compatible && mode === 'subtract') {
-    const ec = state.wandMask.getContext('2d');
-    ec.save();
-    ec.globalCompositeOperation = 'destination-out';
-    ec.drawImage(mask, 0, 0);
-    ec.restore();
-  } else {
-    state.wandMask = mask;
-    state.wandLayerId = layer.id;
-  }
-  state.wandLastSeed = seedPoint
-    ? { x: seedPoint.x, y: seedPoint.y, mode, source: 'sam' }
-    : { x: 0, y: 0, mode, source: 'sam-text' };
-  state.wandMaskVisible = true;
-  composite();
-  _syncToolClearIndicators();
-  if (data.grounding && uiModule) {
-    const pct = Math.round((data.grounding.score || 0) * 100);
-    uiModule.showToast(`Selected ${data.grounding.label || 'object'}${pct ? ` (${pct}%)` : ''}`, 2500);
-  }
-}
-
 function _showWandLoading() {
   const area = state.container?.querySelector('.ge-canvas-area');
   if (!area) return () => {};
@@ -2139,108 +1981,12 @@ function _wandToMask() {
   state.wandMask = null;
   state.wandLayerId = null;
   state.wandLastSeed = null;
-  mask.visible = true;
-  layer.activeMaskId = mask.id;
-  state.maskVisible = true;
   composite();
   _renderLayerPanel();
   if (uiModule) uiModule.showToast('Selection added to mask');
 }
 
-function _autoMatchLastInpaintLayer() {
-  const layer = state.layers.find(l => l.id === state.lastInpaintLayerId);
-  const src = layer?.inpaintSource;
-  if (!layer || !src?.base || !src?.mask) {
-    if (uiModule) uiModule.showToast('Run inpaint first');
-    return;
-  }
-  const w = state.imgWidth;
-  const h = state.imgHeight;
-  let baseData, resultData, maskData;
-  try {
-    baseData = src.base.getContext('2d').getImageData(0, 0, w, h).data;
-    resultData = layer.canvas.getContext('2d').getImageData(0, 0, w, h).data;
-    maskData = src.mask.getContext('2d').getImageData(0, 0, w, h).data;
-  } catch (err) {
-    if (uiModule) uiModule.showToast('Auto match failed: cannot read pixels');
-    return;
-  }
-
-  const inside = { r: 0, g: 0, b: 0, y: 0, n: 0 };
-  const outside = { r: 0, g: 0, b: 0, y: 0, n: 0 };
-  const step = Math.max(1, Math.round(Math.max(w, h) / 900));
-  const radius = Math.max(2, Math.round(Math.min(w, h) * 0.006));
-  const sample = (bucket, data, idx) => {
-    const r = data[idx], g = data[idx + 1], b = data[idx + 2];
-    bucket.r += r; bucket.g += g; bucket.b += b;
-    bucket.y += 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    bucket.n++;
-  };
-  const isMasked = (x, y) => {
-    if (x < 0 || y < 0 || x >= w || y >= h) return false;
-    return maskData[(y * w + x) * 4 + 3] > 24;
-  };
-  for (let y = radius; y < h - radius; y += step) {
-    for (let x = radius; x < w - radius; x += step) {
-      const idx = (y * w + x) * 4;
-      const m = maskData[idx + 3] > 24;
-      let touchesOther = false;
-      for (let dy = -radius; dy <= radius && !touchesOther; dy += radius) {
-        for (let dx = -radius; dx <= radius; dx += radius) {
-          if (!dx && !dy) continue;
-          if (isMasked(x + dx, y + dy) !== m) {
-            touchesOther = true;
-            break;
-          }
-        }
-      }
-      if (!touchesOther) continue;
-      if (m && resultData[idx + 3] > 24) sample(inside, resultData, idx);
-      else if (!m && baseData[idx + 3] > 24) sample(outside, baseData, idx);
-    }
-  }
-  if (inside.n < 20 || outside.n < 20) {
-    if (uiModule) uiModule.showToast('Auto match needs a larger mask edge');
-    return;
-  }
-  for (const b of [inside, outside]) {
-    b.r /= b.n; b.g /= b.n; b.b /= b.n; b.y /= b.n;
-  }
-  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-  const dr = clamp((outside.r - inside.r) * 0.55, -55, 55);
-  const dg = clamp((outside.g - inside.g) * 0.55, -55, 55);
-  const db = clamp((outside.b - inside.b) * 0.55, -55, 55);
-  const dy = clamp((outside.y - inside.y) * 0.35, -35, 35);
-  if (!layer.adjLayers) layer.adjLayers = [];
-  layer.adjLayers = layer.adjLayers.filter(a => a.id !== 'auto-match-color' && a.id !== 'auto-match-light');
-  layer.adjLayers.push({
-    id: 'auto-match-light',
-    type: 'brightness-contrast',
-    params: {
-      brightness: clamp(1 + (dy / 255), 0.75, 1.25),
-      contrast: 1,
-    },
-    opacity: 0.7,
-    visible: true,
-  });
-  layer.adjLayers.push({
-    id: 'auto-match-color',
-    type: 'color-balance',
-    params: {
-      shadows: { r: dr * 0.45, g: dg * 0.45, b: db * 0.45 },
-      midtones: { r: dr, g: dg, b: db },
-      highlights: { r: dr * 0.35, g: dg * 0.35, b: db * 0.35 },
-    },
-    opacity: 0.75,
-    visible: true,
-  });
-  _saveState('Auto match inpaint color');
-  composite();
-  _renderLayerPanel();
-  if (uiModule) uiModule.showToast('Auto matched color');
-}
-
-// Reveal/hide the small "X" badge on the Lasso, Wand, and SAM tool buttons
+// Reveal/hide the small "X" badge on the Lasso and Wand tool buttons
 // based on whether each tool currently holds a selection. Called from
 // anywhere selection state mutates (wand click, lasso close, undo, etc.).
 function _syncToolClearIndicators() {
@@ -2280,11 +2026,9 @@ function _syncToolClearIndicators() {
   if (!state.container) return;
   const lassoBtn = state.container.querySelector('.ge-tool-btn[data-tool="lasso"]');
   const wandBtn  = state.container.querySelector('.ge-tool-btn[data-tool="wand"]');
-  const samBtn   = state.container.querySelector('.ge-tool-btn[data-tool="sam"]');
   const inpaintBtn = state.container.querySelector('.ge-tool-btn[data-tool="inpaint"]');
   if (lassoBtn) lassoBtn.classList.toggle('has-selection', state.lassoPoints.length >= 3 && !state.lassoActive);
   if (wandBtn)  wandBtn.classList.toggle('has-selection', !!state.wandMask);
-  if (samBtn)   samBtn.classList.toggle('has-selection', !!state.wandMask);
   // Inpaint no longer carries a clear-X badge; masks live as sub-layers
   // in the layer panel and are deleted from there.
   if (inpaintBtn) inpaintBtn.classList.remove('has-selection');
@@ -2726,7 +2470,6 @@ function _wireInpaintPopoverWindow() {
 // ── Build DOM ──
 
 function _buildEditor(container) {
-  document.querySelectorAll('body > #ge-save-menu').forEach(el => el.remove());
   container.innerHTML = '';
   container.className = 'gallery-editor';
 
@@ -2741,9 +2484,6 @@ function _buildEditor(container) {
         composite();
       } else if (which === 'wand') {
         _wandClear();
-      } else if (which === 'sam') {
-        _openSamPrompt();
-        return;
       }
       _syncToolClearIndicators();
     },
@@ -2765,7 +2505,7 @@ function _buildEditor(container) {
       // panel auto-minimises the layers sheet so the controls aren't
       // covered. Swiping the layers handle back up restores it.
       const isMobile = window.innerWidth <= 820;
-      const hasToolControls = ['brush', 'eraser', 'clone', 'inpaint', 'sam'].includes(toolId);
+      const hasToolControls = ['brush', 'eraser', 'clone', 'inpaint'].includes(toolId);
       const controlsVisible = controls && !controls.classList.contains('dismissed');
       if (isMobile && hasToolControls && controlsVisible) {
         const rp = document.querySelector('.ge-right-panel');
@@ -2800,8 +2540,6 @@ function _buildEditor(container) {
       if (lassoSection) lassoSection.style.display = state.tool === 'lasso' ? '' : 'none';
       const wandSection = document.getElementById('ge-wand-section');
       if (wandSection) wandSection.style.display = state.tool === 'wand' ? '' : 'none';
-      const samSection = document.getElementById('ge-sam-section');
-      if (samSection) samSection.style.display = state.tool === 'sam' ? '' : 'none';
       const inpaintSection = document.getElementById('ge-inpaint-section');
       if (inpaintSection) {
         if (state.tool === 'inpaint') {
@@ -2823,13 +2561,6 @@ function _buildEditor(container) {
       // Generate cleared it, but on re-entry the user expects to see
       // their mask again.
       if (state.tool === 'inpaint') {
-        // If the user just made a SAM/Wand selection and then moves to
-        // Inpaint, do the obvious thing: bake that selection into the
-        // inpaint mask. Otherwise Generate says "draw the area first"
-        // even though a red selection is visible on screen.
-        if (state.wandMask && state.wandLayerId) {
-          _wandToMask();
-        }
         // First inpaint entry per session: bump the brush size to the
         // mask-friendly default (other tools keep their own size).
         if (!state.inpaintBrushInitialised) {
@@ -3192,7 +2923,6 @@ function _buildEditor(container) {
   wireInpaintControls({
     composite,
     applyInpaintFeather: _applyInpaintFeather,
-    autoMatchInpaint: _autoMatchLastInpaintLayer,
     syncToolClearIndicators: () => _syncToolClearIndicators(),
     attachColorPicker,
     uiModule,
@@ -3287,7 +3017,6 @@ function _buildEditor(container) {
     createLayer,
     renderLayerPanel: () => _renderLayerPanel(),
     composite,
-    renderLayer: (layer) => _renderLayerWithAdjLayers(layer),
     uiModule,
   });
 
@@ -3378,7 +3107,6 @@ const _layerPanelRenderer = createLayerPanelRenderer({
   openFxPopup: (layer, anchor) => _openFxPopup(layer, anchor),
   editAdjLayer: (layer, adj, anchor) => _editAdjLayer(layer, adj, anchor),
   createLayer,
-  renderLayer: (layer) => _renderLayerWithAdjLayers(layer),
   lassoToMask: () => _lassoToMask(),
   wandToMask: () => _wandToMask(),
   getActiveMaskLayer: () => _getActiveMaskLayer(),
@@ -3409,7 +3137,7 @@ function flatten() {
     if (!layer.visible) continue;
     ctx.globalAlpha = layer.opacity;
     const off = state.layerOffsets.get(layer.id) || { x: 0, y: 0 };
-    ctx.drawImage(_renderLayerWithAdjLayers(layer), off.x, off.y);
+    ctx.drawImage(layer.canvas, off.x, off.y);
   }
   ctx.globalAlpha = 1;
   return out;
@@ -4152,9 +3880,6 @@ export function closeEditor() {
       }
       el.remove();
     });
-  } catch {}
-  try {
-    document.querySelectorAll('body > #ge-save-menu').forEach(el => el.remove());
   } catch {}
   // Belt-and-suspenders: scrub any minimized-dock chip + modalManager
   // entry whose id matches our ephemeral popups (in case the DOM node

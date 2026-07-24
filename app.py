@@ -656,15 +656,10 @@ app.include_router(setup_emoji_routes())
 # Sessions
 from routes.session_routes import setup_session_routes
 session_config = {"REQUEST_TIMEOUT": REQUEST_TIMEOUT, "OPENAI_API_KEY": OPENAI_API_KEY, "SESSIONS_FILE": SESSIONS_FILE}
-app.include_router(setup_session_routes(
-    session_manager,
-    session_config,
-    webhook_manager=webhook_manager,
-    upload_handler=upload_handler,
-))
+app.include_router(setup_session_routes(session_manager, session_config, webhook_manager=webhook_manager))
 
 # Admin Danger Zone wipes (Settings → System → Danger Zone)
-from routes.admin_wipe.admin_wipe_routes import setup_admin_wipe_routes
+from routes.admin_wipe_routes import setup_admin_wipe_routes
 app.include_router(setup_admin_wipe_routes(session_manager))
 
 # Memory
@@ -709,7 +704,7 @@ from routes.diagnostics_routes import setup_diagnostics_routes
 app.include_router(setup_diagnostics_routes(rag_manager, rag_available, research_handler, memory_vector))
 
 # Cleanup
-from routes.cleanup.cleanup_routes import setup_cleanup_routes
+from routes.cleanup_routes import setup_cleanup_routes
 app.include_router(setup_cleanup_routes(session_manager))
 
 # Personal docs
@@ -792,7 +787,7 @@ from routes.hwfit_routes import setup_hwfit_routes
 app.include_router(setup_hwfit_routes())
 
 # Model A/B Comparison
-from routes.compare.compare_routes import setup_compare_routes
+from routes.compare_routes import setup_compare_routes
 app.include_router(setup_compare_routes(session_manager))
 
 # User Preferences
@@ -838,8 +833,8 @@ app.include_router(setup_api_token_routes())
 logger.info("Webhook & API token routes initialized")
 
 # Notes (Google Keep-style notes/todos)
-from routes.note.note_routes import setup_note_routes
-app.include_router(setup_note_routes(task_scheduler, upload_handler=upload_handler))
+from routes.note_routes import setup_note_routes
+app.include_router(setup_note_routes(task_scheduler))
 
 # Email
 from routes.email_routes import setup_email_routes
@@ -1064,7 +1059,7 @@ async def _startup_event():
         except BaseException as e:
             logger.warning(f"Built-in MCP registration failed (non-critical): {type(e).__name__}: {e}")
         try:
-            await mcp_manager.connect_all_enabled()
+            await asyncio.wait_for(mcp_manager.connect_all_enabled(), timeout=20)
         except asyncio.TimeoutError:
             logger.warning("User MCP startup timed out (non-critical)")
         except BaseException as e:

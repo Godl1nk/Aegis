@@ -144,22 +144,13 @@ class MemoryVectorStore:
         from src.chroma_client import get_chroma_client
 
         client = get_chroma_client()
-        lane_names = [
-            self.COLLECTION_NAME,
-            collection_name(self.COLLECTION_NAME, LANE_CUSTOM),
-            collection_name(self.COLLECTION_NAME, LANE_FASTEMBED),
-        ]
-        for name in lane_names:
-            try:
-                client.delete_collection(name)
-            except Exception:
-                pass
-        # Explicit rebuilds must start from the supplied memory list, so clear
-        # legacy unsuffixed collections too.
-        self._lanes = build_embedding_lanes(self.COLLECTION_NAME)
-        self._collection = next(
-            (lane.collection for lane in self._lanes if lane.name == LANE_FASTEMBED),
-            self._lanes[0].collection if self._lanes else None,
+        try:
+            client.delete_collection(self.COLLECTION_NAME)
+        except Exception:
+            pass
+        self._collection = client.get_or_create_collection(
+            name=self.COLLECTION_NAME,
+            metadata={"hnsw:space": "cosine"},
         )
 
     def needs_metadata_rebuild(self) -> bool:

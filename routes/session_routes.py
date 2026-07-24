@@ -203,12 +203,7 @@ def _pick_endpoint_for_sort(owner=None):
         return url, model, headers
     return None, None, None
 
-def setup_session_routes(
-    session_manager: SessionManager,
-    config: dict,
-    webhook_manager=None,
-    upload_handler=None,
-):
+def setup_session_routes(session_manager: SessionManager, config: dict, webhook_manager=None):
     """Setup session routes with the provided manager and config"""
 
     REQUEST_TIMEOUT = config.get("REQUEST_TIMEOUT", 20)
@@ -239,8 +234,6 @@ def setup_session_routes(
                     DbSession.created_at < _cutoff,
                 ).all()
                 for _g in _ghosts:
-                    if active_incognito_id and _g.id == active_incognito_id:
-                        continue
                     _purge_db.query(_DbMsg).filter(_DbMsg.session_id == _g.id).delete()
                     _purge_db.delete(_g)
                     if hasattr(session_manager, "delete_session"):
@@ -544,22 +537,6 @@ def setup_session_routes(
         body = await request.json()
         messages = body.get("messages", [])
         from core.models import ChatMessage
-        owner = effective_user(request)
-        try:
-            for message in messages:
-                missing_id = reserve_message_upload_references(
-                    upload_handler,
-                    owner,
-                    message.get("content"),
-                    message.get("metadata"),
-                )
-                if missing_id:
-                    raise HTTPException(
-                        409,
-                        f"Referenced upload is no longer available: {missing_id}",
-                    )
-        except (AttributeError, TypeError, ValueError) as exc:
-            raise HTTPException(400, "Invalid message attachment metadata") from exc
         for m in messages:
             sess.add_message(ChatMessage(m["role"], m["content"], metadata=m.get("metadata")))
         session_manager.save_sessions()
@@ -652,43 +629,13 @@ def setup_session_routes(
         db = SessionLocal()
         try:
             from core.database import ChatMessage as DbChatMessage
-            session_ids = [row[0] for row in db.query(DbSession.id).all()]
             count = db.query(DbSession).count()
-            image_ids: set[str] = set()
-            filenames: set[str] = set()
-            for sid in session_ids:
-                ids, names = session_image_refs(db, sid)
-                image_ids.update(ids)
-                filenames.update(names)
-            image_query = db.query(GalleryImage).filter(GalleryImage.session_id.in_(session_ids)) if session_ids else db.query(GalleryImage).filter(False)
-            if image_ids or filenames:
-                from sqlalchemy import or_
-                clauses = []
-                if session_ids:
-                    clauses.append(GalleryImage.session_id.in_(session_ids))
-                if image_ids:
-                    clauses.append(GalleryImage.id.in_(list(image_ids)))
-                if filenames:
-                    clauses.append(GalleryImage.filename.in_(list(filenames)))
-                image_query = db.query(GalleryImage).filter(or_(*clauses))
-            images = image_query.all()
-            removed_images = 0
-            for img in images:
-                img.is_active = False
-                if img.filename:
-                    path = _generated_image_path_for_cleanup(img.filename)
-                    if path and path.exists():
-                        try:
-                            path.unlink()
-                        except Exception as exc:
-                            logger.warning("Could not remove generated image %s during all-session delete: %s", img.filename, exc)
-                removed_images += 1
             db.query(DbChatMessage).delete()
             db.query(DbSession).delete()
             db.commit()
             session_manager.sessions.clear()
-            logger.info(f"Admin deleted all {count} sessions and {removed_images} linked images")
-            return {"status": "deleted", "count": count, "images_deleted": removed_images}
+            logger.info(f"Admin deleted all {count} sessions")
+            return {"status": "deleted", "count": count}
         except Exception as e:
             db.rollback()
             logger.error(f"Error deleting all sessions: {e}")

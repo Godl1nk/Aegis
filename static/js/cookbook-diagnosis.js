@@ -450,10 +450,11 @@ export const ERROR_PATTERNS = [
     message: 'Single-file checkpoint needs a base model for missing components (text encoder, VAE). The base model may be gated — accept the license and set your HF token.',
     fixes: [
       { label: 'Request access to base model', action: (panel, _text) => {
+        // Extract gated repo from error, or infer from model name
         const gated = _text && _text.match(/Access to model\s+(\S+)\s+is restricted/i);
         const base = _text && _text.match(/config=([^\s,)]+)/i);
         const model = _text && _text.match(/load model from\s+(\S+)/i);
-        const repo = (gated && gated[1]) || (base && base[1]);
+        const repo = (gated && gated[1]) || (base && base[1]) || _inferBaseRepo(_text);
         if (repo) window.open('https://huggingface.co/' + repo, '_blank');
         else if (model && model[1]) window.open('https://huggingface.co/' + model[1].replace(/[.]$/, ''), '_blank');
       }},
@@ -464,20 +465,12 @@ export const ERROR_PATTERNS = [
     ],
   },
   {
-    pattern: /OmniGen2Pipeline|module diffusers has no attribute .*Pipeline|custom_pipeline=.*failed/i,
-    message: 'This image model uses a custom Diffusers pipeline that your launch environment does not know yet.',
-    fixes: [
-      { label: 'Update image dependencies', action: () => _openCookbookDependencies('diffusers') },
-      { label: 'Copy diagnosis', action: (_panel, _text) => navigator.clipboard?.writeText(_text || '') },
-    ],
-  },
-  {
     pattern: /Entry Not Found.*model_index\.json|Could not load model.*Check diffusers/i,
-    message: 'Single-file model may need an explicit base config. Add --single-file-config <repo_or_path> if the checkpoint is missing components.',
+    message: 'Single-file model — needs base config from a gated repo. Accept the license and set your HF token.',
     fixes: [
       { label: 'Request access to base model', action: (panel, _text) => {
         const gated = _text && _text.match(/Access to model\s+(\S+)\s+is restricted/i);
-        const repo = gated && gated[1];
+        const repo = (gated && gated[1]) || _inferBaseRepo(_text);
         if (repo) window.open('https://huggingface.co/' + repo, '_blank');
         else window.open('https://huggingface.co/settings/gated-repos', '_blank');
       }},

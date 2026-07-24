@@ -8,7 +8,7 @@
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
-import chatRenderer from './chatRenderer.js?v=20260722emailfastindex1';
+import chatRenderer from './chatRenderer.js';
 import chatStream from './chatStream.js';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -16,10 +16,10 @@ import spinnerModule from './spinner.js';
 import presetsModule from './presets.js';
 import fileHandlerModule from './fileHandler.js';
 import searchModule from './search.js';
-import documentModule from './document.js?v=20260722emailfastindex1';
-import * as emailInbox from './emailInbox.js?v=20260722emailfastindex1';
+import documentModule from './document.js';
+import * as emailInbox from './emailInbox.js';
 import codeRunnerModule from './codeRunner.js';
-import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handleSetupInput, handleSetupWizard, typewriterInto } from './slashCommands.js?v=20260722emailfastindex1';
+import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handleSetupInput, handleSetupWizard, typewriterInto } from './slashCommands.js';
 import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
 import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composerArrowUpRecall.js';
@@ -481,7 +481,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
    */
   export function init(apiBase) {
     API_BASE = apiBase;
-    initSlashCommands({ apiBase, isStreaming: () => !!_getForegroundStreamState() });
+    initSlashCommands({ apiBase, isStreaming: () => isStreaming });
     // Initialize email inbox
     emailInbox.init(documentModule);
     // Wire the slash-command autocomplete popup on the chat composer. The
@@ -576,200 +576,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
   // API key pattern for the guard in handleChatSubmit
   const API_KEY_RE = /^(sk-[a-zA-Z0-9_\-]{20,}|gsk_[a-zA-Z0-9]{20,}|AIza[a-zA-Z0-9_\-]{30,}|xai-[a-zA-Z0-9]{20,})$/;
-  const PLAN_STORAGE_KEY = 'odysseus-active-plan';
-
-  const _queuedAgentRequests = [];
-  let _queuedDrainTimer = null;
-  let _queuedPromoteTimer = null;
-  let _queuedRequestSeq = 0;
-  let _queuedBubbleHost = null;
-  let _pendingApprovedPlan = '';
-
-  function _extractPlanText(text) {
-    const raw = String(text || '').trim();
-    if (!raw) return '';
-    const stripped = raw
-      .replace(/<think[\s\S]*?<\/think>/gi, '')
-      .replace(/<thought[\s\S]*?<\/thought>/gi, '')
-      .trim();
-    const lines = stripped.split('\n');
-    const firstChecklist = lines.findIndex(line => /^\s*(?:[-*]|\d+\.)\s+\[[ x-]\]\s+/i.test(line));
-    if (firstChecklist >= 0) return lines.slice(firstChecklist).join('\n').trim();
-    const firstPlanHeading = lines.findIndex(line => /^\s{0,3}#{1,4}\s+.*plan/i.test(line) || /^\s*(?:plan|proposed plan)\s*:?$/i.test(line));
-    if (firstPlanHeading >= 0) return lines.slice(firstPlanHeading).join('\n').trim();
-    return stripped;
-  }
-
-  function _getStoredPlan() {
-    try { return localStorage.getItem(PLAN_STORAGE_KEY) || ''; } catch (_) { return ''; }
-  }
-
-	  function _setStoredPlan(plan) {
-	    const text = _extractPlanText(plan);
-	    if (!text) return;
-	    try { localStorage.setItem(PLAN_STORAGE_KEY, text); } catch (_) {}
-	  }
-
-	  function _clearStoredPlan() {
-	    try { localStorage.removeItem(PLAN_STORAGE_KEY); } catch (_) {}
-	  }
-
-	  function _attachPlanActions(target, plan) {
-	    if (!target || !String(plan || '').trim() || target.querySelector('.plan-inline-actions')) return;
-	    const actions = document.createElement('div');
-	    actions.className = 'plan-inline-actions';
-	    actions.innerHTML = `
-	      <button type="button" class="plan-inline-execute">
-	        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><polygon points="7 4 20 12 7 20 7 4"></polygon></svg>
-	        Execute
-	      </button>
-	      <button type="button" class="plan-inline-clear">Clear</button>`;
-	    actions.querySelector('.plan-inline-execute')?.addEventListener('click', () => {
-	      const approved = _getStoredPlan() || _extractPlanText(plan);
-	      if (!approved.trim()) return;
-	      _pendingApprovedPlan = approved;
-	      if (window.__odysseusSetPlanMode) window.__odysseusSetPlanMode(false);
-	      if (window.__odysseusSetChatMode) window.__odysseusSetChatMode('agent');
-	      _setComposerAndSend('Execute the approved plan.');
-	    });
-	    actions.querySelector('.plan-inline-clear')?.addEventListener('click', () => {
-	      _clearStoredPlan();
-	      actions.remove();
-	    });
-	    (target.querySelector('.body') || target).appendChild(actions);
-	  }
-
-  function _escapeQueueText(s) {
-    return String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
-
-  function _ensureQueuedBubbleHost() {
-    const chatBox = document.getElementById('chat-history');
-    if (!chatBox) return null;
-    if (_queuedBubbleHost && _queuedBubbleHost.isConnected) return _queuedBubbleHost;
-    let host = document.getElementById('chat-queued-bubble-host');
-    if (!host) {
-      host = document.createElement('div');
-      host.id = 'chat-queued-bubble-host';
-      host.className = 'chat-queued-bubble-host';
-    }
-    chatBox.appendChild(host);
-    _queuedBubbleHost = host;
-    return host;
-  }
-
-  function _createQueuedBubble(item) {
-    const host = _ensureQueuedBubbleHost();
-    if (!host) return null;
-    const wrap = document.createElement('div');
-    wrap.className = 'msg msg-user msg-user-queued';
-    wrap.dataset.queueId = item.id;
-    wrap.title = 'Queued - click to send now and stop the current response';
-    wrap.innerHTML = `<div class="role">You <span class="queued-pill"><svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>Queued</span></div><div class="body">${_escapeQueueText(item.message)}</div>`;
-    wrap.addEventListener('click', (ev) => {
-      if (ev.target && ev.target.closest && ev.target.closest('button, a, textarea, input')) return;
-      _promoteQueuedRequest(item.id);
-    });
-    host.appendChild(wrap);
-    uiModule.scrollHistory();
-    return wrap;
-  }
-
-  function _removeQueuedRequest(id) {
-    const idx = _queuedAgentRequests.findIndex(item => item.id === id);
-    if (idx < 0) return null;
-    const [item] = _queuedAgentRequests.splice(idx, 1);
-    if (item && item.el && item.el.parentNode) item.el.remove();
-    return item;
-  }
-
-  function _setComposerAndSend(message) {
-    const input = uiModule.el('message');
-    if (!input) return false;
-    input.value = message;
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    if (uiModule.autoResize) uiModule.autoResize(input);
-    setTimeout(() => {
-      handleChatSubmit({ preventDefault() {} }).catch(err => {
-        console.error('queued send failed', err);
-        try { uiModule.showError && uiModule.showError('Queued send failed: ' + (err?.message || err)); } catch (_) {}
-      });
-    }, 0);
-    return true;
-  }
-
-  function _sendQueuedWhenIdle(item) {
-    if (!item) return;
-    const trySend = () => {
-      if (isStreaming || _sendInFlight) {
-        _queuedPromoteTimer = setTimeout(trySend, 220);
-        return;
-      }
-      _queuedPromoteTimer = null;
-      _setComposerAndSend(item.message);
-    };
-    if (_queuedPromoteTimer) clearTimeout(_queuedPromoteTimer);
-    _queuedPromoteTimer = setTimeout(trySend, 320);
-  }
-
-  function _promoteQueuedRequest(id) {
-    const item = _removeQueuedRequest(id);
-    if (!item) return;
-    if (!isStreaming && !_sendInFlight) {
-      _setComposerAndSend(item.message);
-      return;
-    }
-    try { uiModule.showToast && uiModule.showToast('Sending queued request now'); } catch (_) {}
-    const input = uiModule.el('message');
-    const submitBtn = document.querySelector('.send-btn');
-    if (input) {
-      input.value = '';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    }
-    if (submitBtn) submitBtn.click();
-    _sendQueuedWhenIdle(item);
-  }
-
-  function _queueAgentRequest(message) {
-    const msg = String(message || '').trim();
-    if (!msg) return false;
-    const item = { id: `q${++_queuedRequestSeq}`, message: msg, createdAt: Date.now(), el: null };
-    item.el = _createQueuedBubble(item);
-    _queuedAgentRequests.push(item);
-    try { uiModule.showToast && uiModule.showToast(_queuedAgentRequests.length === 1 ? 'Queued for after this response' : `${_queuedAgentRequests.length} requests queued`); } catch (_) {}
-    return true;
-  }
-
-  export function queueStreamingComposerRequest() {
-    if (!isStreaming) return false;
-    const queuedInput = uiModule.el('message');
-    const queuedText = (queuedInput && queuedInput.value || '').trim();
-    if (!queuedText) return false;
-    if (fileHandlerModule.getPendingCount && fileHandlerModule.getPendingCount()) {
-      try { uiModule.showError && uiModule.showError('Finish the current response before queueing messages with attachments.'); } catch (_) {}
-      return true;
-    }
-    if (_queueAgentRequest(queuedText)) {
-      queuedInput.value = '';
-      queuedInput.dispatchEvent(new Event('input', { bubbles: true }));
-      if (uiModule.autoResize) uiModule.autoResize(queuedInput);
-      try { window._updateSendBtnIcon && window._updateSendBtnIcon(); } catch (_) {}
-    }
-    return true;
-  }
-
-  function _drainQueuedAgentRequests() {
-    if (isStreaming || _sendInFlight || !_queuedAgentRequests.length) return;
-    if (_queuedDrainTimer) return;
-    _queuedDrainTimer = setTimeout(() => {
-      _queuedDrainTimer = null;
-      if (isStreaming || _sendInFlight || !_queuedAgentRequests.length) return;
-      const next = _queuedAgentRequests[0];
-      if (!next) return;
-      _removeQueuedRequest(next.id);
-      _setComposerAndSend(next.message);
-    }, 180);
-  }
 
   const _queuedAgentRequests = [];
   let _queuedDrainTimer = null;
@@ -1126,44 +932,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       }
     }
 
-    const incognitoChkForSend = el('incognito-toggle');
-    const isIncognitoForSend = !!(incognitoChkForSend && incognitoChkForSend.checked);
-
-    if (!isIncognitoForSend) {
-      await _adoptOpenedSessionBeforeAutoCreate();
-    }
-
-    const selectedRouteForSend = (() => {
-      try {
-        const lastPicked = window.__odysseusLastPickedRoute || null;
-        if (lastPicked && lastPicked.model && Date.now() - (lastPicked.picked_at || 0) < 10 * 60 * 1000) {
-          return {
-            model: lastPicked.model || '',
-            endpoint_url: lastPicked.endpoint_url || '',
-            endpoint_id: lastPicked.endpoint_id || '',
-            source: 'last-picked',
-          };
-        }
-        const pending = sessionModule.getPendingChat && sessionModule.getPendingChat();
-        if (pending && pending.modelId) {
-          return {
-            model: pending.modelId || '',
-            endpoint_url: pending.url || '',
-            endpoint_id: pending.endpointId || '',
-            source: pending.source || '',
-          };
-        }
-        return {
-          model: sessionModule.getCurrentModel ? (sessionModule.getCurrentModel() || '') : '',
-          endpoint_url: sessionModule.getCurrentEndpointUrl ? (sessionModule.getCurrentEndpointUrl() || '') : '',
-          endpoint_id: '',
-          source: '',
-        };
-      } catch (_) {
-        return { model: '', endpoint_url: '', endpoint_id: '', source: '' };
-      }
-    })();
-
     // Materialize pending session (deferred from model click) on first message
     if (sessionModule.hasPendingChat && sessionModule.hasPendingChat()) {
       _sendPerf.mark('pending_session_begin');
@@ -1250,13 +1018,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     updateSubmitButton('streaming', submitBtn);
     if (submitBtn) submitBtn.classList.remove('send-pending');
     _sendInFlight = false;
-
-    try {
-      const pendingSwitch = window.__odysseusModelSwitchPromise;
-      if (pendingSwitch && typeof pendingSwitch.then === 'function') {
-        await pendingSwitch;
-      }
-    } catch (_) {}
 
     // Capture session ID for background stream detection
     const streamSessionId = sessionModule.getCurrentSessionId();
@@ -1662,8 +1423,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       abortCtrl._reason = '';
       currentAbort = abortCtrl;
 
-	      const _tState = Storage.loadToggleState();
-	      const _isAgent = (_tState.mode || 'chat') === 'agent' || !!_tState.plan_mode || workspaceAgentIntent;
+      const _tState = Storage.loadToggleState();
+      const _isAgent = (_tState.mode || 'chat') === 'agent';
 
       // Timeout: 6 min for research and agent mode, 3 min otherwise
       const timeoutMs = el('research-toggle').checked || _isAgent ? RESEARCH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
@@ -1694,17 +1455,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
       // Track holder globally so stop button can access it
       currentHolder = holder;
-      _activeStreams.set(streamSessionId, {
-        abortCtrl,
-        holder,
-        query: streamQuery,
-        startedAt: Date.now(),
-        lastActivity: Date.now(),
-      });
-      _syncForegroundStreamGlobals();
       holder._researchQuery = msg; // Store query for notification text
       
-      const modelName = _bestKnownStreamModel(selectedRouteForSend) || null;
+      const modelName = sessionModule.getCurrentModel() || null;
 
       let loadingText = 'Initializing...';
 
@@ -1856,14 +1609,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let _sourcesData = null;        // Raw sources data for rebuilding
       let _sourcesType = '';          // 'web' or 'research'
       let _findingsData = null;      // Raw findings data for collapsible box
-      const _generatedImagesForTurn = [];
-      function _rememberGeneratedImage(data) {
-        const imageUrl = data?.image_url || data?.url || '';
-        if (!imageUrl) return;
-        const imageKey = String(data.image_id || imageUrl);
-        if (_generatedImagesForTurn.some(x => String(x.image_id || x.image_url || x.url) === imageKey || x.image_url === imageUrl || x.url === imageUrl)) return;
-        _generatedImagesForTurn.push({ ...data, image_url: imageUrl, url: imageUrl });
-      }
       // _keepResearchOn removed — clarification state now persisted server-side via DB mode
       function _metricsTargetForTurn() {
         const visibleRound = (roundHolder && roundHolder.style.display !== 'none') ? roundHolder : null;
@@ -2182,7 +1927,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 accumulated: accumulated,
                 sourcesHtml: _sourcesHtml,
                 findingsData: null,
-                abortCtrl,
+                abortCtrl: currentAbort,
                 query: streamQuery,
                 metrics: null,
               });
@@ -2929,7 +2674,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // Wire the persisted DB id onto the just-streamed bubble so it
                 // can be edited/deleted immediately, without reloading the chat.
                 if (_isBg) continue;
-                if (holder && json.id) holder.dataset.dbId = json.id;
+                if (currentHolder && json.id) currentHolder.dataset.dbId = json.id;
 
               } else if (json.type === 'tool_start') {
                 if (_isBg) continue;
@@ -3076,29 +2821,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // user doesn't stare at a blind "Running…" spinner.
                 if (_isBg) continue;
                 if (!currentToolBubble) continue;
-                const isImageProgress = /image/i.test(String(json.tool || '')) || /image/i.test(String(json.message || ''));
-                if (json.total || json.percent != null || isImageProgress) {
-                  const content = currentToolBubble.querySelector('.agent-thread-content');
-                  if (content) {
-                    let progressEl = currentToolBubble.querySelector('.agent-image-progress');
-	                    if (!progressEl) {
-	                      progressEl = document.createElement('div');
-	                      progressEl.className = 'agent-image-progress';
-	                      progressEl.innerHTML = '<div class="agent-image-progress-row"><span class="agent-image-progress-label"></span><span class="agent-image-progress-value"></span></div>';
-	                      content.appendChild(progressEl);
-	                    }
-                    const step = Number(json.step || 0);
-                    const total = Number(json.total || 0);
-                    const hasExactProgress = total > 0 || json.percent != null;
-                    progressEl.classList.toggle('is-indeterminate', !hasExactProgress);
-                    const pct = Number(json.percent != null ? json.percent : (total ? (step / total) * 100 : 0));
-	                    const bounded = Math.max(0, Math.min(100, Number.isFinite(pct) ? pct : 0));
-	                    const label = progressEl.querySelector('.agent-image-progress-label');
-	                    const value = progressEl.querySelector('.agent-image-progress-value');
-	                    if (label) label.textContent = json.message || 'Editing image…';
-	                    if (value) value.textContent = hasExactProgress ? (total ? `${step}/${total}` : `${Math.round(bounded)}%`) : (json.elapsed ? `${json.elapsed}s` : '');
-	                  }
-	                }
                 // The per-second ticker (started in tool_start) owns the
                 // elapsed display; here we just surface the live output tail.
                 const tailStr = (json.tail || '').trim();
@@ -3466,22 +3188,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 const chatBox = document.getElementById('chat-history');
                 chatBox.appendChild(budgetDiv);
 
-              } else if (json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted') {
-                if (_isBg) continue;
-                _cancelThinkingTimer();
-                _removeThinkingSpinner();
-                const guardDiv = document.createElement('div');
-                guardDiv.className = 'stopped-indicator';
-                const guardLabel = document.createElement('span');
-                guardLabel.textContent = `[Agent guard: ${json.message || json.reason || 'internal stop'}]`;
-                guardDiv.appendChild(guardLabel);
-                const targetBody = roundHolder && roundHolder.querySelector('.body');
-                if (targetBody) targetBody.appendChild(guardDiv);
-                else {
-                  const chatBox = document.getElementById('chat-history');
-                  if (chatBox) chatBox.appendChild(guardDiv);
-                }
-
               } else if (json.type === 'teacher_takeover') {
                 if (_isBg) continue;
                 _cancelThinkingTimer();
@@ -3743,17 +3449,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           _appendViewReportLink(footerTarget, streamSessionId);
         }
         // Also store raw on the footer target so copy/TTS work
-	        if (footerTarget !== holder) footerTarget.dataset.raw = accumulated;
-		        try {
-		          const _endToggles = Storage.loadToggleState();
-		          if (_endToggles.plan_mode && accumulated) {
-		            _setStoredPlan(accumulated);
-		            _attachPlanActions(footerTarget, accumulated);
-		          }
-		        } catch (_) {}
-	        if (addAITTSButton && accumulated && window.aiTTSManager?._provider !== 'disabled' && window.aiTTSManager?.available) {
-	          addAITTSButton(footerTarget, accumulated);
-	        }
+        if (footerTarget !== holder) footerTarget.dataset.raw = accumulated;
+        if (addAITTSButton && accumulated && window.aiTTSManager?._provider !== 'disabled' && window.aiTTSManager?.available) {
+          addAITTSButton(footerTarget, accumulated);
+        }
         // TTS auto-play: streaming mode flushes remaining text, non-streaming enqueues full message
         if (accumulated && window.aiTTSManager && window.aiTTSManager.autoPlay) {
           const ttsBtn = holder.querySelector('.ai-tts-button');
@@ -3859,8 +3558,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         // Stop streaming TTS on any error/abort
         if (streamingTTS && window.aiTTSManager) window.aiTTSManager.stop();
 
-        if (abortCtrl && abortCtrl.signal.aborted) {
-          const abortReason = abortCtrl._reason || '';
+        if (currentAbort && currentAbort.signal.aborted) {
+          const abortReason = currentAbort._reason || '';
           // Timeout-triggered aborts should remain visible instead of disappearing.
           if (timedOut || abortReason === 'timeout') {
             const timeoutMsg = _isAgent
@@ -3877,7 +3576,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 `<span style="color: var(--color-error);">[${timeoutMsg}]</span>`;
               holder.querySelector('.body').appendChild(timeoutNote);
             }
-            if (currentAbort === abortCtrl) currentAbort = null;
+            currentAbort = null;
             return;
           }
 
@@ -3893,7 +3592,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 `<span style="color: var(--color-error);">[${offlineMsg}]</span>`;
               holder.querySelector('.body').appendChild(offlineNote);
             }
-            if (currentAbort === abortCtrl) currentAbort = null;
+            currentAbort = null;
             return;
           }
 
@@ -3932,22 +3631,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               staleNote.innerHTML = `<span style="opacity:0.7;">[${staleMsg}]</span>`;
               holder.querySelector('.body').appendChild(staleNote);
             }
-            if (currentAbort === abortCtrl) currentAbort = null;
-            return;
-          }
-
-          if (abortReason === 'stale-local') {
-            const staleMsg = 'Stream connection ended. Composer unlocked; send again if needed.';
-            if (holder && !accumulated) {
-              holder.querySelector('.body').innerHTML =
-                `<div style="opacity:0.7;font-style:italic;padding:4px 0;">[${staleMsg}]</div>`;
-            } else if (holder && accumulated) {
-              const staleNote = document.createElement('div');
-              staleNote.className = 'stopped-indicator';
-              staleNote.innerHTML = `<span style="opacity:0.7;">[${staleMsg}]</span>`;
-              holder.querySelector('.body').appendChild(staleNote);
-            }
-            if (currentAbort === abortCtrl) currentAbort = null;
+            currentAbort = null;
             return;
           }
 
@@ -4007,7 +3691,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           }
 
           // Now clear the abort controller
-          if (currentAbort === abortCtrl) currentAbort = null;
+          currentAbort = null;
         } else {
           console.error(err);
           // Stream died with a tool node still spinning. Its per-node tickers
@@ -4199,16 +3883,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   }
 
   export function abortCurrentRequest(stopServer = false) {
-    const active = _getForegroundStreamState();
-    const abortCtrl = active ? active.abortCtrl : currentAbort;
-    if (abortCtrl) {
-      abortCtrl.abort();
+    if (currentAbort) {
+      currentAbort.abort();
       // Don't set to null here - let catch block handle it
     }
     if (stopServer) {
       try {
-        const _sid = (sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId())
-          || _streamSessionId
+        const _sid = _streamSessionId
           || (window.sessionModule && window.sessionModule.getCurrentSessionId && window.sessionModule.getCurrentSessionId());
         if (_sid) {
           fetch(`/api/chat/stop/${encodeURIComponent(_sid)}`, { method: 'POST', credentials: 'same-origin' }).catch(() => {});
@@ -4418,8 +4099,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
    * Called when user switches sessions mid-stream.
    */
   export function detachCurrentStream(sessionId) {
-    const active = sessionId ? _activeStreams.get(sessionId) : _getForegroundStreamState();
-    if (!active || !active.abortCtrl) {
+    if (!isStreaming || !currentAbort) {
       // Not streaming — fall through to abort
       abortCurrentRequest();
       return;
@@ -4430,8 +4110,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       accumulated: currentAccumulated,
       sourcesHtml: '',
       findingsData: null,
-      abortCtrl: active.abortCtrl,
-      query: active.query || (active.holder ? (active.holder._researchQuery || '') : ''),
+      abortCtrl: currentAbort,
+      query: currentHolder ? (currentHolder._researchQuery || '') : '',
       metrics: null,
     });
     // Mark session with pulsing dot in sidebar
@@ -4444,7 +4124,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     _setForegroundChatBusy(false);
     currentHolder = null;
     currentAccumulated = '';
-    _syncForegroundStreamGlobals();
     // Reset submit button so the new chat is ready to send
     const submitBtn = document.querySelector('.send-btn');
     if (submitBtn) updateSubmitButton('idle', submitBtn);
@@ -4864,7 +4543,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (!_readerEverActive) return;
 
       // Stream claims to be running — check if reader is actually alive
-      const staleSince = Date.now() - (active.lastActivity || _lastReaderActivity);
+      const staleSince = Date.now() - _lastReaderActivity;
       if (staleSince < 20000) return; // Active recently, probably fine
 
       // Reader hasn't produced data in 5+ seconds after tab resume.
@@ -4873,23 +4552,18 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
       setTimeout(() => {
         // Re-check — maybe the reader woke up during the grace period
-        const stillActive = _getForegroundStreamState();
-        if (!stillActive) return;
-        const stillStale = Date.now() - (stillActive.lastActivity || _lastReaderActivity);
+        if (!isStreaming) return;
+        const stillStale = Date.now() - _lastReaderActivity;
         if (stillStale < 5000) return; // Came back to life
 
         console.warn('[tab-recovery] Stream confirmed dead. Aborting and reloading session.');
 
         // Abort the frozen stream, but preserve the visible bubble.
-        if (stillActive.abortCtrl) {
-          stillActive.abortCtrl._reason = 'recovery';
-          stillActive.abortCtrl.abort();
+        if (currentAbort) {
+          currentAbort._reason = 'recovery';
+          currentAbort.abort();
         }
-        try {
-          const sid = sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
-          if (sid) _activeStreams.delete(sid);
-        } catch (_) {}
-        _syncForegroundStreamGlobals();
+        isStreaming = false;
 
         // Release Web Lock
         if (_webLockRelease) {

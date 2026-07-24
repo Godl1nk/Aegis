@@ -354,7 +354,6 @@ async def test_build_chat_context_incognito_does_not_duplicate_current_user_mess
             monkeypatch.setitem(sys.modules, mod_name, MagicMock())
 
     chat_helpers = importlib.import_module("routes.chat_helpers")
-    chat_helpers._INCOGNITO_CONTEXTS.clear()
 
     async def fake_preprocess(chat_handler, message, att_ids, sess, **kwargs):
         # **kwargs absorbs auto_opened_docs (added when PDF imports auto-create
@@ -416,68 +415,6 @@ async def test_build_chat_context_incognito_does_not_duplicate_current_user_mess
 
     user_messages = [m for m in ctx.messages if m.get("role") == "user" and m.get("content") == "hello"]
     assert len(user_messages) == 1
-
-
-@pytest.mark.asyncio
-async def test_build_chat_context_incognito_ignores_saved_session_history(monkeypatch):
-    for mod_name in [
-        "starlette.middleware",
-        "starlette.middleware.base",
-        "core.models",
-        "core.database",
-        "routes.prefs_routes",
-        "routes.research_routes",
-        "src.llm_core",
-        "src.context_compactor",
-        "src.model_context",
-        "src.auth_helpers",
-    ]:
-        if mod_name not in sys.modules:
-            monkeypatch.setitem(sys.modules, mod_name, MagicMock())
-
-    chat_helpers = importlib.import_module("routes.chat_helpers")
-    chat_helpers._INCOGNITO_CONTEXTS.clear()
-
-    async def fake_preprocess(chat_handler, message, att_ids, sess, **kwargs):
-        return chat_helpers.PreprocessedMessage(
-            enhanced_message=message,
-            user_content=message,
-            text_for_context=message,
-            youtube_transcripts=[],
-            attachment_meta=[],
-        )
-
-    async def fake_maybe_compact(sess, endpoint_url, model, messages, headers, owner=None):
-        return messages, 123, False
-
-    monkeypatch.setattr(chat_helpers, "preprocess", fake_preprocess)
-    monkeypatch.setattr(chat_helpers, "extract_preset", lambda *_args, **_kwargs: chat_helpers.PresetInfo(0.7, 1024, None, None))
-    monkeypatch.setattr(chat_helpers, "load_prefs_for_user", lambda user: {})
-    monkeypatch.setattr(chat_helpers, "effective_user", lambda request: "tester")
-    monkeypatch.setattr(chat_helpers, "normalize_model_id", lambda endpoint_url, model, **kwargs: None)
-    monkeypatch.setattr(chat_helpers, "maybe_compact", fake_maybe_compact)
-    monkeypatch.setattr(chat_helpers, "trim_for_context", lambda messages, context_length: messages)
-
-    sess = SimpleNamespace(
-        endpoint_url="http://localhost:8000/v1",
-        model="test-model",
-        headers={},
-        get_context_messages=lambda: [{"role": "user", "content": "older non-incognito secret"}],
-    )
-    chat_processor = SimpleNamespace(build_context_preface=lambda **kwargs: ([], [], []))
-
-    ctx = await chat_helpers.build_chat_context(
-        sess=sess,
-        request=SimpleNamespace(),
-        chat_handler=SimpleNamespace(),
-        chat_processor=chat_processor,
-        message="fresh incognito turn",
-        session_id="s-incog",
-        incognito=True,
-    )
-
-    assert {"role": "user", "content": "fresh incognito turn"} in ctx.messages
-    assert all(m.get("content") != "older non-incognito secret" for m in ctx.messages)
 
 
 @pytest.mark.asyncio

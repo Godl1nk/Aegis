@@ -5,7 +5,7 @@
 
 import spinnerModule from './spinner.js';
 import sessionModule from './sessions.js';
-import { initEmailLibrary, openEmailLibrary, closeEmailLibrary, isOpen as isLibOpen, prewarmEmailLibrary, prewarmUnreadEmails } from './emailLibrary.js?v=20260722emailfastindex1';
+import { initEmailLibrary, openEmailLibrary, closeEmailLibrary, isOpen as isLibOpen } from './emailLibrary.js';
 import * as Modals from './modalManager.js';
 import { applyEdgeDock } from './modalSnap.js';
 import { buildReplyAllCc, extractEmail } from './emailLibrary/replyRecipients.js';
@@ -202,7 +202,6 @@ export function init(documentModule) {
       }
     },
   });
-  prewarmEmailLibrary({ delay: 1800 });
   _watchDocOpenToReDockEmail();
 }
 
@@ -349,11 +348,7 @@ async function _refreshUnreadCount() {
     const maxUid = parseInt(data.max_uid || '0', 10) || 0;
 
     // Only show dot if there's a new email above the threshold
-    const hasNewUnread = maxUid > lastSeen;
-    dot.style.display = hasNewUnread ? '' : 'none';
-    if (hasNewUnread && !isLibOpen()) {
-      prewarmUnreadEmails({ limit: Math.min(10, Math.max(1, unreadCount)), maxUid }).catch(() => {});
-    }
+    dot.style.display = maxUid > lastSeen ? '' : 'none';
 
     // Color the dot by urgency tier. Cache the per-uid map so the per-row
     // renderer can reuse it without a second fetch.
@@ -413,7 +408,19 @@ export async function loadEmails(append = false) {
     const res = await fetch(`${API_BASE}/api/email/list?folder=${encodeURIComponent(_currentFolder)}&limit=50&offset=${_offset}${fromQS}${_acct()}`);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
-    applyListData(data);
+
+    if (!append) _emails = [];
+    _emails.push(...(data.emails || []));
+    _total = data.total || 0;
+
+    // Remove spinner
+    if (_listSpinner) { _listSpinner.destroy(); _listSpinner = null; }
+
+    _renderList();
+
+    const unreadCount = _emails.filter(e => !e.is_read).length;
+    const dot = document.getElementById('email-unread-dot');
+    if (dot) dot.style.display = unreadCount > 0 ? '' : 'none';
   } catch (e) {
     console.error('Failed to load emails:', e);
     if (_listSpinner) { _listSpinner.destroy(); _listSpinner = null; }
@@ -873,9 +880,6 @@ async function _openEmail(em, itemEl, preloadedData = null, mode = 'reply', note
     let _baseSubject = (data.subject || '').trim();
     if (subjectPrefix === 'Re: ' && /^re\s*:/i.test(_baseSubject)) subjectPrefix = '';
     else if (subjectPrefix === 'Fwd: ' && /^fwd?\s*:/i.test(_baseSubject)) subjectPrefix = '';
-    if (mode !== 'forward' && !String(toAddress || '').trim()) {
-      throw new Error('Cannot create reply: sender address is missing from this email.');
-    }
     let content = `To: ${toAddress}\nSubject: ${subjectPrefix}${_baseSubject}`;
     if (ccAddresses) content += `\nCc: ${ccAddresses}`;
     if (mode !== 'forward' && data.message_id) content += `\nIn-Reply-To: ${data.message_id}`;
@@ -967,7 +971,7 @@ async function _openEmail(em, itemEl, preloadedData = null, mode = 'reply', note
           return;
         }
 
-        const createReplyDoc = (sessionId) => fetch(`${API_BASE}/api/document`, {
+        const docRes = await fetch(`${API_BASE}/api/document`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -977,12 +981,6 @@ async function _openEmail(em, itemEl, preloadedData = null, mode = 'reply', note
             language: 'email',
           }),
         });
-        let docRes = await createReplyDoc(activeSid);
-        if (docRes.status === 404) {
-          console.warn('[reply-debug] draft session rejected; retrying in a fresh email chat', activeSid);
-          activeSid = await _createEmailChat(data, { forceNew: true });
-          if (activeSid) docRes = await createReplyDoc(activeSid);
-        }
         if (!docRes.ok) {
           const errText = await docRes.text();
           console.error('[reply-debug] POST /api/document failed', docRes.status, errText);
@@ -1327,22 +1325,16 @@ async function _composeNew() {
       import('./ui.js').then(m => m.showError && m.showError('Could not start a new email (no session).')).catch(() => {});
       return;
     }
-    const createComposeDoc = (sessionId) => fetch(`${API_BASE}/api/document`, {
+    const res = await fetch(`${API_BASE}/api/document`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        session_id: sessionId,
+        session_id: sid,
         title: 'New Email',
         content: 'To: \nSubject: \n---\n',
         language: 'email',
       }),
     });
-    let res = await createComposeDoc(sid);
-    if (res.status === 404) {
-      console.warn('[compose-debug] draft session rejected; retrying in a fresh email chat', sid);
-      sid = await _createEmailChat({ subject: 'New Email' }, { forceNew: true });
-      if (sid) res = await createComposeDoc(sid);
-    }
     if (!res.ok) {
       console.error('compose POST failed', res.status, await res.text().catch(() => ''));
       import('./ui.js').then(m => m.showError && m.showError('Failed to create new email (' + res.status + ')')).catch(() => {});

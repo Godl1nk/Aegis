@@ -172,9 +172,7 @@ def setup_upload_routes(upload_handler):
                     "mime": meta["mime"],
                     "size": meta["size"],
                     "hash": meta["hash"],
-                    "checksum_sha256": meta.get("checksum_sha256") or meta["hash"],
                     "uploaded_at": meta["uploaded_at"],
-                    "created_at": meta.get("created_at") or meta["uploaded_at"],
                     "width": meta.get("width"),
                     "height": meta.get("height"),
                     "is_duplicate": meta.get("is_duplicate", False)
@@ -197,23 +195,7 @@ def setup_upload_routes(upload_handler):
     async def manual_cleanup(request: Request):
         """Manually trigger cleanup of old uploads."""
         require_admin(request)
-        try:
-            cleaned_count = await asyncio.to_thread(
-                _run_reference_safe_cleanup,
-                upload_handler,
-            )
-        except UploadCleanupSafetyError:
-            logger.exception("Upload cleanup aborted because index safety checks failed")
-            raise HTTPException(
-                503,
-                "Upload cleanup aborted because upload index integrity could not be verified",
-            )
-        except Exception:
-            logger.exception("Upload cleanup skipped because reference discovery failed")
-            raise HTTPException(
-                503,
-                "Upload cleanup skipped because persisted references could not be verified",
-            )
+        cleaned_count = upload_handler.cleanup_old_uploads()
         return {"status": "success", "files_cleaned": cleaned_count}
 
     @router.get("/stats")

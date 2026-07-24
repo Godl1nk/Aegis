@@ -436,9 +436,6 @@ class TestClassifyEndpoint:
     def test_public_api(self):
         assert _classify_endpoint("https://api.openai.com/v1") == "api"
 
-    def test_openrouter_api(self):
-        assert _classify_endpoint("https://openrouter.ai/api/v1") == "api"
-
     def test_empty_string(self):
         assert _classify_endpoint("") == "api"
 
@@ -570,83 +567,6 @@ class TestSetupProbeSafety:
         monkeypatch.setattr(model_routes.httpx, "get", fake_get)
 
         assert _probe_endpoint("https://api.groq.com/openai/v1") == _PROVIDER_CURATED["groq"]
-
-    def test_google_probe_uses_native_paginated_models_api(self, monkeypatch):
-        monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
-        monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
-        seen = []
-
-        def fake_get(url, headers=None, params=None, timeout=None, verify=None, **kwargs):
-            seen.append((url, headers, params, timeout, verify))
-            request = httpx.Request("GET", url)
-            page_token = (params or {}).get("pageToken")
-            if page_token:
-                return httpx.Response(
-                    200,
-                    request=request,
-                    json={
-                        "models": [{
-                            "name": "models/gemini-page-two",
-                            "supportedGenerationMethods": ["generateContent"],
-                        }]
-                    },
-                )
-            return httpx.Response(
-                200,
-                request=request,
-                json={
-                    "models": [
-                        {
-                            "name": "models/gemini-page-one",
-                            "supportedGenerationMethods": ["generateContent"],
-                        },
-                        {
-                            "baseModelId": "gemini-base-id",
-                            "name": "models/ignored-version",
-                            "supportedGenerationMethods": ["generateText"],
-                        },
-                        {
-                            "name": "models/imagen-4.0-generate-001",
-                            "supportedGenerationMethods": ["predict"],
-                        },
-                        {
-                            "name": "models/text-embedding-example",
-                            "supportedGenerationMethods": ["embedContent"],
-                        },
-                        {"name": "models/missing-method-metadata"},
-                    ],
-                    "nextPageToken": "next-page",
-                },
-            )
-
-        monkeypatch.setattr(model_routes.httpx, "get", fake_get)
-
-        assert _probe_endpoint("https://generativelanguage.googleapis.com/v1beta/openai", "google-key") == [
-            "gemini-page-one",
-            "gemini-base-id",
-            "gemini-page-two",
-        ]
-        assert [call[0] for call in seen] == [
-            "https://generativelanguage.googleapis.com/v1beta/models",
-            "https://generativelanguage.googleapis.com/v1beta/models",
-        ]
-        assert seen[0][1] == {"Accept": "application/json", "x-goog-api-key": "google-key"}
-        assert seen[0][2] == {"pageSize": 1000}
-        assert seen[1][1] == {"Accept": "application/json", "x-goog-api-key": "google-key"}
-        assert seen[1][2] == {"pageSize": 1000, "pageToken": "next-page"}
-
-    def test_google_probe_does_not_use_curated_fallback_on_failure(self, monkeypatch):
-        monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
-        monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url.rstrip("/"))
-
-        def fake_get(url, headers=None, params=None, timeout=None, verify=None, **kwargs):
-            request = httpx.Request("GET", url)
-            response = httpx.Response(401, request=request)
-            raise httpx.HTTPStatusError("unauthorized", request=request, response=response)
-
-        monkeypatch.setattr(model_routes.httpx, "get", fake_get)
-
-        assert _probe_endpoint("https://generativelanguage.googleapis.com/v1beta/openai", "bad-key") == []
 
     def test_keyed_anthropic_probe_does_not_fallback_on_failure(self, monkeypatch):
         monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)

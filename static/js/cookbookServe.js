@@ -964,7 +964,6 @@ function _rerenderCachedModels() {
   let html = '';
   let visibleCount = 0;
   for (const m of allModels) {
-	    if (m.is_adapter && !m.is_diffusion && !m.is_video) continue;
     if (activeTag && m._tag !== activeTag) continue;
     if (searchVal && !(m.repo_id || '').toLowerCase().includes(searchVal)) continue;
     visibleCount++;
@@ -1172,7 +1171,7 @@ function _rerenderCachedModels() {
 
   // Wire click on card to expand serve panel
   list.querySelectorAll('.memory-item[data-repo]').forEach(item => {
-    item.addEventListener('click', async (e) => {
+    item.addEventListener('click', (e) => {
       if (e.target.closest('a, .hwfit-cached-menu-btn, .memory-item-btn, .hwfit-serve-panel')) return;
       if (document.getElementById('hwfit-cache-select')?.classList.contains('active')) return;
       const repo = item.dataset.repo;
@@ -1472,14 +1471,12 @@ function _rerenderCachedModels() {
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang hwfit-extra-env-label">${_l('Env','Extra KEY=VALUE env-var pairs prepended to the launch (space-separated). The Env Preset above covers the usual MiniMax M3 values; use this for additional overrides.')}<input type="text" class="hwfit-sf" data-field="extra_env" value="${esc(svm('extra_env', sv('extra_env','')))}" placeholder="NCCL_P2P_DISABLE=1" style="width:100%;" /></label>`;
       panelHtml += `</div>`;
       // Row 2b: Diffusers settings
-      const diffDefaultNegative = 'low quality, blurry, out of focus, deformed, distorted, disfigured, unfinished, smudged, watermark, artifacts';
       const diffDtypeOpts = ['bfloat16','float16','float32'].map(d => `<option value="${d}"${sv('diff_dtype','bfloat16')===d?' selected':''}>${d}</option>`).join('');
       const deviceMapOpts = ['balanced','auto','sequential'].map(d => `<option value="${d}"${sv('diff_device_map','balanced')===d?' selected':''}>${d}</option>`).join('');
       panelHtml += `<div class="hwfit-serve-row hwfit-backend-diffusers hwfit-diff-settings-row">`;
       panelHtml += `<label>Dtype${_h('Precision. bfloat16 recommended for Flux, float16 for SD')} <select class="hwfit-sf" data-field="diff_dtype">${diffDtypeOpts}</select></label>`;
       panelHtml += `<label>Device Map${_h('How to place model on GPUs. balanced = split evenly')} <select class="hwfit-sf" data-field="diff_device_map">${deviceMapOpts}</select></label>`;
-      panelHtml += `<label>Steps${_h('Default inference steps. More = better quality, slower. Override with the model card recommendation when needed.')} <input type="text" class="hwfit-sf" data-field="diff_steps" value="${esc(sv('diff_steps', '20'))}" placeholder="20" /></label>`;
-      panelHtml += `<label>Guidance${_h('Classifier-free guidance scale. Override with the model card recommended value when available.')} <input type="text" class="hwfit-sf" data-field="diff_guidance_scale" value="${esc(sv('diff_guidance_scale', '3.5'))}" placeholder="3.5" /></label>`;
+      panelHtml += `<label>Steps${_h('Default inference steps. More = better quality, slower')} <input type="text" class="hwfit-sf" data-field="diff_steps" value="${esc(sv('diff_steps', ''))}" placeholder="auto" /></label>`;
       panelHtml += `<label>Width${_h('Default output width')} <input type="text" class="hwfit-sf" data-field="diff_width" value="${esc(sv('diff_width', ''))}" placeholder="1024" /></label>`;
       panelHtml += `<label>Height${_h('Default output height')} <input type="text" class="hwfit-sf" data-field="diff_height" value="${esc(sv('diff_height', ''))}" placeholder="1024" /></label>`;
       panelHtml += `</div>`;
@@ -2165,7 +2162,7 @@ function _rerenderCachedModels() {
             backend: cmd.includes('llama_cpp') || cmd.includes('llama-server') ? 'llamacpp' : cmd.includes('mlx_lm.server') ? 'mlx' : cmd.includes('diffusion_server') ? 'diffusers' : cmd.includes('sglang') ? 'sglang' : cmd.includes('ollama') ? 'ollama' : 'vllm',
             port: _ex(/--port\s+(\d+)/) || '8000',
             tp: _ex(/--tensor-parallel-size\s+(\d+)/) || '1',
-            ctx: _ex(/--max-model-len\s+(\d+)/) || _ex(/--context-length\s+(\d+)/) || _ex(/--max-tokens\s+(\d+)/) || _ex(/--n_ctx\s+(\d+)/) || _ex(/-c\s+(\d+)/) || '8192',
+            ctx: _ex(/--max-model-len\s+(\d+)/) || _ex(/--n_ctx\s+(\d+)/) || _ex(/-c\s+(\d+)/) || '8192',
             gpu_mem: _ex(/--gpu-memory-utilization\s+([\d.]+)/) || '0.90',
             swap: _ex(/--swap-space\s+(\d+)/) || '',
             dtype: _ex(/--dtype\s+(\w+)/) || 'auto',
@@ -2271,9 +2268,8 @@ function _rerenderCachedModels() {
         const presets = _loadPresets();
         const modelSlots = _presetsForModel(presets, repo);
         // Compute the current launch command first so we can detect a no-op save.
-        if (!_cmdManuallyEdited) updateCmd();
-        const cmdBox = panel.querySelector('.hwfit-serve-cmd');
-        const cmd = _normalizeServeCmdForLaunch((_cmdManuallyEdited && cmdBox) ? cmdBox.value : panel._cmd);
+        updateCmd();
+        const cmd = panel._cmd;
         // Already saved? If an existing preset for this model has the identical
         // launch command, don't make a duplicate — tell the user via a popup.
         const _norm = s => String(s || '').replace(/\s+/g, ' ').trim();
@@ -2563,7 +2559,6 @@ function _rerenderCachedModels() {
           menu.appendChild(mk('Cancel', 'dropdown-cancel-mobile', () => {}));
           const r = _splitArrow.getBoundingClientRect();
           menu.style.position = 'fixed';
-          menu.style.zIndex = String(topPortalZ());
           menu.style.right = (window.innerWidth - r.right) + 'px';
           document.body.appendChild(menu);
           // Default open BELOW, but if there's no room (esp. on mobile where
@@ -2915,37 +2910,6 @@ function _rerenderCachedModels() {
           if (e.target.dataset.field === 'venv') {
             updateRuntimeReadinessNote();
           }
-          if (e.target.dataset.field === 'venv') {
-            updateRuntimeReadinessNote();
-          }
-          updateCmd();
-          if (['backend', 'tp', 'gpu_mem', 'vllm_kv_cache_dtype', 'gpus'].includes(e.target.dataset.field)) {
-            try { _updateRecommendedCtx(false); } catch {}
-          }
-        });
-      });
-
-      panel.querySelectorAll('.hwfit-cached-adapter-select').forEach(sel => {
-        sel.addEventListener('change', () => {
-          const repoId = String(sel.value || '').trim();
-          if (!repoId) return;
-          const kind = sel.dataset.adapterKind || '';
-          const target = panel.querySelector(`[data-field="${kind}"]`);
-          if (!target) return;
-          const current = String(target.value || '').trim();
-          let next = repoId;
-          if (kind === 'vllm_lora_modules') {
-            const name = repoId.split('/').pop().replace(/[^A-Za-z0-9_.-]+/g, '_') || 'adapter';
-            next = `${name}=${repoId}`;
-          }
-          if (current) {
-            const lines = current.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
-            if (!lines.includes(next)) lines.push(next);
-            target.value = lines.join('\n');
-          } else {
-            target.value = next;
-          }
-          target.dispatchEvent(new Event('input', { bubbles: true }));
           updateCmd();
           if (['backend', 'tp', 'gpu_mem', 'vllm_kv_cache_dtype', 'gpus'].includes(e.target.dataset.field)) {
             try { _updateRecommendedCtx(false); } catch {}
@@ -3030,14 +2994,6 @@ function _rerenderCachedModels() {
       // Track manual edits
       let _cmdManuallyEdited = false;
       const _cmdTextarea = panel.querySelector('.hwfit-serve-cmd');
-      const _savedManualCmd = String(svm('_manual_cmd', '') || '').trim();
-      if (_cmdTextarea && _savedManualCmd) {
-        panel._cmd = _savedManualCmd;
-        _cmdTextarea.value = _formatServeCmdPreview(_savedManualCmd);
-        _cmdTextarea.style.height = 'auto';
-        _cmdTextarea.style.height = _cmdTextarea.scrollHeight + 'px';
-        _cmdManuallyEdited = true;
-      }
       if (_cmdTextarea) _cmdTextarea.addEventListener('input', () => { _cmdManuallyEdited = true; });
 
       // Cancel button — collapses the serve config panel (same effect as
@@ -3124,7 +3080,6 @@ function _rerenderCachedModels() {
         const _rawLaunchCmd = (_cmdManuallyEdited && _cmdTextarea) ? _cmdTextarea.value : panel._cmd;
         const launchCmd = _normalizeServeCmdForLaunch(_rawLaunchCmd);
         const serveState = {};
-        let launchAnyway = false;
         panel.querySelectorAll('.hwfit-sf').forEach(el => {
           if (el.type === 'checkbox') serveState[el.dataset.field] = el.checked;
           else serveState[el.dataset.field] = el.value;
@@ -3526,12 +3481,8 @@ function _rerenderCachedModels() {
 // Resolve the host the cached list was scanned from, mirroring
 // _fetchCachedModels — so a delete targets the SAME machine the model
 // actually lives on, not just the globally-selected serve host.
-function _serverFromCacheSelection() {
+function _resolveCacheHost() {
   let host = _envState.remoteHost || '';
-  let server = host
-    ? (_envState.servers || []).find(s => s.host === host) || null
-    : ((_envState.servers || []).find(s => !s.host || s.host === 'local') || null);
-  let key = '';
   const cacheSrv = document.getElementById('hwfit-cache-server');
 
   function _serverByCacheValue(val) {
@@ -3552,12 +3503,7 @@ function _serverFromCacheSelection() {
       if (s) host = s.host;
     }
   }
-
-  return { host, server, key };
-}
-
-function _resolveCacheHost() {
-  return _serverFromCacheSelection().host || '';
+  return host;
 }
 
 async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = null) {
@@ -3682,24 +3628,6 @@ async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = nul
   }
 }
 
-async function _promptResumeIncompleteModel(m, itemEl = null) {
-  const repo = m?.repo_id || itemEl?.dataset?.repo || '';
-  if (!repo) return;
-  const short = (m?.name || repo).split('/').pop();
-  if (_isActivelyDownloading(repo)) {
-    uiModule.showToast?.(`${short} is already downloading.`);
-    return;
-  }
-
-  const ok = await uiModule.styledConfirm(
-    `${short} is not finished downloading.\n\nResume the download on the selected cache server?`,
-    { confirmText: 'Resume download', cancelText: 'Not now' }
-  );
-  if (!ok) return;
-  uiModule.showToast?.(`Resuming ${short}…`);
-  _retryCachedModel(repo, m);
-}
-
 function _retryCachedModel(repo, m) {
   const payload = { repo_id: repo };
   if (_envState.hfToken) payload.hf_token = _envState.hfToken;
@@ -3716,11 +3644,11 @@ function _retryCachedModel(repo, m) {
       payload.env_prefix = 'conda activate ' + _psQuote(_envState.envPath);
     }
   } else {
-    if (env === 'venv' && envPath) {
-      const p = envPath;
+    if (_envState.env === 'venv' && _envState.envPath) {
+      const p = _envState.envPath;
       payload.env_prefix = 'source ' + _shellQuote(p.endsWith('/bin/activate') ? p : p + '/bin/activate');
-    } else if (env === 'conda' && envPath) {
-      payload.env_prefix = 'eval "$(conda shell.bash hook)" && conda activate ' + _shellQuote(envPath);
+    } else if (_envState.env === 'conda' && _envState.envPath) {
+      payload.env_prefix = 'eval "$(conda shell.bash hook)" && conda activate ' + _shellQuote(_envState.envPath);
     }
   }
   _retryDownload((m?.name || repo).split('/').pop(), payload);

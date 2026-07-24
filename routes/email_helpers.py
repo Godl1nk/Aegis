@@ -272,7 +272,6 @@ def _extract_reply(text: str) -> str:
     # Drop any stray/duplicate marker tokens, then strip think markup.
     t = _REPLY_OPEN_RE.sub("", t)
     t = _REPLY_CLOSE_RE.sub("", t)
-    t = _REPLY_ROLE_MARKER_RE.sub("", t)
     return _strip_think(t).strip()
 
 

@@ -70,14 +70,6 @@ What is the system/code/task state right now? What was the last thing discussed?
 Keep the summary under 1000 tokens. Be dense — every token should carry information. Do not include pleasantries or meta-commentary."""
 
 
-def normalize_compaction_summary(summary: str) -> str:
-    """Remove redundant leading title text before adding our wrapper."""
-    text = (summary or "").strip()
-    text = re.sub(r"^(?:#{1,3}\s*)?Conversation Summary\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^\*\*Conversation Summary\*\*\s*", "", text, flags=re.IGNORECASE)
-    return text.lstrip()
-
-
 def _sanitize_tool_messages(msgs: List[Dict]) -> List[Dict]:
     """Drop orphaned `tool` messages and dangling assistant `tool_calls`.
 

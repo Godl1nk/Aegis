@@ -227,8 +227,8 @@ _API_AGENT_RULES = """\
   • "Kill / stop / shut down" → `stop_served_model` (or `cancel_download`) with the session_id from the list.
   • Searching for a model → `search_hf_models`.
   • Downloading or serving a model → these run on a SERVER. If the user names one ("on gpu-box", "on the gpu box") pass `host=`. If they DON'T name one, the tool defaults to the cookbook's currently-selected server (NOT localhost). When there are multiple servers and it's genuinely ambiguous which they mean, call `list_cookbook_servers` and ask. Only download to localhost when the user explicitly says "locally" / "on this machine" (pass `local=true`).
-  • Image/inpainting/diffusion serve requests ("serve inpaint", "SDXL inpainting", "image model") → use `serve_model` with a built-in image command. Apple/MLX image repos use `python3 scripts/mlx_image_server.py --model <repo> --port 8100`; non-MLX Diffusers repos use `python3 scripts/diffusion_server.py --model <repo> --port 8100`. Do NOT use `mlx_lm.server` for image models, do NOT invent modules like `diffusers_api_server`, and do NOT use bash/ssh/pip directly. The Cookbook route copies the server script to remote hosts and registers the image endpoint.
-  • Launching a saved preset explicitly ("run my preset", "start the saved SD 3.5 preset", "use the existing preset") → `list_serve_presets`, then `serve_preset {name: "..."}`. Do NOT fabricate a tmux command — the user already saved working ones from the UI. Only fall back to raw `serve_model` if no preset matches and the autonomous launch tool is not appropriate.
+  • Image/inpainting/diffusion serve requests ("serve inpaint", "SDXL inpainting", "image model") → use `serve_model` with the built-in Diffusers command: `python3 scripts/diffusion_server.py --model <repo> --port 8100` (or another free port). Do NOT invent modules like `diffusers_api_server`, and do NOT use bash/ssh/pip directly. The Cookbook route copies `scripts/diffusion_server.py` to remote hosts and registers the image endpoint.
+  • Launching a known model ("run SD 3.5", "start the inpaint model", "serve qwen") → **FIRST** `list_serve_presets` to find the saved launch template, **THEN** `serve_preset {name: "..."}`. Do NOT fabricate a tmux command — the user already saved working ones from the UI. Only fall back to raw `serve_model` if no preset matches.
   • Launching a model the user names ("serve minimax m2.7 on gpu-box") with NO preset → `serve_model {repo_id, cmd, host}`. The cookbook route OWNS tmux session creation AND state-file registration AND UI live-refresh — bypassing it produces an orphan the UI can never see. After launching, call `list_served_models` to verify readiness. If it reports a diagnosis and suggested adjusted command, retry with `serve_model` using that command instead of asking the user to debug raw tmux logs.
   • Adopting an already-running tmux session (someone or a prior bash launch started a server, but it's not in the cookbook) → `adopt_served_model {host, tmux_session, model, port}`. This registers it in cookbook_state.json AND adds it as a chat endpoint so the user can pick it in the model dropdown. Use this whenever you find a running server that the cookbook doesn't know about.
   • After ANY successful serve (preset or raw or adopted), the cookbook's serve flow auto-adds the model as an endpoint. If for some reason it didn't (e.g. the launch was external), call `adopt_served_model` to fix both at once, or `manage_endpoints` with action=add to register the URL manually.
@@ -568,11 +568,11 @@ If the user asks for a reminder/alarm before the event, pass `reminder_minutes` 
     "stop_served_model": "- ```stop_served_model``` — Stop a running model server. Args (JSON): {\"session_id\": \"<from list_served_models>\"}. Use for 'kill my cookbook' / 'stop the model' / 'shut down vLLM'.",
     "tail_serve_output": "- ```tail_serve_output``` — Read the actual tmux stderr/traceback of a CURRENTLY failing cookbook task. Args (JSON): {\"session_id\": \"<from list_served_models>\", \"tail\": 150?}. **Use ONLY after** you just launched something via `serve_model` AND `list_served_models` reports YOUR new task as `crashed`/`error`. DO NOT use it on old stopped/completed download tasks (they're historical noise — won't predict whether a new launch succeeds). DO NOT call it before launching a fresh attempt. When you do call it, bump `tail` to 400+ only if the visible error references 'see root cause above'.",
     "download_model": "- ```download_model``` — Download a HuggingFace model. Args (JSON): {\"repo_id\": \"Qwen/Qwen3-8B\", \"host\": \"user@gpu-box\"?, \"include\": \"*Q4_K_M*\"?}.",
-    "serve_model": "- ```serve_model``` — Start serving a model with vLLM / SGLang / llama.cpp / Ollama / MLX Image / Diffusers. Args (JSON): {\"repo_id\": \"...\", \"cmd\": \"vllm serve <repo> --port 8000\" or \"python3 -m sglang.launch_server --model-path <repo> --port 30000\" or \"python3 scripts/mlx_image_server.py --model <repo> --port 8100\" or \"python3 scripts/diffusion_server.py --model <repo> --port 8100\", \"host\": \"user@gpu-box\"?}. For MLX image models, use `scripts/mlx_image_server.py`; for non-MLX image/inpaint/diffusion models, use `scripts/diffusion_server.py`. Never use `mlx_lm.server` for image models. After launch, call `list_served_models`; if it returns a diagnosis with an adjusted command, retry with that command.",
+    "serve_model": "- ```serve_model``` — Start serving a model with vLLM / SGLang / llama.cpp / Ollama / Diffusers. Args (JSON): {\"repo_id\": \"...\", \"cmd\": \"vllm serve ... --port 8000\" or \"python3 -m sglang.launch_server ... --port 30000\" or \"python3 scripts/diffusion_server.py --model diffusers/stable-diffusion-xl-1.0-inpainting-0.1 --port 8100\", \"host\": \"user@gpu-box\"?}. For image/inpaint/diffusion models, use the `scripts/diffusion_server.py` command exactly. After launch, call `list_served_models`; if it returns a diagnosis with an adjusted command, retry with that command.",
     "list_downloads": "- ```list_downloads``` — Show in-progress HuggingFace model downloads (filters Cookbook tasks/status to downloads only). NO args. Use for 'what's downloading' / 'show my downloads' / 'check download progress'.",
     "cancel_download": "- ```cancel_download``` — Cancel an in-progress download. Args (JSON): {\"session_id\": \"<from list_downloads>\"}. Use for 'cancel the download' / 'kill the download'.",
     "search_hf_models": "- ```search_hf_models``` — Search HuggingFace for models. Args (JSON): {\"query\": \"qwen 8b\", \"limit\": 10?}. Use for 'find a model for X' / 'search huggingface' / 'what models are there for Y'.",
-    "list_cached_models": "- ```list_cached_models``` — List models already on disk. Args (JSON, all optional): {\"host\": \"server-name or user@gpu-box\"?, \"model_dir\": \"/data/models,/extra\"?}. Friendly Cookbook server names work. Use for 'what models do I have' / 'show cached models' / 'is X downloaded'.",
+    "list_cached_models": "- ```list_cached_models``` — List models already on disk. Args (JSON, all optional): {\"host\": \"ajax or user@gpu-box\"?, \"model_dir\": \"/data/models,/extra\"?}. Friendly Cookbook server names work. Use for 'what models do I have' / 'show cached models' / 'is X downloaded'.",
     "app_api": """\
 ```app_api
 {"action": "call", "method": "GET", "path": "/api/cookbook/gpus"}
@@ -594,13 +594,13 @@ GENERIC LOOPBACK to allowed Odysseus internal endpoints. Use this whenever the u
 - Settings: `/api/settings`, `/api/prefs/{key}`
 - Research: `/api/research/start`, `/api/research/tasks` (note: `/api/research/report/{id}` renders HTML — to READ a report's text use the `manage_research` tool with `action:read`, not this endpoint)
 - Compare: `/api/compare/sessions`, `/api/compare/start`
-- Email: use named email tools (`list_email_accounts`, `list_emails`, `read_email`, `scan_email_unsubscribes`, `unsubscribe_email`, `send_email`, `reply_to_email`). Do NOT use `/api/email/accounts`; it is owner-filtered in tool context and may falsely return empty.
+- Email: use named email tools (`list_email_accounts`, `list_emails`, `read_email`, `send_email`, `reply_to_email`). Do NOT use `/api/email/accounts`; it is owner-filtered in tool context and may falsely return empty.
 - Endpoints (model providers): `/api/endpoints`, `/api/endpoints/{id}`
 - Shell: do NOT use `app_api` for `/api/shell/*`; use named command tooling instead.
 
 Body for POST/PUT/PATCH goes in `body` (object). Query params in `query` (object). Returns the parsed JSON of the response.
 
-**When to prefer named tools over app_api:** if a named wrapper exists (list_email_accounts, list_emails, read_email, scan_email_unsubscribes, manage_calendar, manage_notes, list_served_models, etc.) USE IT — it has nicer output formatting and clearer schema. Reach for `app_api` only when there's no wrapper for what you need.
+**When to prefer named tools over app_api:** if a named wrapper exists (list_email_accounts, list_emails, read_email, manage_calendar, manage_notes, list_served_models, etc.) USE IT — it has nicer output formatting and clearer schema. Reach for `app_api` only when there's no wrapper for what you need.
 
 Blocked paths/routes (refused for safety): /api/auth/, /api/users/, /api/tokens/, /api/admin/, /api/shell/, /api/backup/restore, /api/email/accounts, POST /api/cookbook/packages/install, POST /api/cookbook/rebuild-engine, POST /api/cookbook/kill-pid.""",
 }
@@ -2215,14 +2215,12 @@ def _build_system_prompt(
     _EMAIL_TOOL_HINTS = {
         "list_email_accounts", "send_email", "reply_to_email", "list_emails", "read_email",
         "bulk_email", "archive_email", "delete_email", "mark_email_read",
-        "scan_email_unsubscribes", "unsubscribe_email",
         "resolve_contact", "ui_control",
         "mcp__email__list_email_accounts",
         "mcp__email__send_email", "mcp__email__reply_to_email",
         "mcp__email__list_emails", "mcp__email__read_email",
         "mcp__email__bulk_email", "mcp__email__archive_email",
         "mcp__email__delete_email", "mcp__email__mark_email_read",
-        "mcp__email__scan_email_unsubscribes", "mcp__email__unsubscribe_email",
     }
     if active_document and active_document.language == "email":
         _inject_style = True
@@ -2241,18 +2239,7 @@ def _build_system_prompt(
     if _inject_style and not suppress_local_context:
         try:
             from src.settings import load_settings as _load_settings
-            _settings = _load_settings()
-            _style_account_id = ""
-            if active_document is not None:
-                _style_account_id = str(getattr(active_document, "source_email_account_id", "") or "").strip()
-            if not _style_account_id and active_email:
-                _style_account_id = str(active_email.get("account") or active_email.get("account_id") or "").strip()
-            _by_account = _settings.get("email_writing_styles_by_account") or {}
-            _style = ""
-            if _style_account_id and isinstance(_by_account, dict):
-                _style = str(_by_account.get(_style_account_id) or "").strip()
-            if not _style:
-                _style = (_settings.get("email_writing_style", "") or "").strip()
+            _style = (_load_settings().get("email_writing_style", "") or "").strip()
             if _style:
                 # Hardcoded identity/style rules stay in the trusted system prompt.
                 agent_prompt += (
@@ -2273,15 +2260,6 @@ def _build_system_prompt(
                 )
         except Exception:
             pass
-
-    if workspace and not suppress_local_context:
-        agent_prompt += _workspace_coding_rules(workspace)
-    elif (
-        relevant_tools
-        and not suppress_local_context
-        and (set(relevant_tools) & _WORKSPACE_TERMINUS_TOOLS)
-    ):
-        agent_prompt += _local_computer_rules()
 
     # When creating email documents, instruct the AI on the format
     if relevant_tools and not suppress_local_context and (_EMAIL_TOOL_HINTS & set(relevant_tools)):
@@ -2730,7 +2708,6 @@ def _compute_final_metrics(
     round_texts: list,
     model: str = "",
     last_round_input_tokens: int = 0,
-    request_context_tokens: int = 0,
     prep_timings: Optional[Dict[str, float]] = None,
     backend_gen_tps: float = 0,
     backend_prefill_tps: float = 0,
@@ -2769,7 +2746,6 @@ def _compute_final_metrics(
         # tokens/wall-clock fallback (reads low — includes prefill/overhead).
         "tps_source": "backend" if (backend_gen_tps and backend_gen_tps > 0) else "computed",
         "total_tokens": input_tokens + output_tokens,
-        "request_context_tokens": ctx_tokens,
         "context_length": context_length,
         "context_percent": ctx_pct,
         "usage_source": "real" if has_real_usage else "estimated",
@@ -4740,21 +4716,6 @@ async def stream_agent_loop(
             reason = (f"calling {_runaway} with identical arguments over and over" if _runaway
                       else "repeating the same tool calls without new progress")
             logger.warning(f"[agent] loop-breaker tripped on round {round_num} ({reason}); sig={_sig[:80]!r}")
-            yield (
-                "data: "
-                    + json.dumps({
-                    "type": "loop_breaker_triggered",
-                    "reason": "loop_breaker_stall",
-                    "message": (
-                        "The loop-breaker detected repeated tool calls without "
-                        "new progress, so the agent is being forced to stop "
-                        "using tools and give its best final answer."
-                    ),
-                    "round": round_num,
-                    "detail": reason,
-                })
-                + "\n\n"
-            )
             # The model has been executing tools, so its results are already
             # in context. Force ONE tool-free round to converge: write the
             # answer from what it has, or state plainly what's blocking it.
@@ -5158,107 +5119,6 @@ async def stream_agent_loop(
             if "diff" in result:
                 tool_output_data["diff"] = result["diff"]
             yield f'data: {json.dumps(tool_output_data)}\n\n'
-            if result.get("image_url"):
-                generated_image_data = {"type": "generated_image", "url": result.get("image_url")}
-                for k in ("image_url", "image_id", "image_prompt", "image_model", "image_size", "image_quality"):
-                    if k in result:
-                        generated_image_data[k] = result[k]
-                yield f'data: {json.dumps(generated_image_data)}\n\n'
-
-            if block.tool_type == "manage_notes":
-                _notes_action = ""
-                try:
-                    _notes_args = json.loads(block.content or "{}")
-                    if isinstance(_notes_args, dict):
-                        _notes_action = str(_notes_args.get("action") or "").lower()
-                except Exception:
-                    _notes_action = ""
-                _notes_text = ""
-                if not result.get("error"):
-                    if _notes_action in {"list", "search", "find", "view", "lis"}:
-                        _notes_text = _note_list_summary_from_tool_output(
-                            result.get("output") or result.get("results") or result.get("content") or ""
-                        )
-                    elif _notes_action in {"add", "update", "delete", "toggle_item"}:
-                        _notes_text = str(
-                            result.get("response")
-                            or result.get("output")
-                            or result.get("results")
-                            or ""
-                        ).strip()
-                        if _notes_text.startswith("AI: "):
-                            _notes_text = _notes_text[4:].strip()
-                        if _notes_text and not re.match(r"^(done|note|item|deleted)\b", _notes_text, re.IGNORECASE):
-                            _notes_text = f"Done — {_notes_text}"
-                if _notes_text:
-                    _clean_current = strip_tool_blocks(full_response).strip()
-                    if _notes_text not in _clean_current:
-                        _prefix = "\n\n" if _clean_current else ""
-                        full_response = (_clean_current + _prefix + _notes_text).strip()
-                        yield f'data: {json.dumps({"delta": _prefix + _notes_text})}\n\n'
-                    _ody_notes_tool_completed = True
-
-            if block.tool_type == "manage_tasks":
-                _tasks_action = ""
-                try:
-                    _tasks_args = json.loads(block.content or "{}")
-                    if isinstance(_tasks_args, dict):
-                        _tasks_action = str(_tasks_args.get("action") or "").lower()
-                except Exception:
-                    _tasks_action = ""
-                _tasks_text = ""
-                if not result.get("error"):
-                    _tasks_text = str(
-                        result.get("response")
-                        or result.get("output")
-                        or result.get("results")
-                        or ""
-                    ).strip()
-                    if _tasks_text.startswith("AI: "):
-                        _tasks_text = _tasks_text[4:].strip()
-                    if _tasks_action == "list" and _tasks_text:
-                        _tasks_text = _tasks_text
-                    elif _tasks_text and not re.match(r"^(done|created|updated|deleted|task)\b", _tasks_text, re.IGNORECASE):
-                        _tasks_text = f"Done — {_tasks_text}"
-                if _tasks_text:
-                    _clean_current = strip_tool_blocks(full_response).strip()
-                    if _tasks_text not in _clean_current:
-                        _prefix = "\n\n" if _clean_current else ""
-                        full_response = (_clean_current + _prefix + _tasks_text).strip()
-                        yield f'data: {json.dumps({"delta": _prefix + _tasks_text})}\n\n'
-                    _ody_notes_tool_completed = True
-
-            if _ody_qwen_finetune_model and not result.get("error"):
-                _terminal_summary = _ody_qwen_terminal_tool_summary({
-                    "tool": block.tool_type,
-                    "desc": desc,
-                    "command": block.content,
-                    "output": result.get("output")
-                    or result.get("response")
-                    or result.get("results")
-                    or result.get("content")
-                    or output_text
-                    or "",
-                })
-                if _terminal_summary:
-                    _terminal_summary = _normalize_ody_qwen_text_artifacts(_terminal_summary).strip()
-                    _clean_current = strip_tool_blocks(full_response).strip()
-                    # Replace model-written summaries for list/read tools. They
-                    # are the common source of doubled text and dropped-letter
-                    # artifacts; the tool output is already structured enough
-                    # to render deterministically.
-                    full_response = _terminal_summary
-                    if _terminal_summary not in _clean_current:
-                        yield f'data: {json.dumps({"delta": _terminal_summary})}\n\n'
-                    _ody_notes_tool_completed = True
-
-            # This must be the final UI event for ask_user: the frontend appends
-            # the card below the now-settled tool node and cancels any between-
-            # round spinner.  The turn ends after the current tool batch.
-            if _pending_ask_user_event:
-                yield (
-                    f'data: {json.dumps({"type": "ask_user", "data": _pending_ask_user_event})}\n\n'
-                )
 
             if block.tool_type == "manage_notes":
                 _notes_action = ""
@@ -5355,13 +5215,7 @@ async def stream_agent_loop(
             # Save for history persistence
             tool_event = {
                 "round": round_num,
-                "tool": _resolved_tool_event_name({
-                    "tool": block.tool_type,
-                    "desc": desc,
-                    "command": cmd_display,
-                    "output": output_text,
-                }),
-                "desc": desc,
+                "tool": block.tool_type,
                 "command": cmd_display,
                 "output": output_text,
                 "exit_code": result.get("exit_code"),
@@ -5564,13 +5418,11 @@ async def stream_agent_loop(
 
     # --- Final metrics ---
     total_duration = time.time() - total_start
-    final_context_tokens = estimate_tokens(messages)
     metrics = _compute_final_metrics(
         messages, full_response, total_duration, time_to_first_token,
         context_length, real_input_tokens, real_output_tokens,
         has_real_usage, tool_events, round_texts, model=actual_model,
         last_round_input_tokens=last_round_input_tokens,
-        request_context_tokens=final_context_tokens,
         prep_timings=prep_timings,
         backend_gen_tps=backend_gen_tps,
         backend_prefill_tps=backend_prefill_tps,

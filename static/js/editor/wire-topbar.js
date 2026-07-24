@@ -71,15 +71,10 @@ export function wireTopbar(deps) {
   // original IDs so the standalone handlers below wire to them
   // unchanged.
   {
-    const editorRoot = document.getElementById('gallery-editor-container') || document;
-    const saveBtn = editorRoot.querySelector('#ge-save-menu-btn');
-    const saveWrap = saveBtn?.closest('.ge-save-wrap');
-    const saveMenu = saveWrap?.querySelector('#ge-save-menu');
+    const saveBtn = document.getElementById('ge-save-menu-btn');
+    const saveMenu = document.getElementById('ge-save-menu');
     if (saveBtn && saveMenu) {
       const saveTopbar = saveBtn.closest('.ge-topbar');
-      document.querySelectorAll('body > #ge-save-menu').forEach((menu) => {
-        if (menu !== saveMenu) menu.remove();
-      });
       // Reparent the menu to <body>. Without this, the menu inherits
       // the gallery modal's containing block (the modal applies a
       // `transform: scale(...)` for its enter animation — and any
@@ -110,7 +105,7 @@ export function wireTopbar(deps) {
       saveMenu.addEventListener('click', () => { setSaveMenuOpen(false); });
       window.addEventListener('resize', () => { if (!saveMenu.hidden) positionSaveMenu(); });
       registerDocClickAway((e) => {
-        if (!saveMenu.hidden && !saveMenu.contains(e.target) && !saveBtn.contains(e.target)) {
+        if (!saveMenu.hidden && !saveMenu.contains(e.target) && e.target !== saveBtn) {
           setSaveMenuOpen(false);
         }
       });
