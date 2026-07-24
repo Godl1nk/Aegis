@@ -181,6 +181,8 @@ function _initModelPickerDropdown() {
   const searchRow = menu ? menu.querySelector('.model-picker-search-row') : null;
   const refreshBtn = document.getElementById('model-picker-refresh-btn');
   if (!wrap || !btn || !menu || !search || !listEl) return;
+  if (wrap.dataset.modelPickerBound === '1') return;
+  wrap.dataset.modelPickerBound = '1';
 
   function _close() {
     if (menu.classList.contains('hidden')) return;
@@ -227,10 +229,13 @@ function _initModelPickerDropdown() {
 
   // Local endpoint health — only probed for LOCAL endpoints, since
   // cloud APIs are essentially always up. Cached briefly on the
-  // server side too (8s TTL). Picker opens trigger a refresh.
+  // server side too (8s TTL). Picker opens do not probe; the refresh button
+  // is the explicit network/probe action.
   let _localProbe = {};            // {endpoint_id: {alive, latency_ms, error}}
   let _localProbeFetchedAt = 0;
   const _LOCAL_PROBE_TTL_MS = 5000;
+  let _pickerLoading = false;
+  let _pickerLoadSeq = 0;
 
   async function _refreshLocalProbe() {
     try {
@@ -263,6 +268,7 @@ function _initModelPickerDropdown() {
       // Mark local endpoints whose live probe failed.
       const probeResult = item.endpoint_id ? _localProbe[item.endpoint_id] : null;
       const isLocalDead = !!(probeResult && probeResult.alive === false);
+      const isApiEndpoint = item.category && item.category !== 'local';
       allModels.forEach((mid, i) => {
         // Deduplicate by model ID — prefer ONLINE endpoint entries over
         // offline duplicates so the user gets a working endpoint first
@@ -270,6 +276,7 @@ function _initModelPickerDropdown() {
         if (seen.has(mid)) return;
         seen.add(mid);
         result.push({
+          key: seenKey,
           mid,
           display: (allDisplay[i] || mid).split('/').pop(),
           url: item.url,
@@ -342,6 +349,7 @@ function _initModelPickerDropdown() {
 
   function _populate(filter) {
     listEl.innerHTML = '';
+    listEl.classList.remove('is-loading');
     const all = _getAllModels();
     const q = (filter || '').trim().toLowerCase();
     const hasAnyModel = all.length > 0;
@@ -360,6 +368,8 @@ function _initModelPickerDropdown() {
     // resolved back to full model objects; drops anything no longer offered.
     const byId = new Map();
     all.forEach(m => { if (!byId.has(m.mid)) byId.set(m.mid, m); });
+
+    const favs = _loadFavorites();
 
     const favs = _loadFavorites();
 
@@ -548,7 +558,26 @@ function _initModelPickerDropdown() {
     }
   }
 
-  async function _pick(m) {
+async function _pick(m) {
+    _defaultPendingSeq++;
+    try {
+      window.__odysseusLastPickedRoute = {
+        model: m.mid || '',
+        endpoint_url: m.url || '',
+        endpoint_id: m.endpointId || '',
+        display: m.display || m.mid || '',
+        picked_at: Date.now(),
+      };
+    } catch (_) {}
+    let switchDone = null;
+    const switchPromise = new Promise(resolve => { switchDone = resolve; });
+    try { window.__odysseusModelSwitchPromise = switchPromise; } catch (_) {}
+    const finishSwitch = () => {
+      try {
+        if (switchDone) switchDone();
+        if (window.__odysseusModelSwitchPromise === switchPromise) delete window.__odysseusModelSwitchPromise;
+      } catch (_) {}
+    };
     const currentSessionId = _deps.getCurrentSessionId();
     const _pendingChat = _deps.getPendingChat();
 
@@ -574,12 +603,23 @@ function _initModelPickerDropdown() {
       // Header stays as session name — model switch only updates picker
       updateModelPicker();
       uiModule.showToast(`Using ${m.display}`);
+      finishSwitch();
       return;
     } else if (!currentSessionId) {
       // No session yet — create one with this model
-      await _deps.createDirectChat(m.url, m.mid, m.endpointId);
+      try {
+        await _deps.createDirectChat(m.url, m.mid, m.endpointId);
+      } catch (e) {
+        uiModule.showError('Failed to start chat: ' + e);
+        finishSwitch();
+        return;
+      }
     } else {
       // Existing session with no model — PATCH it
+      const sessions = _deps.getSessions();
+      const s = sessions.find(x => x.id === currentSessionId);
+      if (s) { s.model = m.mid; s.endpoint_url = m.url; s.endpoint_id = m.endpointId || s.endpoint_id || ''; }
+      updateModelPicker();
       const fd = new FormData();
       fd.append('model', m.mid);
       fd.append('endpoint_url', m.url);
@@ -588,6 +628,7 @@ function _initModelPickerDropdown() {
         const res = await fetch(`${API_BASE}/api/session/${currentSessionId}`, { method: 'PATCH', body: fd });
         if (!res.ok) {
           uiModule.showError('Failed to set model');
+          finishSwitch();
           return;
         }
         const sessions = _deps.getSessions();
@@ -596,12 +637,15 @@ function _initModelPickerDropdown() {
         // Header stays as session name — model info shown in picker only
       } catch (e) {
         uiModule.showError('Failed to set model: ' + e);
+        finishSwitch();
         return;
       }
     }
     // Update picker visibility — model is now set
     updateModelPicker();
+    if (window.refreshChatContextHeader) window.refreshChatContextHeader('model-pick');
     uiModule.showToast(`Using ${m.display}`);
+    finishSwitch();
   }
 
   document.addEventListener('odysseus:auto-select-model', async (e) => {
@@ -650,12 +694,20 @@ function _initModelPickerDropdown() {
     if (match) await _pick(match);
   });
 
+  btn.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+  });
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     if (menu.classList.contains('hidden') || menu.classList.contains('closing')) {
       // Force-clear any in-progress close animation
       menu.classList.remove('closing', 'hidden');
-      _populate('');
+      const hasCache = _hasModelCache();
+      if (hasCache) {
+        _populate('');
+      } else {
+        _renderLoading('Loading models…');
+      }
       if (window.modelsModule && window.modelsModule.refreshModels) {
         window.modelsModule.refreshModels().then(() => {
           if (!menu.classList.contains('hidden')) _populate(search.value || '');
@@ -671,7 +723,10 @@ function _initModelPickerDropdown() {
     }
   });
 
-  search.addEventListener('input', () => _populate(search.value));
+  search.addEventListener('input', () => {
+    if (_pickerLoading) return;
+    _populate(search.value);
+  });
   search.addEventListener('click', (e) => e.stopPropagation());
   if (refreshBtn) {
     refreshBtn.addEventListener('click', async (e) => {
@@ -704,7 +759,7 @@ function _initModelPickerDropdown() {
     });
   }
   document.addEventListener('click', (e) => {
-    if (!menu.classList.contains('hidden') && !menu.contains(e.target) && e.target !== btn) {
+    if (!menu.classList.contains('hidden') && !wrap.contains(e.target)) {
       _close();
     }
   });
@@ -758,6 +813,26 @@ export function updateModelPicker() {
       endpointId = '';
     }
   }
+  if (!modelId && !currentSessionId && !_pendingChat && _deps.setPendingChat) {
+    let cachedDefault = null;
+    try {
+      cachedDefault = window.__odysseusDefaultChat || null;
+    } catch (_) {}
+    if (!cachedDefault || !cachedDefault.endpoint_url || !cachedDefault.model) {
+      try {
+        cachedDefault = JSON.parse(localStorage.getItem('odysseus-default-chat-cache') || 'null');
+      } catch (_) {}
+    }
+    if (cachedDefault && cachedDefault.endpoint_url && cachedDefault.model) {
+      modelId = cachedDefault.model;
+      _deps.setPendingChat({
+        url: cachedDefault.endpoint_url,
+        modelId,
+        endpointId: cachedDefault.endpoint_id || '',
+        source: 'default',
+      });
+    }
+  }
   // SECURITY: deliberately NOT auto-injecting `odysseus-model-favorites[0]`
   // here. localStorage favorites are per-browser, not per-user, so on a
   // shared browser the previous account's first favorited model would
@@ -781,7 +856,14 @@ export function updateModelPicker() {
 
   // Check if selected model is still available — fall back ONLY for pending chats with no user selection
   // Never override an existing session's model — the user explicitly chose it
-  if (modelId && !currentSessionId && _pendingChat && window.modelsModule && window.modelsModule.getCachedItems) {
+  if (
+    modelId &&
+    !currentSessionId &&
+    _pendingChat &&
+    _pendingChat.source !== 'manual' &&
+    window.modelsModule &&
+    window.modelsModule.getCachedItems
+  ) {
     const items = window.modelsModule.getCachedItems();
     const allAvailable = [];
     items.forEach(item => {

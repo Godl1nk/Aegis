@@ -697,7 +697,7 @@ def _expand_rrule(
 
 # ── Routes ──
 
-def setup_calendar_routes() -> APIRouter:
+def setup_calendar_routes(upload_handler=None) -> APIRouter:
     router = APIRouter(prefix="/api/calendar", tags=["calendar"])
 
     # ── CalDAV multi-account helpers ─────────────────────────────────────────
@@ -1070,6 +1070,7 @@ def setup_calendar_routes() -> APIRouter:
     @router.post("/events")
     async def create_event(request: Request, data: EventCreate):
         owner = _require_user(request)
+        _reserve_calendar_uploads(request, data.color, data.description, data.location)
         db = SessionLocal()
         try:
             cal = None
@@ -1224,6 +1225,7 @@ def setup_calendar_routes() -> APIRouter:
     @router.post("/calendars")
     async def create_calendar(request: Request, name: str = "Imported", color: str = "#5b8abf"):
         owner = _require_user(request)
+        _reserve_calendar_uploads(request, color)
         db = SessionLocal()
         try:
             cal = CalendarCal(
@@ -1246,6 +1248,7 @@ def setup_calendar_routes() -> APIRouter:
     @router.put("/calendars/{cal_id}")
     async def update_calendar(request: Request, cal_id: str, name: str = None, color: str = None):
         owner = _require_user(request)
+        _reserve_calendar_uploads(request, color)
         db = SessionLocal()
         try:
             cal = _get_or_404_calendar(db, cal_id, owner)

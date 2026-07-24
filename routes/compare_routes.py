@@ -1,22 +1,13 @@
-# routes/compare_routes.py
-"""Model A/B comparison routes."""
-import json
-import uuid
-import random
-from datetime import datetime
-from fastapi import APIRouter, Form, HTTPException, Request
-from typing import List
-from pydantic import BaseModel
-import logging
+"""Backward-compat shim — canonical location is routes/compare/compare_routes.py.
 
 from core.database import Comparison, SessionLocal
 from core.session_manager import SessionManager
 from src.auth_helpers import get_current_user
 from routes.session_routes import _reject_raw_endpoint_url_for_non_admin
 
-logger = logging.getLogger(__name__)
+import sys as _sys
 
-router = APIRouter(prefix="/api/compare", tags=["compare"])
+from routes.compare import compare_routes as _canonical  # noqa: F401
 
 
 def _owned_endpoint_by_url(db, base_url, owner):

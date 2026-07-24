@@ -287,8 +287,14 @@ function _setupProviderPrompt() {
 // -----------------------------------------------------------------------
 
 /** Persist a message to the current session (fire-and-forget) */
-function _persistMsg(role, content, metadata) {
-  const sid = sessionModule.getCurrentSessionId();
+async function _persistMsg(role, content, metadata) {
+  let sid = sessionModule.getCurrentSessionId();
+  if (!sid && sessionModule.hasPendingChat?.()) {
+    try {
+      await sessionModule.materializePendingSession?.();
+      sid = sessionModule.getCurrentSessionId();
+    } catch (_) {}
+  }
   if (!sid || !content) return;
   const payload = { role, content };
   if (metadata) payload.metadata = metadata;
@@ -300,6 +306,7 @@ function _persistMsg(role, content, metadata) {
 }
 
 function slashReply(text) {
+  _hideWelcomeScreen();
   const chatBox = document.getElementById('chat-history');
   const div = document.createElement('div');
   div.className = 'msg msg-ai';

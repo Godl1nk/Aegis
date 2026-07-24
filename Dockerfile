@@ -16,7 +16,8 @@ FROM python:3.14-slim
 # downloads, and serves from Docker installs.
 # git/cmake are required when Cookbook builds llama.cpp on first llama.cpp
 # launch inside Docker.
-# nodejs/npm provide npx for the optional built-in Browser MCP server.
+# nodejs/npm provide npx for the built-in Browser MCP server.
+# chromium provides the actual browser binary used by that MCP server.
 # gosu lets the entrypoint drop privileges cleanly so signals still reach
 # uvicorn directly (no extra shell layer like `su`/`sudo` would add).
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -26,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     nodejs \
     npm \
+    chromium \
     tmux \
     openssh-client \
     gosu \

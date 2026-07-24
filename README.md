@@ -10,7 +10,12 @@
 
 ![Aegis](docs/odysseus.jpg)
 
-A self-hosted AI workspace -- meant to be the self-hosted version of the UI experience you get from ChatGPT and Claude. But with more jank and fun. Running on your own hardware, with your own data -- local-first, privacy-first, and no trojan.
+<p align="center">
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="docs/setup.md">Setup Guide</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="ROADMAP.md">Roadmap</a>
+</p>
 
 <p align="center">
   <img src="docs/odysseus-browser.jpg" alt="Odysseus interface">
@@ -36,16 +41,7 @@ A full, hover-to-play tour lives on the landing page (`docs/index.html`).
 <details>
 <summary>Screenshots / clips</summary>
 
-### Chat & Agents
-![Chat & Agents](docs/chat.gif)
-### Deep Research
-![Deep Research](docs/research.gif)
-### Compare
-![Compare](docs/compare.gif)
-### Documents
-![Documents](docs/document.gif)
-### Notes & Tasks
-![Notes & Tasks](docs/notes.gif)
+---
 
 </details>
 
@@ -380,14 +376,8 @@ Common internal-only ports from the default docs/compose setup:
 | `8000-8020` | Common local model/provider APIs |
 
 ## Contributing
-Help is welcome. The best entry points are fresh-install testing, provider setup
-bugs, mobile/editor polish, docs, and small focused refactors. See
-[ROADMAP.md](ROADMAP.md) for the current help-wanted list.
 
-## Configuration
-Most setup is done inside the app with `/setup` or **Settings**. Use `.env`
-for deployment-level defaults and secrets you want present before first boot.
-Key settings:
+Help is welcome. The best entry points are fresh-install testing, provider setup bugs, mobile/editor polish, docs, and small focused refactors. See [CONTRIBUTING.md](CONTRIBUTING.md) and [ROADMAP.md](ROADMAP.md).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -611,17 +601,4 @@ All user data lives in `data/` (gitignored): `app.db` (sessions, messages, docum
 ## License
 AGPL-3.0-or-later -- see [LICENSE](LICENSE) and [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md).
 
-```
-                                  |
-                                 |||
-                                |||||
-                  |    |    |   |||||||
-                 )_)  )_)  )_)   ~|~
-                )___))___))___)\  |
-               )____)____)_____)\\|
-             _____|____|____|_____\\\__
-             \                       /
-       ~^~^~~^~^~~^~^~~^~^~~^~^~~^~^~~^~^~~^~^~
-               ~^~  all aboard!  ~^~
-       ~^~^~~^~^~~^~^~~^~^~~^~^~~^~^~~^~^~~^~^~
-```
+AGPL-3.0-or-later -- see [LICENSE](LICENSE) and [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md).

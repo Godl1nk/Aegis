@@ -3,6 +3,15 @@
 
 import Storage from './storage.js';
 
+function markComposerUserEdited() {
+  const msgInput = document.getElementById('message');
+  if (!msgInput || msgInput.dataset.startupPreserveBound === '1') return;
+  msgInput.dataset.startupPreserveBound = '1';
+  msgInput.addEventListener('input', () => {
+    window.__odysseusComposerUserEdited = !!msgInput.value;
+  });
+}
+
 function clearFreshComposerRestore() {
   const msgInput = document.getElementById('message');
   if (!msgInput) return;
@@ -11,14 +20,17 @@ function clearFreshComposerRestore() {
     || /^#open=notes&note=/.test(hash);
   const hasSessionTarget = !!((hash && !isEntityHash) || Storage.get('lastSessionId'));
   if (hasSessionTarget) return;
+  if (window.__odysseusComposerUserEdited || document.activeElement === msgInput) return;
   if (msgInput.value) {
     msgInput.value = '';
     msgInput.dispatchEvent(new Event('input', { bubbles: true }));
   }
 }
 
+markComposerUserEdited();
 clearFreshComposerRestore();
 window.addEventListener('pageshow', clearFreshComposerRestore);
+document.addEventListener('DOMContentLoaded', markComposerUserEdited, { once: true });
 
 // SECURITY: defense-in-depth state wipe on user switch. If the authenticated
 // user is different from the one whose state is cached in this browser,

@@ -249,43 +249,295 @@ class UploadHandler:
         
         return True
     
-    def cleanup_old_uploads(self):
-        """Remove uploaded files older than CLEANUP_DAYS days."""
+    @staticmethod
+    def _parse_upload_timestamp(value: Any) -> Optional[datetime]:
+        if not isinstance(value, str) or not value.strip():
+            return None
         try:
-            cutoff_date = datetime.now() - timedelta(days=self.cleanup_days)
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone().replace(tzinfo=None)
+            return parsed
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _upload_metadata_is_recent(cls, info: Dict[str, Any], cutoff_date: datetime) -> bool:
+        """Return True when upload metadata records activity inside retention."""
+        for field in ("last_accessed", "created_at", "uploaded_at"):
+            parsed = cls._parse_upload_timestamp(info.get(field))
+            if parsed is None:
+                continue
+            if parsed >= cutoff_date:
+                return True
+        return False
+
+    @classmethod
+    def _upload_index_keys_for_file(
+        cls,
+        upload_index: Dict[str, Any],
+        upload_id: str,
+        file_path: str,
+    ) -> list[str]:
+        """Find a coherent set of index rows for one physical upload.
+
+        Every related row must agree on ID, canonical path, owner, and a
+        non-empty checksum. Each row must also contain the complete lifecycle
+        timestamps written for new uploads. Ambiguous or incomplete index
+        state cannot authorize destructive cleanup.
+        """
+        target_path = os.path.normcase(os.path.realpath(file_path))
+        matches: list[str] = []
+        owners: set[str] = set()
+        checksums: set[str] = set()
+        for key, info in upload_index.items():
+            if not isinstance(info, dict):
+                continue
+            stored_path = info.get("path")
+            stored_real_path = (
+                os.path.normcase(os.path.realpath(stored_path))
+                if isinstance(stored_path, str) and stored_path
+                else None
+            )
+            same_id = info.get("id") == upload_id
+            same_path = stored_real_path == target_path
+            if not same_id and not same_path:
+                continue
+            if not same_id or not same_path:
+                logger.warning(
+                    "Skipping ambiguous cleanup candidate %s: related row has id=%r path=%r",
+                    file_path,
+                    info.get("id"),
+                    stored_path,
+                )
+                return []
+
+            owner = info.get("owner")
+            if not isinstance(owner, str) or not owner.strip():
+                logger.warning(
+                    "Skipping incomplete cleanup candidate %s: matching row has no owner",
+                    file_path,
+                )
+                return []
+
+            row_checksums = {
+                str(info.get(field)).strip().lower()
+                for field in ("hash", "checksum_sha256")
+                if info.get(field) is not None and str(info.get(field)).strip()
+            }
+            if not row_checksums:
+                logger.warning(
+                    "Skipping incomplete cleanup candidate %s: matching row has no checksum",
+                    file_path,
+                )
+                return []
+            if len(row_checksums) != 1:
+                logger.warning(
+                    "Skipping ambiguous cleanup candidate %s: matching row has conflicting checksums",
+                    file_path,
+                )
+                return []
+
+            lifecycle_fields = ("uploaded_at", "created_at", "last_accessed")
+            if any(
+                cls._parse_upload_timestamp(info.get(field)) is None
+                for field in lifecycle_fields
+            ):
+                logger.warning(
+                    "Skipping incomplete cleanup candidate %s: matching row lacks lifecycle timestamps",
+                    file_path,
+                )
+                return []
+
+            matches.append(key)
+            owners.add(owner)
+            checksums.update(row_checksums)
+
+        if len(owners) > 1 or len(checksums) > 1:
+            logger.warning(
+                "Skipping ambiguous cleanup candidate %s: matching rows disagree on owner or checksum",
+                file_path,
+            )
+            return []
+        return matches
+
+    def cleanup_old_uploads(
+        self,
+        referenced_upload_ids: Optional[set[str]] = None,
+        referenced_upload_hashes: Optional[set[str]] = None,
+    ):
+        """Remove expired uploads proven unreferenced by a complete snapshot.
+
+        ``None`` means reference discovery was not completed, so cleanup fails
+        closed and removes nothing. The admin route supplies both sets after
+        scanning persisted chats, documents, and gallery records.
+        """
+        if referenced_upload_ids is None or referenced_upload_hashes is None:
+            logger.warning("Upload cleanup skipped: persisted reference snapshot unavailable")
+            return 0
+
+        try:
+            cleanup_started_at = datetime.now()
+            cutoff_date = cleanup_started_at - timedelta(days=self.cleanup_days)
             cleaned_count = 0
-            
-            for root, dirs, files in os.walk(self.upload_dir):
-                if root == self.upload_dir:
-                    continue
-                    
-                path_parts = root.split(os.sep)
-                if len(path_parts) >= 4:
+
+            referenced_ids = {str(value) for value in referenced_upload_ids}
+            referenced_hashes = {str(value) for value in referenced_upload_hashes}
+            uploads_db_path = os.path.join(self.upload_dir, "uploads.json")
+
+            # Keep index mutation and file removal serialized with upload writes.
+            # Each row removal is atomically persisted before the bytes are
+            # deleted; if deletion fails, the previous index is restored.
+            with self._index_lock:
+                current_index = dict(self._load_upload_index(fail_on_error=True))
+
+                for root, dirs, files in os.walk(self.upload_dir, followlinks=False):
+                    is_junction = getattr(os.path, "isjunction", lambda _path: False)
+                    dirs[:] = [
+                        directory
+                        for directory in dirs
+                        if not os.path.islink(os.path.join(root, directory))
+                        and not is_junction(os.path.join(root, directory))
+                    ]
+                    if root == self.upload_dir:
+                        continue
+                    if not self._inside_upload_dir(root):
+                        dirs[:] = []
+                        continue
+
+                    path_parts = root.split(os.sep)
+                    if len(path_parts) < 4:
+                        continue
                     try:
                         dir_date = datetime(int(path_parts[-3]), int(path_parts[-2]), int(path_parts[-1]))
-                        if dir_date < cutoff_date:
-                            for file in files:
-                                file_path = os.path.join(root, file)
-                                try:
-                                    os.remove(file_path)
-                                    cleaned_count += 1
-                                    logger.info(f"Cleaned up old upload: {file_path}")
-                                except Exception as e:
-                                    logger.warning(f"Failed to remove {file_path}: {e}")
-                            
-                            try:
-                                os.rmdir(root)
-                                logger.info(f"Removed empty upload directory: {root}")
-                            except Exception as e:
-                                logger.warning(f"Failed to remove directory {root}: {e}")
                     except (ValueError, IndexError):
                         continue
-            
+                    if dir_date >= cutoff_date:
+                        continue
+
+                    for file in files:
+                        # Reference discovery only understands canonical upload
+                        # IDs; unknown files fail closed instead of being swept.
+                        if not self.validate_upload_id(file):
+                            continue
+
+                        file_path = os.path.join(root, file)
+                        if not self._inside_upload_dir(file_path):
+                            logger.warning(
+                                "Skipping cleanup candidate outside upload directory: %s",
+                                file_path,
+                            )
+                            continue
+                        matching_keys = self._upload_index_keys_for_file(
+                            current_index,
+                            file,
+                            file_path,
+                        )
+                        matching_rows = [
+                            current_index[key]
+                            for key in matching_keys
+                            if isinstance(current_index.get(key), dict)
+                        ]
+
+                        # Files without authoritative live index rows are not
+                        # eligible for destructive cleanup. Reference hashes,
+                        # recency, and ownership cannot be proven for them.
+                        if not matching_rows:
+                            continue
+
+                        is_referenced = file in referenced_ids or any(
+                            str(info.get("id") or "") in referenced_ids
+                            or str(info.get("hash") or "") in referenced_hashes
+                            or str(info.get("checksum_sha256") or "") in referenced_hashes
+                            for info in matching_rows
+                        )
+                        metadata_is_recent = any(
+                            self._upload_metadata_is_recent(info, cutoff_date)
+                            for info in matching_rows
+                        )
+                        if is_referenced or metadata_is_recent:
+                            continue
+
+                        reduced_index = {
+                            key: value
+                            for key, value in current_index.items()
+                            if key not in matching_keys
+                        }
+                        if matching_keys:
+                            try:
+                                self._atomic_write_json(
+                                    uploads_db_path,
+                                    reduced_index,
+                                    sync_backup=True,
+                                )
+                            except Exception as e:
+                                try:
+                                    self._atomic_write_json(
+                                        uploads_db_path,
+                                        current_index,
+                                        sync_backup=True,
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "Failed to restore upload indexes after reconciliation failed for %s",
+                                        file_path,
+                                    )
+                                    raise UploadCleanupSafetyError(
+                                        "upload index rollback failed before file removal"
+                                    ) from e
+                                logger.warning(
+                                    "Failed to reconcile upload index before removing %s: %s",
+                                    file_path,
+                                    e,
+                                )
+                                continue
+
+                        try:
+                            os.remove(file_path)
+                        except FileNotFoundError:
+                            # The bytes are already absent. Keep the reduced
+                            # lifecycle index instead of recreating a stale row.
+                            current_index = reduced_index
+                            logger.info(
+                                "Reconciled missing expired upload from index: %s",
+                                file_path,
+                            )
+                            continue
+                        except Exception as e:
+                            if matching_keys:
+                                try:
+                                    self._atomic_write_json(
+                                        uploads_db_path,
+                                        current_index,
+                                        sync_backup=True,
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "Failed to restore upload index after removal failed for %s",
+                                        file_path,
+                                    )
+                                    raise UploadCleanupSafetyError(
+                                        "upload index rollback failed after file removal was refused"
+                                    ) from e
+                            logger.warning(f"Failed to remove {file_path}: {e}")
+                            continue
+
+                        current_index = reduced_index
+                        cleaned_count += 1
+                        logger.info(f"Cleaned up old unreferenced upload: {file_path}")
+
+                    try:
+                        if not os.listdir(root):
+                            os.rmdir(root)
+                            logger.info(f"Removed empty upload directory: {root}")
+                    except Exception as e:
+                        logger.warning(f"Failed to inspect/remove directory {root}: {e}")
+
             logger.info(f"Upload cleanup completed: {cleaned_count} files removed")
             return cleaned_count
         except Exception as e:
             logger.error(f"Upload cleanup failed: {e}")
-            return 0
+            raise UploadCleanupSafetyError("upload cleanup safety checks failed") from e
     
     def validate_upload_id(self, upload_id: str) -> bool:
         """Validate that the upload ID matches the expected pattern."""
@@ -746,6 +998,7 @@ class UploadHandler:
             raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
         
         # Create file metadata
+        created_at = datetime.now().isoformat()
         file_metadata = {
             "id": file_id,
             "path": file_path,
@@ -753,9 +1006,11 @@ class UploadHandler:
             "size": file_size,
             "name": safe_filename,
             "hash": file_hash,
+            "checksum_sha256": file_hash,
             "original_name": original_filename,
-            "uploaded_at": datetime.now().isoformat(),
-            "last_accessed": datetime.now().isoformat(),
+            "uploaded_at": created_at,
+            "created_at": created_at,
+            "last_accessed": created_at,
             "client_ip": client_ip,
             "owner": owner,
         }

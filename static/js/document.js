@@ -129,6 +129,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   let activeDocId = null;           // currently visible doc
   let _lastSessionId = '';          // session context for "+" button
   const docs = new Map();           // docId -> { id, title, language, content, version, sessionId }
+  let _emailSendInFlight = false;
 
   const _docOpenKey = (sessionId) => 'odysseus-doc-open-' + sessionId;
   const _docMinimizedKey = (sessionId) => 'odysseus-doc-minimized-' + sessionId;
@@ -164,6 +165,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       getDocs: () => docs,
       isOpen: () => isOpen,
       createDocument,
+      newDocument,
       loadDocument,
       switchToDoc,
       openPanel,
@@ -2265,6 +2267,18 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
   // ── Email document type helpers ──
 
+  function _unfoldEmailHeaderLines(header) {
+    const lines = [];
+    for (const rawLine of String(header || '').replace(/\r\n/g, '\n').split('\n')) {
+      if (/^[ \t]/.test(rawLine) && lines.length) {
+        lines[lines.length - 1] += ' ' + rawLine.trim();
+      } else {
+        lines.push(rawLine);
+      }
+    }
+    return lines;
+  }
+
   function _parseEmailHeader(content) {
     const empty = { to: '', cc: '', bcc: '', subject: '', inReplyTo: '', references: '', sourceUid: '', sourceFolder: '', forwardAttachments: false, attachments: [], body: content || '' };
     if (!content) return empty;
@@ -2777,8 +2791,21 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     target.focus();
     if (target.isContentEditable) {
       const range = document.createRange();
-      range.selectNodeContents(target);
-      range.collapse(false);
+      const quote = target.querySelector('.email-quoted-history');
+      if (quote) {
+        let slot = quote.previousElementSibling;
+        if (!slot || slot.classList.contains('email-quoted-history')) {
+          slot = document.createElement('div');
+          slot.className = 'email-reply-edit-slot';
+          slot.innerHTML = '<br>';
+          target.insertBefore(slot, quote);
+        }
+        range.selectNodeContents(slot);
+        range.collapse(false);
+      } else {
+        range.selectNodeContents(target);
+        range.collapse(false);
+      }
       const sel = window.getSelection();
       if (sel) {
         sel.removeAllRanges();
@@ -3005,7 +3032,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       setTimeout(() => {
         try {
           const _isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints || 0) > 0;
-          if (!_isTouch) _rich.focus();
+          if (!_isTouch) _focusEmailBodyEnd();
           _rich.scrollTop = 0;
         } catch (_) {}
       }, 50);
@@ -3831,8 +3858,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       const proceed = await _confirmMissingAttachment();
       if (!proceed) return;
     }
-    const btn = document.getElementById('doc-email-send-btn');
-    const _sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+    const btn = Array.from(document.querySelectorAll('#doc-email-send-btn')).find((candidate) => candidate.offsetParent !== null) || document.getElementById('doc-email-send-btn');
     let sendSpinner = null;
     let origBtnHtml = '';
     let detachedEmailDoc = null;
@@ -3894,7 +3920,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
             leadingIcon: 'check',
             action: 'View Message',
             onAction: () => {
-              import('./emailLibrary.js').then(mod => {
+              import('./emailLibrary.js?v=20260722emailfastindex1').then(mod => {
                 const open = mod.openEmailLibrary || (mod.default && mod.default.openEmailLibrary);
                 if (open) open({
                   account_id: data.account_id || activeAccountId || null,
@@ -3960,6 +3986,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       detachedEmailDoc = null;
       if (uiModule) uiModule.showError(e?.message ? `Failed to send email: ${e.message}` : 'Failed to send email');
     } finally {
+      _emailSendInFlight = false;
       if (sendSpinner) sendSpinner.destroy();
       if (btn) {
         btn.disabled = false;
@@ -4592,7 +4619,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const isEmail = doc.language === 'email';
     if (isEmail) {
       _setMarkdownPreviewActive(false, { remember: false });
-      _showEmailFields(doc);
+      const forceHeaderFields = !!doc._skipLocalDraftOnce;
+      const applyLocalDraft = forceHeaderFields ? false : true;
+      doc._skipLocalDraftOnce = false;
+      _showEmailFields(doc, { applyLocalDraft, forceHeaderFields });
     } else {
       _hideEmailFields();
       const wantsMarkdownPreview = (doc.language || 'markdown') === 'markdown' && doc._markdownPreviewActive === true;
@@ -4988,8 +5018,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         <button id="doc-email-discard-btn" class="email-discard-btn" title="Close email" style="display:inline-flex;align-items:center;gap:5px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span>Close</span></button>
         <span style="flex:1"></span>
         <div class="email-send-split">
-          <button id="doc-email-send-btn" class="email-send-btn email-send-main" title="Send email (Ctrl+Enter)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>Send</button>
-          <button id="doc-email-send-caret" class="email-send-btn email-send-caret" title="More send options" aria-haspopup="true" aria-expanded="false"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg></button>
+          <button type="button" id="doc-email-send-btn" class="email-send-btn email-send-main" title="Send email (Ctrl+Enter)" onpointerdown="window.odysseusEmailSendIntent&&window.odysseusEmailSendIntent(event)" onmousedown="window.odysseusEmailSendIntent&&window.odysseusEmailSendIntent(event)" onclick="window.odysseusEmailSendIntent&&window.odysseusEmailSendIntent(event)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>Send</button>
+          <button type="button" id="doc-email-send-caret" class="email-send-btn email-send-caret" title="More send options" aria-haspopup="true" aria-expanded="false" onpointerdown="window.odysseusEmailCaretIntent&&window.odysseusEmailCaretIntent(event)" onmousedown="window.odysseusEmailCaretIntent&&window.odysseusEmailCaretIntent(event)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg></button>
           <div id="doc-email-more-menu" class="email-more-menu" style="display:none">
             <div class="dropdown-item-compact" id="doc-email-draft-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg></span>Save Draft</div>
             <div class="dropdown-item-compact" id="doc-email-schedule-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>Schedule Send...</div>
@@ -5425,13 +5455,80 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       ));
     }
 
-    document.getElementById('doc-email-send-btn')?.addEventListener('click', () => {
-      // Pressing Send must never leave the "more options" menu showing.
+    const _eventInsideElement = (e, el) => {
+      if (!e || !el || typeof e.clientX !== 'number' || typeof e.clientY !== 'number') return false;
+      const rect = el.getBoundingClientRect();
+      return e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
+    };
+
+    const handleSendIntent = (e) => {
+      if (e && e.__odysseusEmailSendHandled) return;
+      const rawTarget = e && e.target;
+      const target = rawTarget && rawTarget.nodeType === Node.TEXT_NODE ? rawTarget.parentElement : rawTarget;
+      const sendButtons = Array.from(document.querySelectorAll('#doc-email-send-btn'));
+      const targetBtn = target && target.closest ? target.closest('#doc-email-send-btn') : null;
+      const rectBtn = sendButtons.find((candidate) => _eventInsideElement(e, candidate));
+      const btn = targetBtn || rectBtn || null;
+      if (!btn || btn.disabled) return;
+      if (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.__odysseusEmailSendHandled = true;
+      }
       const _m = document.getElementById('doc-email-more-menu');
       if (_m) _m.style.display = 'none';
       document.getElementById('doc-email-send-caret')?.setAttribute('aria-expanded', 'false');
       _sendEmail();
-    });
+    };
+    window.odysseusEmailSendIntent = handleSendIntent;
+    if (!window._emailSendDelegatedBoundV3) {
+      window._emailSendDelegatedBoundV3 = true;
+      ['pointerdown', 'mousedown', 'pointerup', 'click'].forEach((type) => {
+        window.addEventListener(type, handleSendIntent, true);
+        document.addEventListener(type, handleSendIntent, true);
+      });
+    }
+
+    let lastCaretToggleAt = 0;
+    const toggleSendMenu = (caret) => {
+      const menu = document.getElementById('doc-email-more-menu');
+      if (!menu) return;
+      const opening = menu.style.display === 'none';
+      menu.style.display = opening ? '' : 'none';
+      if (caret) caret.setAttribute('aria-expanded', String(opening));
+    };
+    const handleCaretIntent = (e) => {
+      if (e && e.__odysseusEmailCaretHandled) return;
+      const now = Date.now();
+      if (e && e.type === 'click' && now - lastCaretToggleAt < 350) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.__odysseusEmailCaretHandled = true;
+        return;
+      }
+      const rawTarget = e && e.target;
+      const target = rawTarget && rawTarget.nodeType === Node.TEXT_NODE ? rawTarget.parentElement : rawTarget;
+      const carets = Array.from(document.querySelectorAll('#doc-email-send-caret'));
+      const targetCaret = target && target.closest ? target.closest('#doc-email-send-caret') : null;
+      const rectCaret = carets.find((candidate) => _eventInsideElement(e, candidate));
+      const caret = targetCaret || rectCaret || null;
+      if (!caret) return;
+      if (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.__odysseusEmailCaretHandled = true;
+      }
+      lastCaretToggleAt = now;
+      toggleSendMenu(caret);
+    };
+    window.odysseusEmailCaretIntent = handleCaretIntent;
+    if (!window._emailCaretDelegatedBoundV1) {
+      window._emailCaretDelegatedBoundV1 = true;
+      ['pointerdown', 'mousedown', 'click'].forEach((type) => {
+        window.addEventListener(type, handleCaretIntent, true);
+        document.addEventListener(type, handleCaretIntent, true);
+      });
+    }
 
     // Ctrl+Enter / Cmd+Enter sends the email when an email doc is active
     // Bind once at module level via a guard to avoid duplicate listeners on re-open
@@ -5528,6 +5625,42 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       menu.style.display = opening ? '' : 'none';
       if (caret) caret.setAttribute('aria-expanded', String(opening));
     });
+
+    const collapseBtn = document.getElementById('doc-email-collapse-btn');
+    if (collapseBtn && !collapseBtn._emailCollapseWired) {
+      collapseBtn._emailCollapseWired = true;
+      collapseBtn.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const focusState = _captureEmailBodyFocusState();
+        const header = document.getElementById('doc-email-header');
+        const nextCollapsed = !header?.classList.contains('doc-email-header-collapsed');
+        _setEmailHeaderCollapsed(nextCollapsed);
+        if (!nextCollapsed) _restoreEmailBodyFocusState(focusState);
+      });
+      collapseBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      });
+    }
+    ['doc-email-to', 'doc-email-cc', 'doc-email-bcc', 'doc-email-subject'].forEach(id => {
+      document.getElementById(id)?.addEventListener('input', () => {
+        _syncEmailHeaderSummary();
+        saveCurrentToMap();
+        _persistEmailLocalDraftSoon();
+        clearTimeout(_autoSaveDebounce);
+        _autoSaveDebounce = setTimeout(() => { saveDocument({ silent: true }); }, 800);
+      });
+      document.getElementById(id)?.addEventListener('focus', () => _setEmailHeaderCollapsed(false, { manual: false }));
+    });
+    document.getElementById('doc-email-richbody')?.addEventListener('focus', _maybeAutoCollapseEmailHeader);
+    if (window.visualViewport && !window._docEmailViewportCollapseBound) {
+      window._docEmailViewportCollapseBound = true;
+      window.visualViewport.addEventListener('resize', _maybeAutoCollapseEmailHeader);
+    }
+
+    // Split-button caret toggles the send-options menu.
+    document.getElementById('doc-email-send-caret')?.addEventListener('click', handleCaretIntent);
     document.addEventListener('click', (e) => {
       const menu = document.getElementById('doc-email-more-menu');
       // Keep the menu open ONLY while interacting with the caret itself or the
@@ -7104,6 +7237,13 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   export function injectFreshDoc(doc) {
     if (!doc || !doc.id) return;
     const sessionId = doc.session_id || _lastSessionId || null;
+    if (doc.language === 'email') {
+      doc._skipLocalDraftOnce = true;
+      try {
+        const fields = _parseEmailHeader(doc.current_content || doc.content || '');
+        _clearEmailLocalDraft(fields.sourceUid, fields.sourceFolder, fields.inReplyTo);
+      } catch (_) {}
+    }
     addDocToTabs(doc, sessionId);
     // Use _ensureDocPaneMounted (not `if (!isOpen) openPanel()`): when a draft
     // is composed from the email modal, `isOpen` can be stale-true while the
@@ -7111,10 +7251,128 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // mounts into a wrong/half-built pane (rendered as a narrow sidebar on
     // mobile instead of its own full-screen window). This remounts it cleanly.
     _ensureDocPaneMounted();
-    // Defer to next frame so the panel DOM exists before switchToDoc populates
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      switchToDoc(doc.id);
-    }));
+    // Defer to the next frame so the panel DOM exists before switchToDoc
+    // populates it. Do not call switchToDoc synchronously here: it saves the
+    // previously active doc and can re-enter the email draft path while a reply
+    // document is still being injected.
+    requestAnimationFrame(() => {
+      if (docs.has(doc.id)) switchToDoc(doc.id);
+    });
+  }
+
+  export async function replaceEmailReplyBody(docId, replyText, { force = false } = {}) {
+    const doc = docs.get(docId);
+    if (!doc) return;
+    const fields = _parseEmailHeader(doc.content || '');
+    const oldSplit = _splitEmailReplyQuote(fields.body || '');
+    const quote = oldSplit.quote;
+    const ownText = _emailReplyOwnText(fields.body || '');
+    if (!force && ownText && !/^(\[AI reply draft will appear here\]|Drafting AI reply)/i.test(ownText)) {
+      if (uiModule) uiModule.showToast('AI reply ready, but draft was edited');
+      return;
+    }
+    const body = String(replyText || '').trim() + (quote ? `\n\n${quote}` : '');
+    doc.content = _buildEmailContent(
+      fields.to,
+      fields.subject,
+      fields.inReplyTo,
+      fields.references,
+      body,
+      fields.sourceUid,
+      fields.sourceFolder,
+      fields.cc,
+      fields.bcc,
+    );
+    if (activeDocId === docId) {
+      const textarea = document.getElementById('doc-editor-textarea');
+      if (textarea) await _streamEmailBodyText(textarea, body);
+    }
+    clearTimeout(_autoSaveDebounce);
+    _autoSaveDebounce = setTimeout(() => { saveDocument({ silent: true }); }, 800);
+  }
+
+  function _buildEmailContentFromFields(fields, body) {
+    const f = fields || {};
+    let header = `To: ${f.to || ''}`;
+    if (f.cc) header += `\nCc: ${f.cc}`;
+    if (f.bcc) header += `\nBcc: ${f.bcc}`;
+    header += `\nSubject: ${f.subject || ''}`;
+    if (f.inReplyTo) header += `\nIn-Reply-To: ${f.inReplyTo}`;
+    if (f.references) header += `\nReferences: ${f.references}`;
+    if (f.sourceUid) header += `\nX-Source-UID: ${f.sourceUid}`;
+    if (f.sourceFolder) header += `\nX-Source-Folder: ${f.sourceFolder}`;
+    if (f.forwardAttachments) header += `\nX-Forward-Attachments: 1`;
+    if (Array.isArray(f.attachments) && f.attachments.length) {
+      const attStr = f.attachments
+        .map(a => `${a.index}:${a.filename}:${a.size}`)
+        .join('|');
+      header += `\nX-Attachments: ${attStr}`;
+    }
+    return header + '\n---\n' + (body || '');
+  }
+
+  export async function ensureEmailDraftEnvelope(docId, freshContent) {
+    const doc = docs.get(docId);
+    if (!doc || doc.language !== 'email') return false;
+    const current = _parseEmailHeader(doc.content || '');
+    const fresh = _parseEmailHeader(freshContent || '');
+    if (!fresh.to && !fresh.subject && !fresh.sourceUid) return false;
+
+    const needsEnvelope = (
+      (!current.to && !!fresh.to) ||
+      (!current.subject && !!fresh.subject) ||
+      (!current.inReplyTo && !!fresh.inReplyTo) ||
+      (!current.references && !!fresh.references) ||
+      (!current.sourceUid && !!fresh.sourceUid) ||
+      (!current.sourceFolder && !!fresh.sourceFolder)
+    );
+
+    const currentSplit = _splitEmailReplyQuote(current.body || '');
+    const freshSplit = _splitEmailReplyQuote(fresh.body || '');
+    const currentOwnText = String(currentSplit.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const freshOwnText = String(freshSplit.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const currentBodyText = String(current.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const freshBodyText = String(fresh.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const needsBodyRepair = (
+      !!freshBodyText &&
+      (
+        !currentBodyText ||
+        (!currentOwnText && !!freshOwnText) ||
+        (!currentSplit.quote && !!freshSplit.quote)
+      )
+    );
+    if (!needsEnvelope && !needsBodyRepair) return false;
+
+    let body = current.body || '';
+    if (needsBodyRepair && (!currentBodyText || (!currentOwnText && !!freshOwnText))) {
+      body = fresh.body || '';
+    } else if (!String(body).trim()) {
+      body = fresh.body || '';
+    } else if (currentSplit.body && freshSplit.quote && !currentSplit.quote) {
+      body = `${currentSplit.body}\n\n${freshSplit.quote}`;
+    }
+
+    const merged = {
+      ...fresh,
+      to: current.to || fresh.to || '',
+      cc: current.cc || fresh.cc || '',
+      bcc: current.bcc || fresh.bcc || '',
+      subject: current.subject || fresh.subject || '',
+      inReplyTo: current.inReplyTo || fresh.inReplyTo || '',
+      references: current.references || fresh.references || '',
+      sourceUid: current.sourceUid || fresh.sourceUid || '',
+      sourceFolder: current.sourceFolder || fresh.sourceFolder || '',
+      forwardAttachments: current.forwardAttachments || fresh.forwardAttachments || false,
+      attachments: (current.attachments && current.attachments.length) ? current.attachments : (fresh.attachments || []),
+    };
+
+    doc.content = _buildEmailContentFromFields(merged, body);
+    if (activeDocId === docId) {
+      _showEmailFields(doc, { applyLocalDraft: false });
+    }
+    clearTimeout(_autoSaveDebounce);
+    _autoSaveDebounce = setTimeout(() => { saveDocument({ silent: true }); }, 800);
+    return true;
   }
 
   export async function replaceEmailReplyBody(docId, replyText, { force = false } = {}) {
@@ -7282,31 +7540,22 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       _syncDocIndicator();
       // Switch to the most recently active one (or first)
       const target = activeDocs[0];
-      if (restoreMode && shouldRestoreMinimized && !shouldRestoreOpen) {
-        activeDocId = null;
+      if (restoreMode && !shouldRestoreOpen) {
+        // Coming back to a chat with documents should advertise the doc without
+        // stealing half the screen. Default to a docked chip; only reopen the
+        // full editor when this session explicitly persisted an open state.
+        activeDocId = target.id;
         _minimizedDocId = target.id;
         _markDocVisibleState(sessionId, 'minimized');
         _ensureDocChipRegistered();
-        Modals.minimize('doc-panel');
+        if (isOpen) {
+          try { switchToDoc(target.id); } catch (e) { console.error('Minimize restored doc failed:', e); }
+          closePanel('down');
+        } else {
+          Modals.minimize('doc-panel');
+        }
         return;
       }
-      // Removed: the old "if restoreMode && !shouldRestoreOpen → stay
-      // closed" branch. Users expect that entering a chat with an
-      // attached document opens the panel automatically, not just shows
-      // an indicator. The minimised branch above still respects an
-      // explicit user choice to dock the panel; everything else falls
-      // through to the "open panel" path below.
-      if (false) {
-        activeDocId = null;
-        _minimizedDocId = null;
-        if (Modals.isRegistered('doc-panel')) Modals.unregister('doc-panel');
-        return;
-      }
-      // Always open when there are docs — the minimised branch above
-      // already returned for users who explicitly docked the panel.
-      // The previous `if (!restoreMode || shouldRestoreOpen)` gate left
-      // the panel closed on first entry to a chat with docs, which
-      // hides the doc unless the user manually opens the panel.
       _markDocVisibleState(sessionId, 'open');
       if (!isOpen) openPanel();
       switchToDoc(target.id);
@@ -7326,11 +7575,12 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       id: doc.id,
       title: doc.title || '',
       language: doc.language || '',
-      content: doc.current_content || '',
+      content: doc.current_content || doc.content || '',
       version: doc.version_count || 1,
       sessionId: sessionId || doc.session_id,
       userSetLanguage: !!doc.language,
       _composeAtts: existing?._composeAtts,
+      _skipLocalDraftOnce: !!doc._skipLocalDraftOnce,
       // Provenance for the "Send signed reply" flow
       sourceEmailUid:       doc.source_email_uid || null,
       sourceEmailFolder:    doc.source_email_folder || null,

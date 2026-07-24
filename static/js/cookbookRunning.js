@@ -20,6 +20,18 @@ function _statusLabel(status, type) {
   return status || '';
 }
 
+function _downloadBadgeText(progress) {
+  const raw = String(progress || '').trim();
+  if (!raw) return 'downloading';
+  const pct = raw.match(/(\d+)%/);
+  if (pct) return pct[0];
+  if (/^(?:Downloading|Fetching|Resuming)\s+'[^']+'\s+to\s+'[^']+/i.test(raw)
+    || /^Downloading\s*\(incomplete\b/i.test(raw)) {
+    return 'downloading';
+  }
+  return raw;
+}
+
 // Single source of truth for what a task's status badge shows + its style class.
 // Crucially, a serve task that's still coming up shows its live phase
 // ("loading 45%", "warming up", …) rather than the generic "running" — they're
@@ -1274,7 +1286,7 @@ function _autoSaveWorkingConfig(task) {
   if (task._autoSaved) return;
   const cmd = task.payload._cmd;
   // Diffusion/image servers aren't vLLM presets — skip them.
-  if (cmd.includes('diffusion_server')) { task._autoSaved = true; return; }
+  if (cmd.includes('diffusion_server') || cmd.includes('mlx_image_server')) { task._autoSaved = true; return; }
   const model = task.payload.repo_id || task.name;
   const presets = _loadPresets();
   const existing = presets.find(p => p.cmd === cmd);
@@ -1760,7 +1772,7 @@ function _parseServeCmdToFields(cmd) {
       : cmd.includes('ollama') ? 'ollama' : 'vllm',
     port: ex(/--port\s+(\d+)/) || '8000',
     tp: ex(/--tensor-parallel-size\s+(\d+)/) || '1',
-    ctx: ex(/--max-model-len\s+(\d+)/) || ex(/--n_ctx\s+(\d+)/) || ex(/-c\s+(\d+)/) || '8192',
+    ctx: ex(/--max-model-len\s+(\d+)/) || ex(/--context-length\s+(\d+)/) || ex(/--max-tokens\s+(\d+)/) || ex(/--n_ctx\s+(\d+)/) || ex(/-c\s+(\d+)/) || '8192',
     gpu_mem: ex(/--gpu-memory-utilization\s+([\d.]+)/) || '0.90',
     swap: ex(/--swap-space\s+(\d+)/) || '',
     dtype: ex(/--dtype\s+(\w+)/) || 'auto',
@@ -1917,7 +1929,7 @@ export async function _launchServeTask(shortName, repo, cmd, fields, hostOverrid
   // servers on one port, so re-serving (or retrying) should stop & remove the
   // old one instead of leaving a dead duplicate behind. (The retry buttons
   // already removed their own task, so this is a no-op for them.)
-  try {
+  if (!_launchAnyway) try {
     const _pm = cmd.match(/--port[=\s]+(\d+)/) || cmd.match(/(?:^|\s)-p[=\s]+(\d+)/);
     const _newPort = _pm ? _pm[1] : '';
     if (_newPort) {
@@ -2572,7 +2584,8 @@ export function _renderRunningTab() {
       el.addEventListener('touchmove', _lpMove, { passive: true });
       el.addEventListener('touchend', _lpCancel, { passive: true });
       el.addEventListener('touchcancel', _lpCancel, { passive: true });
-      menuBtn.addEventListener('click', (e) => {
+      let _lastTouchMenuOpenAt = 0;
+      const _openTaskMenu = (e) => {
         e.stopPropagation();
         const existing = document.querySelector('.cookbook-task-dropdown');
         if (existing && existing._anchor === menuBtn) {
@@ -2764,6 +2777,7 @@ export function _renderRunningTab() {
 
         const rect = menuBtn.getBoundingClientRect();
         dropdown.style.position = 'fixed';
+        dropdown.style.zIndex = String(topPortalZ());
         dropdown.style.top = rect.bottom + 2 + 'px';
         dropdown.style.right = (window.innerWidth - rect.right) + 'px';
         document.body.appendChild(dropdown);
@@ -3619,7 +3633,7 @@ async function _reconnectTask(el, task) {
                 if (_ex && _ex.id && !(_ex.models || []).length) _probeEndpointUntilOnline(_ex.id, host, port);
                 return null;
               }
-              const _isDiffusion = task.payload?._cmd?.includes('diffusion_server');
+              const _isDiffusion = _isImageServeTask(task);
               const fd = new FormData();
               fd.append('base_url', baseUrl);
               fd.append('name', task.name);
@@ -4236,7 +4250,6 @@ async function _pollBackgroundStatus() {
     for (const t of readyServes) {
       const localTasks = _loadTasks();
       const localTask = localTasks.find(lt => lt.sessionId === t.session_id);
-      if (localTask && localTask._endpointAdded) continue;
 
       let host = _connectHostFromRemote(localTask?.remoteHost || t.remote);
       const portMatch = localTask?.payload?._cmd?.match(/--port\s+(\d+)/)
@@ -4251,7 +4264,7 @@ async function _pollBackgroundStatus() {
       }
       const _isDiffusion = localTask?.payload?._cmd?.includes('diffusion_server');
 
-      _updateTask(t.session_id, { _serveReady: true, _endpointAdded: true });
+      _updateTask(t.session_id, { _serveReady: true });
       if (localTask) _autoSaveWorkingConfig(localTask);   // remember working settings (modal may be closed)
 
       // Auto-detect function-calling support from the serve cmd.
@@ -4291,6 +4304,7 @@ async function _pollBackgroundStatus() {
         })
         .then(async (res) => {
           if (res && res.ok) {
+            _updateTask(t.session_id, { _endpointAdded: true });
             uiModule.showToast(`Model endpoint added: ${host}:${port}`);
             const data = await res.json().catch(() => ({}));
             // A just-started server often can't answer the 1s add-time
@@ -4328,12 +4342,8 @@ async function _pollBackgroundStatus() {
             statusEl.textContent = 'cooking';
           }
         } else {
-          var _dlProgress = '';
-          if (t.progress) {
-            var _pctMatch = t.progress.match(/(\d+)%/);
-            _dlProgress = _pctMatch ? ` ${_pctMatch[0]}` : '';
-          }
-          statusEl.textContent = `downloading${_dlProgress}`;
+          const _dlText = _downloadBadgeText(t.progress);
+          statusEl.textContent = _dlText === 'downloading' ? 'downloading' : `downloading ${_dlText}`;
         }
         statusEl.style.display = '';
       } else if (errorTasks.length > 0) {

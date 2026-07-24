@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -17,6 +18,7 @@ from src.context_compactor import maybe_compact, trim_for_context
 from src.model_context import estimate_tokens
 from src.auth_helpers import effective_user
 from src.prompt_security import untrusted_context_message
+from src.attachment_refs import attachment_ref
 from routes.prefs_routes import _load_for_user as load_prefs_for_user
 
 from fastapi import HTTPException
@@ -430,12 +432,13 @@ def build_uploaded_file_manifest(att_ids: list, upload_handler, owner: Optional[
 
 def add_user_message(sess, chat_handler, preprocessed: PreprocessedMessage, incognito: bool = False):
     """Add user message to session history and update session name.
-    In incognito mode, still add to in-memory history (for conversation context)
-    but skip session name update (which would persist)."""
+    Incognito messages must not mutate persistent session history, even in
+    memory, because a later normal turn can persist the same session object."""
+    if incognito:
+        return
     user_meta = {"attachments": preprocessed.attachment_meta} if preprocessed.attachment_meta else None
     sess.add_message(ChatMessage("user", preprocessed.user_content, metadata=user_meta))
-    if not incognito:
-        chat_handler.update_session_name_if_needed(sess, preprocessed.text_for_context)
+    chat_handler.update_session_name_if_needed(sess, preprocessed.text_for_context)
 
 
 def fire_message_event(request, webhook_manager, session_id: str, sess, message: str, compare_mode: bool = False):
@@ -664,8 +667,14 @@ async def build_chat_context(
         allow_tool_preprocessing=allow_tool_preprocessing,
     )
 
-    # Add user message to history
-    add_user_message(sess, chat_handler, preprocessed, incognito=incognito)
+    # Add user message to history. Nobody/incognito uses a request-local
+    # transcript store instead of session history so stale saved chats cannot
+    # bleed into context and the turn is not persisted.
+    if incognito:
+        user_meta = {"attachments": preprocessed.attachment_meta} if preprocessed.attachment_meta else None
+        _append_incognito_message(session_id, "user", preprocessed.user_content, user_meta)
+    else:
+        add_user_message(sess, chat_handler, preprocessed, incognito=False)
 
     # Fire events
     if not incognito:
@@ -760,8 +769,30 @@ async def build_chat_context(
     if norm:
         sess.model = norm
 
-    # Build messages
-    messages = preface + sess.get_context_messages()
+    # Build messages. In Nobody/incognito mode, never read saved session
+    # history: the session id may be a temporary wrapper or, in buggy clients, a
+    # stale normal session id. Only the ephemeral incognito transcript is safe.
+    messages = preface + (_incognito_messages(session_id) if incognito else sess.get_context_messages())
+
+    # Current date/time — injected as a standalone *user*-role context message
+    # placed immediately before the latest user turn, NOT folded into the
+    # system prompt. Its text changes every minute, and local OpenAI-compatible
+    # backends (llama.cpp / LM Studio) key their KV-cache prefix off the
+    # system message byte-for-byte; mixing ever-changing timestamp text into
+    # it would invalidate the cached prefix on every request (issue #2927).
+    # Placing it at the tail also keeps it out of the stable
+    # preface+history prefix, so that prefix stays byte-identical turn over
+    # turn (modulo the genuinely new history entries) and the cache survives.
+    if not agent_mode:
+        try:
+            from src.user_time import current_datetime_context_message
+            _dt_msg = current_datetime_context_message()
+            if messages and messages[-1].get("role") == "user":
+                messages.insert(len(messages) - 1, _dt_msg)
+            else:
+                messages.append(_dt_msg)
+        except Exception:
+            logger.debug("Failed to add current date/time context", exc_info=True)
 
     # Current date/time — injected as a standalone *user*-role context message
     # placed immediately before the latest user turn, NOT folded into the
@@ -1027,7 +1058,12 @@ def save_assistant_response(
     tool_events: list = None,
     incognito: bool = False,
 ):
-    """Add assistant response to session history. In incognito mode, keeps in-memory context but skips DB persistence."""
+    """Add assistant response to session history.
+
+    Incognito responses are intentionally not added to the session object. The
+    session may later be saved by a normal turn, so "in-memory only" is not
+    private enough.
+    """
     md = dict(last_metrics) if last_metrics else {}
     def _model_value(value) -> str:
         if value is None:
@@ -1067,19 +1103,18 @@ def save_assistant_response(
         _content = _think_info["reply"]
     else:
         _content = full_response
+    if incognito:
+        _append_incognito_message(session_id, "assistant", _content, md)
+        return None
     sess.add_message(ChatMessage("assistant", _content, metadata=md))
 
-    if not incognito:
-        from core.database import update_session_last_accessed
-        update_session_last_accessed(session_id)
-        session_manager.save_sessions()
+    from core.database import update_session_last_accessed
+    update_session_last_accessed(session_id)
+    session_manager.save_sessions()
 
     # Return the persisted message's DB id so the stream can wire it onto the
     # freshly-rendered bubble — lets the user edit/delete a just-streamed reply
-    # without reloading. Incognito returns None: those messages are ephemeral,
-    # so we don't hand out an edit/delete handle for them.
-    if incognito:
-        return None
+    # without reloading.
     try:
         _last = sess.history[-1]
         _meta = getattr(_last, "metadata", None)

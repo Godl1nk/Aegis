@@ -155,7 +155,7 @@ def params_b(model):
         return raw / 1_000_000_000.0
 
     pc = model.get("parameter_count", "")
-    if pc:
+    if isinstance(pc, str) and pc:
         pc = pc.strip().upper()
         m = re.match(r"^([\d.]+)\s*([BKMGT]?)$", pc)
         if m:

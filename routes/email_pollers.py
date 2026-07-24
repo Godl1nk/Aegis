@@ -125,9 +125,10 @@ async def _run_auto_summarize_once(do_summary: bool = True, do_reply: bool = Tru
     settings = _load_settings()
     prev = {k: settings.get(k, False) for k in
             ("email_auto_summarize", "email_auto_reply", "email_auto_tag",
-             "email_auto_spam", "email_auto_calendar")}
+             "email_auto_spam", "email_auto_calendar", "_email_auto_reply_draft_only")}
     settings["email_auto_summarize"] = bool(do_summary)
     settings["email_auto_reply"] = bool(do_reply)
+    settings["_email_auto_reply_draft_only"] = bool(do_reply)
     settings["email_auto_tag"] = bool(do_tag)
     settings["email_auto_spam"] = bool(do_spam)
     settings["email_auto_calendar"] = bool(do_calendar)
@@ -142,7 +143,10 @@ async def _run_auto_summarize_once(do_summary: bool = True, do_reply: bool = Tru
     finally:
         s2 = _load_settings()
         for k, v in prev.items():
-            s2[k] = v
+            if v is None and k.startswith("_"):
+                s2.pop(k, None)
+            else:
+                s2[k] = v
         _save_settings(s2)
 
 
@@ -239,13 +243,21 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
     import sqlite3 as _sql3
     from src.llm_core import _uses_max_completion_tokens
 
-    settings = _load_settings()
+    settings = _effective_settings_for_email_account(_load_settings(), account_id)
     auto_sum = settings.get("email_auto_summarize", False)
     auto_reply = settings.get("email_auto_reply", False)
+    auto_reply_draft = bool(auto_reply and settings.get("_email_auto_reply_draft_only", False))
+    auto_reply_away = bool(auto_reply and not auto_reply_draft and _away_reply_active(settings, account_id))
     auto_tag = settings.get("email_auto_tag", False)
     auto_spam = settings.get("email_auto_spam", False)
     auto_cal = settings.get("email_auto_calendar", False)
-    if not auto_sum and not auto_reply and not auto_tag and not auto_spam and not auto_cal:
+    if away_only:
+        auto_sum = False
+        auto_reply_draft = False
+        auto_tag = False
+        auto_spam = False
+        auto_cal = False
+    if not auto_sum and not auto_reply_draft and not auto_reply_away and not auto_tag and not auto_spam and not auto_cal:
         return "Nothing to do"
 
     # Owner of the account being processed. All calendar + mailbox reads/writes
@@ -356,7 +368,12 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
             return "No model configured"
         url, model, headers = task_candidates[0]
 
-        writing_style = settings.get("email_writing_style", "")
+        by_account_styles = settings.get("email_writing_styles_by_account") or {}
+        writing_style = ""
+        if account_id and isinstance(by_account_styles, dict):
+            writing_style = str(by_account_styles.get(str(account_id)) or "")
+        if not writing_style:
+            writing_style = settings.get("email_writing_style", "")
         processed = 0
         already_cached = 0
         too_short = 0
@@ -402,10 +419,6 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                     seed = f"{_folder}|{uid_str}|{msg.get('From','')}|{msg.get('Date','')}|{msg.get('Subject','')}"
                     message_id = f"<synth-{_hl.sha256(seed.encode()).hexdigest()[:16]}@local>"
                     no_msgid += 1
-                need_sum = auto_sum and message_id not in _sum_existing
-                need_reply = auto_reply and message_id not in _reply_existing
-                need_class = (auto_tag or auto_spam) and message_id not in _tag_existing
-                need_cal = bool(settings.get("email_auto_calendar", False)) and message_id not in _cal_existing
                 # Only check urgency on INBOX (received mail), not Sent
                 # Skip messages that are themselves urgency alerts, or that
                 # we sent to ourselves — otherwise the alert loop re-flags
@@ -422,17 +435,45 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                 except Exception:
                     _from_addr_only = ""
                 _is_self_mail = bool(_self_self_addr) and _from_addr_only.lower() == _self_self_addr
+                need_sum = auto_sum and message_id not in _sum_existing
+                need_reply = auto_reply_draft and message_id not in _reply_existing
+                need_away_reply = bool(
+                    auto_reply_away
+                    and _folder.upper() == "INBOX"
+                    and not _is_self_mail
+                    and (away_only or _message_after_away_enabled(settings, msg))
+                    and not _away_reply_already_sent(settings, account_owner, account_id, message_id, _from_addr_only)
+                )
+                need_class = (auto_tag or auto_spam) and message_id not in _tag_existing
+                need_cal = bool(settings.get("email_auto_calendar", False)) and message_id not in _cal_existing
                 need_urgent = (auto_urgent and message_id not in _urgent_existing
                                and not _folder.lower().startswith("sent")
                                and "sent" not in _folder.lower()
                                and not _is_alert_echo
                                and not _is_self_mail)
-                if not need_sum and not need_reply and not need_class and not need_cal and not need_urgent:
+                if not need_sum and not need_reply and not need_away_reply and not need_class and not need_cal and not need_urgent:
                     already_cached += 1
                     await _emit_progress(progress_cb, f"Checked {examined}/{len(uid_list)} · {already_cached} already cached")
                     continue
                 subject = _decode_header(msg.get("Subject", ""))
                 sender = _decode_header(msg.get("From", ""))
+                if need_away_reply:
+                    try:
+                        sent_away, away_detail = _send_away_reply(
+                            settings, account_owner, account_id, msg, message_id, sender, subject
+                        )
+                        if sent_away:
+                            _away_replies_sent += 1
+                            _uid_text = uid.decode() if isinstance(uid, bytes) else str(uid)
+                            _detail_lines.append(f"away reply · {_folder}#{_uid_text} · {subject or '(no subject)'} — {away_detail}")
+                        else:
+                            _away_replies_skipped += 1
+                            logger.info(f"Away reply skipped for uid={uid}: {away_detail}")
+                    except Exception as e:
+                        _away_replies_failed += 1
+                        _uid_text = uid.decode() if isinstance(uid, bytes) else str(uid)
+                        _detail_lines.append(f"away reply failed · {_folder}#{_uid_text} · {subject or '(no subject)'}")
+                        logger.warning(f"Away reply {uid} failed: {e}")
                 body = _extract_text(msg)
                 # Pull text out of any PDFs / text attachments and append to
                 # the body so summaries / replies can actually reason about
@@ -993,7 +1034,8 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
         # Build a clear status message
         ops = []
         if auto_sum: ops.append("summary")
-        if auto_reply: ops.append("reply")
+        if auto_reply_draft: ops.append("reply")
+        if auto_reply_away: ops.append("away")
         if auto_tag: ops.append("tag")
         if auto_spam: ops.append("spam")
         ops_label = "/".join(ops) or "none"
@@ -1032,12 +1074,13 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
 
 
 async def _auto_summarize_poller():
-    """Background loop kept for backward compatibility — calls _auto_summarize_pass every 60s.
+    """Background loop kept for backward compatibility — calls _auto_summarize_pass periodically.
     Newer setups should use scheduled tasks instead (summarize_emails, draft_email_replies)."""
     import asyncio as _asyncio
     while True:
         try:
-            await _asyncio.sleep(1800)
+            settings = _load_settings()
+            await _asyncio.sleep(60 if settings.get("email_auto_reply", False) else 1800)
             await _auto_summarize_pass()
         except Exception as e:
             logger.error(f"Auto-summarize poller crash: {e}")
@@ -1068,6 +1111,28 @@ def _scheduled_poll_once() -> dict:
         for r in rows:
             sid = r[0]
             try:
+                # Atomically claim this row before doing any work. Two
+                # pollers can race here (the in-process asyncio task and an
+                # externally cron-driven `odysseus-mail poll-scheduled`, or
+                # an admin running the CLI manually alongside the in-process
+                # one despite the ODYSSEUS_INPROCESS_POLLERS=0 guidance) -
+                # both can SELECT the same 'pending' row before either has
+                # updated its status. The UPDATE...WHERE status='pending' is
+                # the atomicity boundary: only the poller whose UPDATE
+                # actually changes a row (rowcount == 1) proceeds to send;
+                # a loser sees rowcount == 0 and skips it instead of sending
+                # a duplicate.
+                claim_conn = sqlite3.connect(SCHEDULED_DB)
+                claim_cur = claim_conn.execute(
+                    "UPDATE scheduled_emails SET status='sending' WHERE id=? AND status='pending'",
+                    (sid,),
+                )
+                claim_conn.commit()
+                claimed = claim_cur.rowcount == 1
+                claim_conn.close()
+                if not claimed:
+                    continue
+
                 attachments = json.loads(r[8] or "[]")
                 row_account_id = r[9] if len(r) > 9 else None
                 odysseus_kind = r[10] if len(r) > 10 else "scheduled"

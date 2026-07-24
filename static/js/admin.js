@@ -479,8 +479,12 @@ async function loadEndpoints() {
   if (window.modelsModule && window.modelsModule.refreshModels) {
     window.modelsModule.refreshModels(false);
     setTimeout(() => {
-      if (window.sessionModule && window.sessionModule.updateModelPicker) {
-        window.sessionModule.updateModelPicker();
+      if (window.modelsModule && window.modelsModule.refreshModels) {
+        window.modelsModule.refreshModels(!!force, force ? {} : { cacheOnly: true }).then(() => {
+          if (window.sessionModule && window.sessionModule.updateModelPicker) {
+            window.sessionModule.updateModelPicker();
+          }
+        }).catch(() => {});
       }
     }, 1500);
   }
@@ -501,7 +505,7 @@ async function loadEndpoints() {
       const empty = '<div class="admin-empty">None</div>';
       if (listLocal) listLocal.innerHTML = empty;
       if (listApi) listApi.innerHTML = '<div class="admin-empty">None</div>';
-      if (listLegacy) listLegacy.innerHTML = empty;
+      refreshDependentModelUi();
       return;
     }
     const rowHtml = data.map(ep => {
@@ -569,17 +573,21 @@ async function loadEndpoints() {
     apiIdx.sort(_sortByEnabled);
     _renderInto(listLocal, localIdx);
     _renderInto(listApi, apiIdx);
-    if (listLegacy) listLegacy.innerHTML = rowHtml.join('');
     // Iterate matching nodes across both containers.
     const queryAll = (sel) => {
       const out = [];
-      [listLocal, listApi, listLegacy].forEach(c => {
+      [listLocal, listApi].forEach(c => {
         if (c) c.querySelectorAll(sel).forEach(n => out.push(n));
       });
       return out;
     };
     queryAll('[data-adm-toggle-ep]').forEach(btn => {
-      btn.addEventListener('click', async (e) => { e.stopPropagation(); await fetch(`/api/model-endpoints/${btn.dataset.admToggleEp}`, { method: 'PATCH' }); loadEndpoints(); });
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await fetch(`/api/model-endpoints/${btn.dataset.admToggleEp}`, { method: 'PATCH' });
+        await _refreshAfterEndpointChange();
+        loadEndpoints();
+      });
     });
     // LLM ↔ Image role toggle: image endpoints surface in the image-model
     // picker (Settings → AI Defaults → Image Generation, and the in-chat
@@ -725,7 +733,7 @@ async function loadEndpoints() {
               </span>
             </div>${warningHtml}${showSearch ? `<input type="search" class="mcp-tools-search" placeholder="Search ${sortedModels.length} models..." data-ep-search="${epId}">` : ''}<div class="mcp-tools-list">` + sortedModels.map(m =>
               `<label title="${esc(m.id)}" data-ep-model-row data-search="${esc((m.display + ' ' + m.id).toLowerCase())}" class="adm-model-row">
-                <input type="checkbox" class="adm-cb-hidden" data-ep-model-id="${esc(m.id)}" ${!m.is_hidden ? 'checked' : ''}>
+                <input type="checkbox" class="adm-cb-hidden" data-ep-model-id="${esc(m.id)}" ${(usesPinnedPicker ? m.is_pinned : !m.is_hidden) ? 'checked' : ''}>
                 <span class="adm-check-dot" aria-hidden="true"></span>
                 <span>${esc(m.display)}</span>
                 <button type="button" class="adm-model-img-btn${m.is_image ? ' active' : ''}" data-ep-model-img="${esc(m.id)}" title="${m.is_image ? 'Marked as image-generation model — click to unmark' : 'Mark as image-generation model (appears in the image-model picker)'}" aria-pressed="${m.is_image ? 'true' : 'false'}">
@@ -801,31 +809,38 @@ async function loadEndpoints() {
         }
       });
     });
+    refreshDependentModelUi();
   } catch (e) {
     const err = '<div class="admin-error">Failed to load</div>';
-    [listLocal, listApi, listLegacy].forEach(c => { if (c) c.innerHTML = err; });
+    [listLocal, listApi].forEach(c => { if (c) c.innerHTML = err; });
   }
 }
 
 async function _saveEpModelState(epId, panel) {
   const hidden = [];
+  const pinned = [];
+  const usesPinnedPicker = panel && panel.dataset && panel.dataset.pickerMode === 'pinned';
   panel.querySelectorAll('input[type=checkbox]').forEach(cb => {
-    if (!cb.checked) hidden.push(cb.dataset.epModelId);
+    if (cb.checked) pinned.push(cb.dataset.epModelId);
+    else hidden.push(cb.dataset.epModelId);
   });
   const total = panel.querySelectorAll('input[type=checkbox]').length;
+  const enabled = usesPinnedPicker ? pinned.length : total - hidden.length;
   try {
     await fetch(`/api/model-endpoints/${epId}/models`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
-      body: JSON.stringify({ hidden }),
+      body: JSON.stringify(usesPinnedPicker ? { pinned_models: pinned } : { hidden }),
     });
-    const countLabel = panel.querySelector('.mcp-tools-count');
-    if (countLabel) countLabel.textContent = `${total - hidden.length}/${total} enabled`;
     const row = panel.closest('[data-adm-ep-id]');
     if (row) {
       const badge = row.querySelector('.admin-badge');
-      if (badge && !badge.classList.contains('admin-badge-off')) badge.textContent = `${total - hidden.length}/${total} models enabled`;
+      if (badge && !badge.classList.contains('admin-badge-off')) {
+        const match = String(badge.textContent || '').match(/\/(\d+)/);
+        const canonicalTotal = match ? Number(match[1]) : total;
+        badge.textContent = `${enabled}/${canonicalTotal} models enabled`;
+      }
     }
     if (settingsModule && typeof settingsModule.refreshAiModelEndpoints === 'function') {
       settingsModule.refreshAiModelEndpoints();

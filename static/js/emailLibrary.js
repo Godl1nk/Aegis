@@ -5,7 +5,7 @@
 
 import spinnerModule from './spinner.js';
 import { styledConfirm, showToast, emptyStateIcon } from './ui.js';
-import { folderDisplayName, sortedFolders } from './emailInbox.js';
+import { folderDisplayName, sortedFolders } from './emailInbox.js?v=20260722emailfastindex1';
 import settingsModule from './settings.js';
 import * as Modals from './modalManager.js';
 import { topPortalZ } from './toolWindowZOrder.js';
@@ -499,6 +499,18 @@ function _syncUnreadTabBadge(count) {
   });
 }
 
+function _syncCurrentAccountUnreadCount(count) {
+  const accountId = String(state._libAccountId || '');
+  if (!accountId) return;
+  const nextCount = Math.max(0, Number(count) || 0);
+  const prev = _accountUnreadState.get(accountId) || {};
+  _accountUnreadState.set(accountId, {
+    ...prev,
+    unreadCount: nextCount,
+  });
+  _renderAccountsStrip();
+}
+
 function _syncUnreadWindowGlow() {
   document.getElementById('email-lib-modal')?.classList.toggle('email-lib-unread-active', state._libFilter === 'unread');
 }
@@ -849,6 +861,475 @@ function _acct() {
   return state._libAccountId ? `&account_id=${encodeURIComponent(state._libAccountId)}` : '';
 }
 
+function _unsubscribeMethodLabel(method) {
+  if (!method) return 'No unsubscribe method';
+  if (method.kind === 'mailto') return 'Request Unsubscribe';
+  if (method.kind === 'url') return 'Link Unsubscribe';
+  return method.target || method.kind || 'Unsubscribe';
+}
+
+function _setUnsubButtonBusy(btn, label) {
+  if (!btn) return null;
+  const previous = btn.innerHTML;
+  const previousDisplay = btn.style.display;
+  const previousAlignItems = btn.style.alignItems;
+  const previousJustifyContent = btn.style.justifyContent;
+  const previousGap = btn.style.gap;
+  const previousWhiteSpace = btn.style.whiteSpace;
+  btn.disabled = true;
+  btn.style.display = 'inline-flex';
+  btn.style.alignItems = 'center';
+  btn.style.justifyContent = 'center';
+  btn.style.gap = '5px';
+  btn.style.whiteSpace = 'nowrap';
+  btn.innerHTML = '';
+  const sp = spinnerModule.createWhirlpool(14);
+  sp.element.style.position = 'relative';
+  sp.element.style.top = '-2px';
+  sp.element.style.flexShrink = '0';
+  btn.appendChild(sp.element);
+  const text = document.createElement('span');
+  text.textContent = label || 'Working';
+  text.className = 'email-unsub-busy-label';
+  text.style.whiteSpace = 'nowrap';
+  text.style.display = 'inline-block';
+  btn.appendChild(text);
+  const restore = () => {
+    btn.disabled = false;
+    btn.innerHTML = previous;
+    btn.style.display = previousDisplay;
+    btn.style.alignItems = previousAlignItems;
+    btn.style.justifyContent = previousJustifyContent;
+    btn.style.gap = previousGap;
+    btn.style.whiteSpace = previousWhiteSpace;
+  };
+  restore.setLabel = (next) => { text.textContent = next || label || 'Working'; };
+  return restore;
+}
+
+function _setUnsubStatusBusy(statusEl, label) {
+  if (!statusEl) return null;
+  statusEl.innerHTML = '';
+  statusEl.style.display = 'inline-flex';
+  statusEl.style.alignItems = 'center';
+  statusEl.style.gap = '6px';
+  const text = document.createElement('span');
+  text.textContent = label || 'Scanning…';
+  statusEl.appendChild(text);
+  const sp = spinnerModule.createWhirlpool(14);
+  sp.element.style.position = 'relative';
+  sp.element.style.top = '-2px';
+  sp.element.style.flexShrink = '0';
+  statusEl.appendChild(sp.element);
+  return (next) => {
+    statusEl.style.display = '';
+    statusEl.style.alignItems = '';
+    statusEl.style.gap = '';
+    statusEl.textContent = next || '';
+  };
+}
+
+function _askAgentToUnsubscribe(candidate) {
+  const method = candidate?.recommended_method || (candidate?.methods || []).find(m => m.kind === 'url') || null;
+  const url = method?.kind === 'url' ? method.target : '';
+  const uid = candidate?.uid || '';
+  const folder = candidate?.folder || state._libFolder || 'INBOX';
+  const account = state._libAccountId || '';
+  const prompt = url
+    ? `Use the email unsubscribe tools and browser/web tools to unsubscribe from this email's web unsubscribe page. Ask me before any destructive step if the page is ambiguous.\n\nEmail UID: ${uid}\nFolder: ${folder}\nAccount: ${account || '(default)'}\nUnsubscribe URL: ${url}`
+    : `Use scan_email_unsubscribes/unsubscribe_email to unsubscribe this email if safe.\n\nEmail UID: ${uid}\nFolder: ${folder}\nAccount: ${account || '(default)'}`;
+  const input = document.getElementById('message') || document.getElementById('message-input');
+  if (!input) {
+    showToast?.('Chat composer not found');
+    return;
+  }
+  input.value = prompt;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.focus();
+  try {
+    document.getElementById('chat-form')?.requestSubmit?.();
+  } catch (_) {
+    document.getElementById('chat-form')?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+  }
+}
+
+function _unsubscribeCandidateUids(candidate) {
+  const out = [];
+  const seen = new Set();
+  const add = (uid) => {
+    const val = String(uid || '').trim();
+    if (!val || seen.has(val)) return;
+    seen.add(val);
+    out.push(val);
+  };
+  add(candidate?.uid);
+  (candidate?.duplicate_uids || []).forEach(add);
+  return out;
+}
+
+function _dedupeUnsubscribeCandidatesForDisplay(candidates) {
+  const out = [];
+  const seen = new Map();
+  (candidates || []).forEach(c => {
+    const method = c?.recommended_method || {};
+    const urlMethod = (c?.methods || []).find(m => m?.kind === 'url');
+    const key = String(c?.list_id || urlMethod?.target || method.target || c?.from_address || c?.uid || '').trim().toLowerCase();
+    if (!key || !seen.has(key)) {
+      if (key) seen.set(key, c);
+      out.push(c);
+      return;
+    }
+    const existing = seen.get(key);
+    existing.duplicate_count = Number(existing.duplicate_count || 1) + Number(c.duplicate_count || 1);
+    const uidSet = new Set(_unsubscribeCandidateUids(existing));
+    _unsubscribeCandidateUids(c).forEach(uid => uidSet.add(uid));
+    existing.duplicate_uids = Array.from(uidSet);
+  });
+  return out;
+}
+
+function _markUnsubscribeCardDone(modal, idx, label = 'Unsubscribed') {
+  const card = modal?.querySelector?.(`.email-unsub-card[data-idx="${idx}"]`);
+  if (!card) return;
+  card.classList.add('is-unsubscribed');
+  if (!card.querySelector('.email-unsub-done-badge')) {
+    const topRow = card.querySelector('.email-unsub-card-top');
+    topRow?.insertAdjacentHTML('beforeend', `<span class="email-tag email-unsub-done-badge">${_esc(label)}</span>`);
+  }
+  card.querySelectorAll('.email-unsub-link-btn, .email-unsub-agent-btn, .email-unsub-send-btn').forEach(el => {
+    if (el.tagName === 'A') {
+      el.setAttribute('aria-disabled', 'true');
+      el.style.pointerEvents = 'none';
+    } else {
+      el.disabled = true;
+    }
+    el.style.opacity = '0.55';
+  });
+}
+
+async function _runUnsubscribeCleanup(modal, candidates, action, btn) {
+  const uids = [];
+  const seen = new Set();
+  (candidates || []).forEach(c => {
+    _unsubscribeCandidateUids(c).forEach(uid => {
+      if (seen.has(uid)) return;
+      seen.add(uid);
+      uids.push(uid);
+    });
+  });
+  if (!uids.length) {
+    showToast?.('No emails to update');
+    return;
+  }
+  const restoreBusy = _setUnsubButtonBusy(btn, action === 'junk' ? 'Marking spam' : 'Deleting');
+  try {
+    const r = await fetch(emailApiUrl('/api/email/unsubscribe/cleanup', {
+      account_id: state._libAccountId || undefined,
+    }), {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action,
+        uids,
+        folder: state._libFolder || 'INBOX',
+        account_id: state._libAccountId || '',
+      }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!d.success) throw new Error(d.error || 'Cleanup failed');
+    const removed = new Set(uids.map(uid => String(uid)));
+    state._libEmails = state._libEmails.filter(e => !removed.has(String(e.uid)));
+    try { _libCacheWriteBack(); } catch (_) {}
+    try { _renderGrid(); } catch (_) {}
+    modal.querySelector('.email-unsub-followup')?.remove();
+    showToast?.(action === 'junk'
+      ? `Marked ${d.changed || 0} email${Number(d.changed || 0) === 1 ? '' : 's'} as spam`
+      : `Deleted ${d.changed || 0} email${Number(d.changed || 0) === 1 ? '' : 's'}`);
+  } catch (err) {
+    console.error(err);
+    showToast?.(err?.message || 'Cleanup failed');
+  } finally {
+    restoreBusy?.();
+  }
+}
+
+function _showUnsubscribeCleanupPrompt(modal, candidates) {
+  if (!modal || !Array.isArray(candidates) || !candidates.length) return;
+  modal.querySelector('.email-unsub-followup')?.remove();
+  const count = candidates.reduce((sum, c) => sum + _unsubscribeCandidateUids(c).length, 0);
+  const rows = candidates.map(c => {
+    const uids = _unsubscribeCandidateUids(c);
+    return `
+      <div style="display:flex;gap:8px;align-items:center;min-width:0;">
+        <div style="min-width:0;flex:1;">
+          <div style="font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${_esc(c.subject || '(no subject)')}</div>
+          <div style="font-size:11px;color:color-mix(in srgb,var(--fg) 62%,transparent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${_esc(c.from_name || c.from_address || '')} · ${_esc(c.from_address || '')}</div>
+        </div>
+        ${uids.length > 1 ? `<span class="email-tag">x${uids.length}</span>` : ''}
+      </div>`;
+  }).join('');
+  const box = document.createElement('div');
+  box.className = 'email-unsub-followup';
+  box.style.cssText = 'border:1px solid color-mix(in srgb,var(--accent,var(--red)) 35%,var(--border));border-radius:8px;padding:10px;background:color-mix(in srgb,var(--accent,var(--red)) 8%,transparent);display:flex;flex-direction:column;gap:8px;';
+  box.innerHTML = `
+    <div style="display:flex;gap:8px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;">
+      <div style="font-size:12px;font-weight:700;">Done. Mark all ${count} of these email${count === 1 ? '' : 's'} as spam?</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button type="button" class="memory-toolbar-btn email-unsub-clean-spam">Mark as spam</button>
+        <button type="button" class="memory-toolbar-btn email-unsub-clean-delete" style="color:var(--red);">Delete</button>
+        <button type="button" class="memory-toolbar-btn email-unsub-clean-keep">Keep</button>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:5px;font-size:12px;">${rows}</div>`;
+  const body = modal.querySelector('.modal-body');
+  const list = modal.querySelector('.email-unsub-list');
+  body?.insertBefore(box, list || null);
+  box.querySelector('.email-unsub-clean-spam')?.addEventListener('click', (e) => {
+    _runUnsubscribeCleanup(modal, candidates, 'junk', e.currentTarget);
+  });
+  box.querySelector('.email-unsub-clean-delete')?.addEventListener('click', async (e) => {
+    const ok = await styledConfirm(`Delete ${count} reviewed email${count === 1 ? '' : 's'}?`, {
+      confirmText: 'Delete',
+      cancelText: 'Cancel',
+      danger: true,
+    });
+    if (ok) _runUnsubscribeCleanup(modal, candidates, 'delete', e.currentTarget);
+  });
+  box.querySelector('.email-unsub-clean-keep')?.addEventListener('click', () => box.remove());
+}
+
+async function _openUnsubscribeReviewModal(anchor) {
+  const existing = document.getElementById('email-unsubscribe-review-modal');
+  if (existing) {
+    existing.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
+    existing.querySelector('.email-unsub-status')?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
+    return;
+  }
+  const modal = document.createElement('div');
+  modal.className = 'modal';
+  modal.id = 'email-unsubscribe-review-modal';
+  const settingsPage = anchor?.closest?.('#email-lib-settings-page');
+  const inlineHost = settingsPage?.querySelector?.('.email-settings-cleanup-section');
+  const inlineMode = !!inlineHost;
+  if (inlineMode) {
+    modal.className = 'email-unsubscribe-inline-panel';
+    modal.style.cssText = 'display:block;margin-top:10px;';
+    modal.innerHTML = `
+      <div style="border:1px solid var(--border);border-radius:8px;background:color-mix(in srgb,var(--fg) 3%,transparent);padding:10px;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:9px;">
+          <div style="font-size:12px;font-weight:700;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+            Unsubscribe review
+          </div>
+        </div>
+        <div class="modal-body" style="display:flex;flex-direction:column;gap:10px;max-height:min(56vh,520px);overflow:auto;">
+          <div class="email-unsub-status" style="font-size:12px;color:color-mix(in srgb,var(--fg) 68%,transparent);">Scanning recent ${_esc(state._libFolder || 'INBOX')} headers…</div>
+          <div class="email-unsub-actions" style="display:none;gap:7px;justify-content:flex-end;flex-wrap:wrap;">
+            <button type="button" class="memory-toolbar-btn email-unsub-auto-safe-btn">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+              Auto Unsubscribe All
+            </button>
+          </div>
+          <div class="email-unsub-list" style="display:none;flex-direction:column;gap:8px;"></div>
+        </div>
+      </div>`;
+    inlineHost.appendChild(modal);
+  } else {
+    modal.style.display = 'block';
+    modal.innerHTML = `
+      <div class="modal-content doclib-modal-content" style="width:min(680px,92vw);background:var(--bg);">
+        <div class="modal-header">
+          <h4>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+            Unsubscribe review
+          </h4>
+        </div>
+        <div class="modal-body" style="display:flex;flex-direction:column;gap:10px;max-height:min(72vh,620px);overflow:auto;">
+        <div class="email-unsub-status" style="font-size:12px;color:color-mix(in srgb,var(--fg) 68%,transparent);">Scanning recent ${_esc(state._libFolder || 'INBOX')} headers…</div>
+        <div class="email-unsub-actions" style="display:none;gap:7px;justify-content:flex-end;flex-wrap:wrap;">
+          <button type="button" class="memory-toolbar-btn email-unsub-auto-safe-btn">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+            Auto Unsubscribe All
+          </button>
+        </div>
+        <div class="email-unsub-list" style="display:none;flex-direction:column;gap:8px;"></div>
+      </div>
+    </div>`;
+    document.body.appendChild(modal);
+  }
+  const close = () => modal.remove();
+  if (!inlineMode) modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+  const statusEl = modal.querySelector('.email-unsub-status');
+  const listEl = modal.querySelector('.email-unsub-list');
+  const finishScanStatus = _setUnsubStatusBusy(statusEl, `Scanning recent ${state._libFolder || 'INBOX'} headers…`);
+  try {
+    const res = await fetch(emailApiUrl('/api/email/unsubscribe/scan', {
+      folder: state._libFolder || 'INBOX',
+      limit: 30,
+      max_scan: 180,
+      account_id: state._libAccountId || undefined,
+    }), { credentials: 'same-origin' });
+    const data = await res.json().catch(() => ({}));
+    if (!data.success) {
+      finishScanStatus?.(data.error || 'Failed to scan email headers');
+      return;
+    }
+    const candidates = _dedupeUnsubscribeCandidatesForDisplay(data.candidates || []);
+    const rawTotal = Number(data.raw_total || candidates.length || 0);
+    finishScanStatus?.(candidates.length
+      ? `Found ${candidates.length} unsubscribe target${candidates.length === 1 ? '' : 's'} from ${data.scanned || 0} recent emails${rawTotal > candidates.length ? `, collapsed from ${rawTotal} matching emails` : ''}. Review before sending unsubscribe.`
+      : `No unsubscribe candidates found in ${data.scanned || 0} recent emails.`);
+    modal.querySelector('.email-unsub-actions').style.display = candidates.some(c => c.can_execute) ? 'flex' : 'none';
+    listEl.style.display = candidates.length ? 'flex' : 'none';
+    listEl.innerHTML = candidates.map((c, idx) => {
+      const method = c.recommended_method || null;
+      const reasons = (c.reasons || []).map(r => `<span class="email-tag">${_esc(r)}</span>`).join('');
+      const urlMethod = (c.methods || []).find(m => m.kind === 'url');
+      const duplicateCount = Number(c.duplicate_count || 1);
+      const duplicateBadge = duplicateCount > 1 ? `<span class="email-tag">x${duplicateCount}</span>` : '';
+      return `
+        <div class="email-unsub-card" data-idx="${idx}" style="border:1px solid var(--border);border-radius:8px;padding:10px;background:color-mix(in srgb,var(--fg) 3%,transparent);display:flex;flex-direction:column;gap:7px;">
+          <div class="email-unsub-card-top" style="display:flex;gap:8px;align-items:flex-start;">
+            <div style="min-width:0;flex:1;">
+              <div style="font-weight:700;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${_esc(c.subject || '(no subject)')}</div>
+              <div style="font-size:11px;color:color-mix(in srgb,var(--fg) 62%,transparent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${_esc(c.from_name || c.from_address || '')} · ${_esc(c.from_address || '')}</div>
+            </div>
+            <span class="email-tag email-tag-spam">score ${_esc(c.score || 0)}</span>
+            ${duplicateBadge}
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:4px;">${reasons}</div>
+          <div style="display:flex;gap:7px;align-items:center;justify-content:flex-end;flex-wrap:wrap;">
+            ${urlMethod ? `<a class="memory-toolbar-btn email-unsub-link-btn" href="${_esc(urlMethod.target)}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;position:relative;top:2px;"><span style="position:relative;top:3px;">Link Unsubscribe</span></a>` : ''}
+            ${urlMethod ? `<button type="button" class="memory-toolbar-btn email-unsub-agent-btn" data-idx="${idx}" style="display:inline-flex;align-items:center;gap:6px;"><svg class="email-unsub-agent-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="position:relative;top:1px;flex-shrink:0;"><path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg><span>Agent Unsubscribe</span></button>` : ''}
+            ${c.can_execute ? `<button type="button" class="memory-toolbar-btn email-unsub-send-btn" data-idx="${idx}"><span style="position:relative;top:1px;">${_esc(_unsubscribeMethodLabel(method))}</span></button>` : ''}
+          </div>
+        </div>`;
+    }).join('');
+    modal._unsubscribeCandidates = candidates;
+    modal.querySelector('.email-unsub-auto-safe-btn')?.addEventListener('click', async () => {
+      const safeCandidates = (modal._unsubscribeCandidates || [])
+        .map((c, idx) => ({ c, idx }))
+        .filter(item => item.c && item.c.can_execute);
+      if (!safeCandidates.length) {
+        showToast?.('No safe mail unsubscribe actions found');
+        return;
+      }
+      const ok = await styledConfirm(`Send unsubscribe emails for ${safeCandidates.length} target${safeCandidates.length === 1 ? '' : 's'}?`, {
+        confirmText: 'Auto Unsubscribe All',
+        cancelText: 'Cancel',
+      });
+      if (!ok) return;
+      const btn = modal.querySelector('.email-unsub-auto-safe-btn');
+      const restoreBusy = _setUnsubButtonBusy(btn, `Unsubscribing 0/${safeCandidates.length}`);
+      let sent = 0;
+      let failed = 0;
+      const sentCandidates = [];
+      try {
+        for (const item of safeCandidates) {
+          const c = item.c;
+          try {
+            restoreBusy?.setLabel?.(`Unsubscribing ${sent + failed + 1}/${safeCandidates.length}`);
+            const r = await fetch(emailApiUrl('/api/email/unsubscribe/execute', {
+              account_id: state._libAccountId || undefined,
+            }), {
+              method: 'POST',
+              credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                uid: c.uid,
+                folder: c.folder || state._libFolder || 'INBOX',
+                account_id: state._libAccountId || '',
+                method_index: 0,
+                move_to_spam: false,
+              }),
+            });
+            const d = await r.json().catch(() => ({}));
+            if (!d.success) throw new Error(d.error || 'Unsubscribe failed');
+            sent += 1;
+            sentCandidates.push(c);
+            const rowBtn = modal.querySelector(`.email-unsub-send-btn[data-idx="${item.idx}"]`);
+            if (rowBtn) {
+              rowBtn.disabled = true;
+              rowBtn.textContent = 'Sent';
+            }
+            _markUnsubscribeCardDone(modal, item.idx);
+          } catch (err) {
+            failed += 1;
+            console.error(err);
+          }
+        }
+      } finally {
+        restoreBusy?.();
+      }
+      showToast?.(failed ? `Sent ${sent}, failed ${failed}` : `Sent ${sent} unsubscribe email${sent === 1 ? '' : 's'}`);
+      if (sentCandidates.length) _showUnsubscribeCleanupPrompt(modal, sentCandidates);
+    });
+    listEl.querySelectorAll('.email-unsub-agent-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = Number(btn.dataset.idx || 0);
+        const c = modal._unsubscribeCandidates?.[idx];
+        if (!c) return;
+        const restoreBusy = _setUnsubButtonBusy(btn, 'Starting');
+        setTimeout(() => restoreBusy?.(), 1400);
+        _askAgentToUnsubscribe(c);
+      });
+    });
+    listEl.querySelectorAll('.email-unsub-send-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const idx = Number(btn.dataset.idx || 0);
+        const c = modal._unsubscribeCandidates?.[idx];
+        if (!c) return;
+        const ok = await styledConfirm(`Send unsubscribe email to ${_unsubscribeMethodLabel(c.recommended_method)}?`, {
+          confirmText: 'Unsubscribe',
+          cancelText: 'Cancel',
+        });
+        if (!ok) return;
+        btn.disabled = true;
+        btn.textContent = 'Sending…';
+        try {
+          const r = await fetch(emailApiUrl('/api/email/unsubscribe/execute', {
+            account_id: state._libAccountId || undefined,
+          }), {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              uid: c.uid,
+              folder: c.folder || state._libFolder || 'INBOX',
+              account_id: state._libAccountId || '',
+              method_index: 0,
+              move_to_spam: false,
+            }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!d.success) throw new Error(d.error || 'Unsubscribe failed');
+          btn.textContent = 'Sent';
+          _markUnsubscribeCardDone(modal, idx);
+          showToast('Unsubscribe email sent');
+          _showUnsubscribeCleanupPrompt(modal, [c]);
+        } catch (err) {
+          console.error(err);
+          btn.disabled = false;
+          btn.textContent = _unsubscribeMethodLabel(c.recommended_method);
+          showToast(err?.message || 'Unsubscribe failed');
+        }
+      });
+    });
+  } catch (err) {
+    console.error(err);
+    finishScanStatus?.('Failed to scan email headers');
+  }
+}
+
+function _rememberedEmailAccountId() {
+  try {
+    return String(localStorage.getItem(_LIB_LAST_ACCOUNT_KEY) || '').trim();
+  } catch (_) {
+    return '';
+  }
+}
+
 // Per-(account, folder, filter, attachments) cache of the most recent
 // first-page list response. Lets reopen-after-close paint the previous
 // list instantly while the network refresh runs behind it — the modal
@@ -941,11 +1422,11 @@ function _libCacheKey() {
     state._libHasAttachments
   );
 }
-function _libCacheGet(key) { return _libListCache.get(key) || null; }
 function _libCachePut(key, value) {
   // Re-insert to bump LRU recency.
   _libListCache.delete(key);
   _libListCache.set(key, value);
+  _libSessionCachePut(key, value);
   if (_libListCache.size > _LIB_CACHE_MAX) {
     const oldest = _libListCache.keys().next().value;
     _libListCache.delete(oldest);
@@ -1148,6 +1629,10 @@ export function initEmailLibrary(config) {
 export function isOpen() { return state._libOpen; }
 
 export function openEmailLibrary(opts = {}) {
+  if (_libPrewarmTimer) {
+    clearTimeout(_libPrewarmTimer);
+    _libPrewarmTimer = null;
+  }
   // Force-clean any stale state from previous attempts
   const existing = document.getElementById('email-lib-modal');
   if (existing) existing.remove();
@@ -1187,6 +1672,12 @@ export function openEmailLibrary(opts = {}) {
   if (Object.prototype.hasOwnProperty.call(opts, 'account_id')) {
     state._libAccountId = opts.account_id || null;
     _publishActiveAccount();
+  } else if (!state._libAccountId) {
+    const rememberedAccount = _rememberedEmailAccountId();
+    if (rememberedAccount) {
+      state._libAccountId = rememberedAccount;
+      _publishActiveAccount();
+    }
   }
   if (opts.folder) state._libFolder = opts.folder;
   state._libPendingExpandUid = opts.uid || null;
@@ -1207,6 +1698,9 @@ export function openEmailLibrary(opts = {}) {
           <span id="email-lib-stats" class="memory-count" style="font-size:0.6em;opacity:0.6;font-weight:normal;margin-left:8px;position:relative;top:-2px"></span>
         </h4>
         <div class="email-lib-header-actions" style="display:flex;align-items:center;gap:8px;">
+          <button class="email-settings-header-back" id="email-settings-header-back" type="button" title="Back" aria-label="Back" style="display:none;">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
+          </button>
           <button class="close-btn" id="email-lib-close">\u2716</button>
         </div>
       </div>
@@ -1345,11 +1839,19 @@ export function openEmailLibrary(opts = {}) {
   const unreadBadge = document.getElementById('email-lib-unread-badge');
   unreadBadge?.addEventListener('click', (e) => {
     e.stopPropagation();
+    if (unreadBadge.dataset.mode === 'away') {
+      _showEmailSettingsPage();
+      return;
+    }
     _toggleUnreadEmails();
   });
   unreadBadge?.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' && e.key !== ' ') return;
     e.preventDefault();
+    if (unreadBadge.dataset.mode === 'away') {
+      _showEmailSettingsPage();
+      return;
+    }
     _toggleUnreadEmails();
   });
   const content = modal.querySelector('.modal-content');
@@ -1384,6 +1886,7 @@ export function openEmailLibrary(opts = {}) {
 
   // Wire events
   document.getElementById('email-lib-close').addEventListener('click', closeEmailLibrary);
+  document.getElementById('email-settings-header-back')?.addEventListener('click', _hideEmailSettingsPage);
 
   // Clicking the modal header (anywhere except buttons/inputs) collapses
   // any currently-expanded email card and returns to the inbox list view.
@@ -1520,30 +2023,13 @@ export function openEmailLibrary(opts = {}) {
   _initEmailSearchChipBar();
 
   document.getElementById('email-lib-refresh-btn').addEventListener('click', async () => {
-    const btn = document.getElementById('email-lib-refresh-btn');
-    btn?.classList.add('email-lib-refreshing');
-    state._libOffset = 0;
-    // Don't wipe state._libEmails — _loadEmails will paint the cached
-    // list while the forced refetch runs, so the grid doesn't blank out
-    // mid-refresh. `force: true` adds the cache-buster so the server's
-    // 8s list cache is bypassed for an actually-fresh result.
-    try {
-      await _loadEmails({ force: true });
-    } finally {
-      btn?.classList.remove('email-lib-refreshing');
-      // Flash a checkmark for ~900ms so the user gets a clear "done" cue.
-      if (btn) {
-        const orig = btn.innerHTML;
-        btn.classList.add('email-lib-refresh-done');
-        btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;"><polyline points="20 6 9 17 4 12"/></svg>';
-        setTimeout(() => {
-          if (btn.classList.contains('email-lib-refresh-done')) {
-            btn.classList.remove('email-lib-refresh-done');
-            btn.innerHTML = orig;
-          }
-        }, 900);
-      }
-    }
+    await _refreshEmailLibraryFromUi(document.getElementById('email-lib-refresh-btn'));
+  });
+  _initMobileEmailPullRefresh();
+  document.getElementById('email-lib-settings-btn')?.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    _showEmailSettingsPage();
   });
 
 
@@ -1813,6 +2299,7 @@ async function _loadAccounts({ force = false } = {}) {
     _publishActiveAccount();
   }
   _renderAccountsStrip();
+  _refreshAccountUnreadHighlights().catch(() => {});
 }
 
 function _renderAccountsStrip() {
@@ -1916,6 +2403,37 @@ function _renderAccountsStrip() {
     }, true);
   }
   _publishActiveAccount();
+}
+
+async function _refreshAccountUnreadHighlights() {
+  const accounts = Array.isArray(state._libAccounts) ? state._libAccounts.slice() : [];
+  if (!accounts.length) return;
+  const seq = ++_accountUnreadSeq;
+  const next = new Map();
+  await Promise.all(accounts.map(async (a) => {
+    const id = String(a && a.id || '');
+    if (!id) return;
+    try {
+      const res = await fetch(emailApiUrl('/api/email/unread-state', {
+        folder: 'INBOX',
+        account_id: id,
+      }), { credentials: 'same-origin' });
+      if (!res.ok) return;
+      const data = await res.json().catch(() => ({}));
+      next.set(id, {
+        unreadCount: Number(data.unread_count || 0),
+        maxUid: Number(data.max_uid || 0),
+      });
+    } catch (_) {}
+  }));
+  if (seq !== _accountUnreadSeq) return;
+  _accountUnreadState = next;
+  _renderAccountsStrip();
+}
+
+export async function openEmailLibrarySettings() {
+  openEmailLibrary();
+  await _showEmailSettingsPage();
 }
 
 export function closeEmailLibrary() {
@@ -2047,7 +2565,7 @@ function _snapEmailModalToLeftSidebar(modal) {
   return true;
 }
 
-async function _loadFolders({ resetMissing = false } = {}) {
+async function _loadFolders({ resetMissing = false, live = false } = {}) {
   const seq = ++_libFolderSeq;
   const accountAtStart = state._libAccountId || '';
   try {
@@ -3210,7 +3728,14 @@ async function _refreshUnreadBadge() {
     const data = await res.json();
     const n = data.unread_count || 0;
     _syncUnreadTabBadge(n);
-    if (state._libFilter === 'unread') {
+    if (folder === 'INBOX') _syncCurrentAccountUnreadCount(n);
+    badge.classList.toggle('email-lib-away-badge', awayActive);
+    if (awayActive) {
+      badge.textContent = 'Away';
+      badge.title = 'Auto reply is enabled';
+      badge.dataset.mode = 'away';
+      badge.style.display = '';
+    } else if (state._libFilter === 'unread') {
       // Currently viewing unread — show what the click will take you to.
       try {
         const allRes = await fetch(`${API_BASE}/api/email/list?folder=${encodeURIComponent(folder)}${_acct()}&limit=1&filter=all`);
@@ -3218,17 +3743,21 @@ async function _refreshUnreadBadge() {
         const t = allData.total || 0;
         badge.textContent = `${t} all`;
         badge.title = 'Show all emails';
+        badge.dataset.mode = 'unread';
         badge.style.display = '';
       } catch (_) {
         badge.textContent = 'Show all';
         badge.title = 'Show all emails';
+        badge.dataset.mode = 'unread';
         badge.style.display = '';
       }
     } else if (n > 0) {
       badge.textContent = n > 999 ? '999+ unread' : `${n} unread`;
       badge.title = 'Show unread emails';
+      badge.dataset.mode = 'unread';
       badge.style.display = '';
     } else {
+      delete badge.dataset.mode;
       badge.style.display = 'none';
     }
   } catch (_) { _syncUnreadTabBadge(0); }
@@ -3264,8 +3793,6 @@ async function _loadEmails({ force = false, useCache = true } = {}) {
 
   let sp = null;
   if (cached) {
-    state._libEmails = cached.emails || [];
-    state._libTotal = cached.total || 0;
     // Suppress the open-cascade animation when we're painting from
     // cache — the data was already on screen a moment ago, so sliding
     // each card in fresh feels janky. Also prevents the cascade from
@@ -3274,6 +3801,10 @@ async function _loadEmails({ force = false, useCache = true } = {}) {
     state._libJustOpened = false;
     const grid2 = document.getElementById('email-lib-grid');
     if (grid2) grid2.classList.remove('email-lib-just-opened');
+    paintData(cached, { cacheSource: true });
+    paintedExisting = true;
+    if (!force) return;
+  } else if (state._libEmails.length && cacheable) {
     _renderGrid();
     const stats = document.getElementById('email-lib-stats');
     if (stats) stats.textContent = `${state._libTotal} emails`;
@@ -3294,6 +3825,33 @@ async function _loadEmails({ force = false, useCache = true } = {}) {
     } else {
       const accountQS = accountAtStart ? `&account_id=${encodeURIComponent(accountAtStart)}` : '';
       const attQS = hasAttachmentsAtStart ? '&has_attachments=1' : '';
+      if (!cached && cacheable && !force) {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 450);
+        try {
+          const fastRes = await fetch(`${API_BASE}/api/email/list?folder=${encodeURIComponent(folderAtStart)}${accountQS}&limit=100&offset=${offsetAtStart}&filter=${filterAtStart}${attQS}&cached_only=1`, {
+            signal: ctrl.signal,
+          });
+          const fastData = await fastRes.json().catch(() => null);
+          if (seq === _libLoadSeq
+              && accountAtStart === (state._libAccountId || '')
+              && fastData
+              && !fastData.error
+              && Array.isArray(fastData.emails)
+              && fastData.emails.length) {
+            if (sp) { sp.destroy(); sp = null; }
+            state._libJustOpened = false;
+            grid.classList.remove('email-lib-just-opened');
+            paintData(fastData);
+            paintedExisting = true;
+            if (!force) return;
+          }
+        } catch (_) {
+          // Cold index miss/timeout: leave the spinner and continue to IMAP.
+        } finally {
+          clearTimeout(timer);
+        }
+      }
       // `&_=Date.now()` bypasses the server's 8s list cache. Default
       // opens omit it so rapid close/reopen returns instantly; the
       // Refresh button passes `force: true` to add it back.
@@ -3333,7 +3891,7 @@ async function _loadEmails({ force = false, useCache = true } = {}) {
     if (sp) sp.destroy();
     // If we already painted the cached list, leave it on screen — beats
     // wiping it for "Failed to load" when there's still readable content.
-    if (!cached) {
+    if (!paintedExisting) {
       const msg = e && e.message ? `Failed to load: ${e.message}` : 'Failed to load';
       grid.innerHTML = `<div class="email-loading">${_esc(msg)}${_emailSetupHintHtml()}</div>`;
       _wireEmailSetupHint(grid);
@@ -4066,10 +4624,6 @@ async function _toggleCardPreview(card, em) {
       ev.stopPropagation();
       if (state._onEmailClick) await state._onEmailClick({ email: em, emailData: data, mode: 'forward' });
     });
-    reader.querySelector('[data-act="close"]')?.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      _toggleCardPreview(card, em);
-    });
     reader.querySelector('[data-act="more"]')?.addEventListener('click', (ev) => {
       ev.stopPropagation();
       _showReaderMoreMenu(em, card, reader, ev.currentTarget);
@@ -4175,7 +4729,7 @@ async function _toggleCardPreview(card, em) {
     // Always stop bubbling so the card's click doesn't fire while reading.
     reader.addEventListener('click', (ev) => { ev.stopPropagation(); });
   } catch (e) {
-    reader.innerHTML = `<div style="padding:20px;color:var(--red,#e55)">Failed to load email</div>`;
+    showFailedReader(e?.message ? `Failed to load email: ${e.message}` : 'Failed to load email');
   }
 }
 
@@ -5018,458 +5572,6 @@ function _showCachedSummary(reader, summary, btn) {
   }
 }
 
-// "Other from this sender" — slide-out panel inside the reader listing
-// recent emails from the same address. Click an item to load it in place.
-async function _toggleFromSenderPanel(reader, data, btn) {
-  const body = reader.querySelector('.email-reader-body');
-  if (!body) return;
-
-  // Recenter the modal after its size changes (CSS widens + heightens the
-  // modal-content when the from-sender panel is mounted/unmounted). Without
-  // this the modal grows only to the right/down and can overflow the
-  // viewport on narrow / short windows.
-  const _recenterModal = () => {
-    const modal = document.getElementById('email-lib-modal');
-    const content = modal?.querySelector('.modal-content');
-    if (!content) return;
-    requestAnimationFrame(() => {
-      const w = content.offsetWidth;
-      const h = content.offsetHeight;
-      const newLeft = Math.max(20, (window.innerWidth - w) / 2);
-      const newTop  = Math.max(20, (window.innerHeight - h) / 2);
-      content.style.left = newLeft + 'px';
-      content.style.top  = newTop + 'px';
-    });
-  };
-
-  // Already open? Close it.
-  const existing = reader.querySelector('.from-sender-panel');
-  if (existing) {
-    existing.remove();
-    reader.classList.remove('from-sender-open');
-    if (btn) btn.classList.remove('active');
-    _recenterModal();
-    return;
-  }
-
-  const fromAddr = String(data.from_address || '').trim();
-  if (!fromAddr) {
-    if (typeof showError === 'function') showError('No sender address available');
-    return;
-  }
-
-  const panel = document.createElement('div');
-  panel.className = 'from-sender-panel';
-  const displayName = (data.from_name && data.from_name.trim()) || fromAddr;
-  const firstName = displayName.split(' ')[0] || displayName;
-  panel.innerHTML = `
-    <div class="from-sender-header">
-      <span class="from-sender-chips"></span>
-      <span class="from-sender-header-empty" hidden>All senders</span>
-      <button type="button" class="from-sender-toggle" data-toggle="attachments" title="Show only emails with attachments" aria-pressed="false">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-      </button>
-      <button type="button" class="from-sender-close" title="Close" aria-label="Close sender panel">&times;</button>
-    </div>
-    <div class="from-sender-search-wrap">
-      <input type="text" class="from-sender-search" placeholder="Search ${_esc(firstName)}…" autocomplete="off" />
-      <div class="from-sender-suggest" hidden></div>
-    </div>
-    <div class="from-sender-list">
-      <div class="from-sender-loading"></div>
-    </div>
-  `;
-  reader.appendChild(panel);
-  reader.classList.add('from-sender-open');
-  if (btn) btn.classList.add('active');
-  _recenterModal();
-
-  // Header close — same as the toolbar funnel button so the close path
-  // stays single-sourced (panel removal + active class drop).
-  const headerClose = panel.querySelector('.from-sender-close');
-  if (headerClose) {
-    headerClose.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      const toolbarBtn = reader.querySelector('[data-act="from-sender"]');
-      if (toolbarBtn) toolbarBtn.click();
-      else { panel.remove(); reader.classList.remove('from-sender-open'); }
-    });
-  }
-
-  const listEl = panel.querySelector('.from-sender-list');
-  // Hoisted so panel._originalEmails (assigned later, outside the try) can see it.
-  let emails = [];
-
-  // Multi-tag model — the header is now a list of {name, address} chips.
-  // Filter logic: an email matches when EVERY tag's address appears in
-  // from/to/cc (case-insensitive substring on the joined header strings).
-  panel._tags = [{ name: displayName, address: fromAddr }];
-  panel._attachmentsOnly = false;
-  const searchEl = panel.querySelector('.from-sender-search');
-  const chipsContainer = panel.querySelector('.from-sender-chips');
-  const emptyLabel = panel.querySelector('.from-sender-header-empty');
-  const suggestEl = panel.querySelector('.from-sender-suggest');
-  const attToggle = panel.querySelector('[data-toggle="attachments"]');
-
-  const _renderChips = () => {
-    chipsContainer.innerHTML = panel._tags.map((t, i) => `
-      <span class="from-sender-chip" title="${_esc(t.address)}" data-tag-index="${i}">
-        <span class="from-sender-chip-name">${_esc(t.name || t.address)}</span>
-        <button class="from-sender-chip-x" type="button" title="Remove" aria-label="Remove ${_esc(t.name || t.address)}">&times;</button>
-      </span>
-    `).join('');
-    if (emptyLabel) emptyLabel.hidden = panel._tags.length > 0;
-    chipsContainer.querySelectorAll('.from-sender-chip-x').forEach(btn => {
-      btn.addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        const idx = Number(btn.closest('.from-sender-chip')?.dataset.tagIndex || -1);
-        if (idx < 0) return;
-        panel._tags.splice(idx, 1);
-        _renderChips();
-        _refreshList();
-      });
-    });
-  };
-  // Filter loaded emails (or recents) by every active tag.
-  const _matchesTags = (em) => {
-    if (!panel._tags.length) return true;
-    const haystack = [
-      String(em.from_address || ''),
-      String(em.to || ''),
-      String(em.cc || ''),
-    ].join(' ').toLowerCase();
-    return panel._tags.every(t => haystack.includes(String(t.address || '').toLowerCase()));
-  };
-  const _applyToggles = () => {
-    const base = panel._lastResults || [];
-    let view = base.filter(_matchesTags);
-    if (panel._attachmentsOnly) view = view.filter(e => e.has_attachments);
-    if (!view.length) {
-      const why = panel._attachmentsOnly
-        ? 'No emails with attachments in this view.'
-        : (panel._tags.length > 1 ? 'No emails involve all those people.' : 'No matches.');
-      listEl.innerHTML = `<div class="from-sender-empty">${why}</div>`;
-    } else {
-      _renderFromSenderRows(view, listEl, reader, { showFolder: !!panel._lastShowFolder });
-    }
-  };
-  panel._setResults = (rows, opts = {}) => {
-    panel._lastResults = rows || [];
-    panel._lastShowFolder = !!opts.showFolder;
-    _applyToggles();
-  };
-  // Re-runs the appropriate fetch path for the current tag set / query.
-  // Declared early so chip-removal handlers above can call it.
-  let _refreshList = () => {};
-  if (attToggle) {
-    attToggle.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      panel._attachmentsOnly = !panel._attachmentsOnly;
-      attToggle.classList.toggle('is-active', panel._attachmentsOnly);
-      attToggle.setAttribute('aria-pressed', panel._attachmentsOnly ? 'true' : 'false');
-      _applyToggles();
-    });
-  }
-
-  try {
-    const sp = spinnerModule.createWhirlpool(20);
-    const loading = panel.querySelector('.from-sender-loading');
-    loading.appendChild(sp.element);
-
-    const params = new URLSearchParams({
-      q: fromAddr,
-      folder: state._libFolder || 'INBOX',
-      limit: '25',
-    });
-    const acct = _acct();
-    const acctSuffix = acct ? acct.replace(/^&?/, '&') : '';
-    const res = await fetch(`${API_BASE}/api/email/search?${params.toString()}${acctSuffix}`);
-    const j = await res.json();
-    let raw = Array.isArray(j.emails) ? j.emails : [];
-    const target = fromAddr.toLowerCase();
-    raw = raw.filter(e => String(e.from_address || '').toLowerCase() === target);
-    raw = raw.filter(e => String(e.uid) !== String(data.uid));
-    emails = raw;
-
-    if (!emails.length) {
-      listEl.innerHTML = `<div class="from-sender-empty">No other emails from this sender in ${_esc(state._libFolder || 'INBOX')}.</div>`;
-    } else {
-      panel._setResults(emails, { showFolder: false });
-    }
-  } catch (err) {
-    listEl.innerHTML = `<div class="from-sender-empty" style="color:var(--red, #e55)">Failed to load: ${_esc(String(err))}</div>`;
-  }
-  const updatePlaceholder = () => {
-    if (!searchEl) return;
-    searchEl.placeholder = panel._tags.length
-      ? 'Add another person…'
-      : 'Search people or emails…';
-  };
-  updatePlaceholder();
-  _renderChips();
-
-  // Used both when chips change AND when the user clears their query.
-  // Pulls the most-recent emails across the common folders so the user
-  // lands on something useful, then _applyToggles narrows by tags.
-  let _recentToken = 0;
-  const _loadRecentAcross = async () => {
-    const myToken = ++_recentToken;
-    const folders = _crossFolderCandidates();
-    const acct = _acct();
-    const acctSuffix = acct ? acct.replace(/^&?/, '&') : '';
-    listEl.innerHTML = `<div class="from-sender-loading"></div>`;
-    try {
-      const sp = spinnerModule.createWhirlpool(18);
-      listEl.querySelector('.from-sender-loading')?.appendChild(sp.element);
-      const results = await Promise.all(folders.map(async (f) => {
-        const params = new URLSearchParams({ folder: f, limit: '40', offset: '0', filter: 'all' });
-        const res = await fetch(`${API_BASE}/api/email/list?${params.toString()}${acctSuffix}`);
-        const j = await res.json();
-        return (j.emails || []).map(em => ({ ...em, _folder: f }));
-      }));
-      if (myToken !== _recentToken) return;
-      let merged = [].concat(...results);
-      merged.sort((a, b) => {
-        const da = a.date ? Date.parse(a.date) : 0;
-        const db = b.date ? Date.parse(b.date) : 0;
-        return db - da;
-      });
-      // Take a wider slice up front; tag/attachment filters trim it.
-      merged = merged.slice(0, 80);
-      panel._setResults(merged, { showFolder: true });
-      updatePlaceholder();
-    } catch (err) {
-      if (myToken !== _recentToken) return;
-      listEl.innerHTML = `<div class="from-sender-empty" style="color:var(--red, #e55)">Failed to load: ${_esc(String(err))}</div>`;
-    }
-  };
-
-  // Adds a contact as a tag, clears input, refreshes the list.
-  const _addTag = (contact) => {
-    if (!contact || !contact.address) return;
-    const addr = String(contact.address).toLowerCase();
-    if (panel._tags.some(t => String(t.address).toLowerCase() === addr)) return;
-    panel._tags.push({ name: contact.name || contact.address, address: contact.address });
-    _renderChips();
-    if (searchEl) { searchEl.value = ''; }
-    if (suggestEl) { suggestEl.hidden = true; suggestEl.innerHTML = ''; }
-    updatePlaceholder();
-    _refreshList();
-  };
-
-  // Cross-folder search — when the user types, also honor the sender chip if
-  // it's still active. Empty input with chip active restores the original
-  // "from this sender" view; empty input with chip removed shows the prompt.
-  if (searchEl) {
-    let searchToken = 0;
-    let debounceTimer = null;
-    let suggestToken = 0;
-    let highlightedIdx = -1;
-
-    // Free-text email search across folders. Tag filter is applied via
-    // _applyToggles inside panel._setResults.
-    const runSearch = async (q) => {
-      const myToken = ++searchToken;
-      const folders = _crossFolderCandidates();
-      const acct = _acct();
-      const acctSuffix = acct ? acct.replace(/^&?/, '&') : '';
-      try {
-        const results = await Promise.all(folders.map(async (f) => {
-          const params = new URLSearchParams({ q, folder: f, limit: '15' });
-          const res = await fetch(`${API_BASE}/api/email/search?${params.toString()}${acctSuffix}`);
-          const j = await res.json();
-          return (j.emails || []).map(em => ({ ...em, _folder: f }));
-        }));
-        if (myToken !== searchToken) return;
-        let merged = [].concat(...results);
-        merged.sort((a, b) => {
-          const da = a.date ? Date.parse(a.date) : 0;
-          const db = b.date ? Date.parse(b.date) : 0;
-          return db - da;
-        });
-        if (!merged.length) {
-          listEl.innerHTML = `<div class="from-sender-empty">No matches for "${_esc(q)}".</div>`;
-          return;
-        }
-        panel._setResults(merged, { showFolder: true });
-      } catch (err) {
-        if (myToken !== searchToken) return;
-        listEl.innerHTML = `<div class="from-sender-empty" style="color:var(--red, #e55)">Search failed: ${_esc(String(err))}</div>`;
-      }
-    };
-
-    // Hook up _refreshList so chip removal / tag add can rerun whichever
-    // path matches the current input state.
-    _refreshList = () => {
-      const q = (searchEl.value || '').trim();
-      if (q.length >= 2) runSearch(q);
-      else _loadRecentAcross();
-    };
-
-    // Contact suggestions — fetched from /api/email/contacts. Renders a
-    // small absolutely-positioned dropdown under the input. Up/Down/Enter/
-    // Esc handled in the keydown listener below.
-    const _renderSuggestions = (items) => {
-      if (!suggestEl) return;
-      if (!items || !items.length) {
-        suggestEl.hidden = true;
-        suggestEl.innerHTML = '';
-        highlightedIdx = -1;
-        return;
-      }
-      highlightedIdx = 0;
-      suggestEl.innerHTML = items.map((c, i) => `
-        <div class="from-sender-suggest-item${i === 0 ? ' active' : ''}" data-idx="${i}" data-addr="${_esc(c.address)}" data-name="${_esc(c.name || c.address)}">
-          <span class="suggest-name">${_esc(c.name || c.address)}</span>
-          <span class="suggest-addr">${_esc(c.address)}</span>
-        </div>
-      `).join('');
-      suggestEl.hidden = false;
-      suggestEl.querySelectorAll('.from-sender-suggest-item').forEach(item => {
-        item.addEventListener('mouseenter', () => {
-          suggestEl.querySelectorAll('.from-sender-suggest-item').forEach(n => n.classList.remove('active'));
-          item.classList.add('active');
-          highlightedIdx = Number(item.dataset.idx);
-        });
-        item.addEventListener('mousedown', (ev) => {
-          // mousedown so we add the chip BEFORE blur takes the focus away
-          ev.preventDefault();
-          _addTag({ name: item.dataset.name, address: item.dataset.addr });
-        });
-      });
-    };
-    const _fetchSuggestions = async (q) => {
-      const myToken = ++suggestToken;
-      try {
-        // Use the same contact source as the email composer's To/Cc fields
-        // (/api/contacts/search → {results: [{name, emails:[...]}]}). Flatten
-        // to {name, address} pairs and drop any already-tagged address.
-        const res = await fetch(`${API_BASE}/api/contacts/search?q=${encodeURIComponent(q)}`);
-        const j = await res.json();
-        if (myToken !== suggestToken) return;
-        const tagged = new Set(panel._tags.map(t => String(t.address).toLowerCase()));
-        const items = [];
-        for (const c of (j.results || [])) {
-          for (const addr of (c.emails || [])) {
-            if (tagged.has(String(addr).toLowerCase())) continue;
-            items.push({ name: c.name || addr, address: addr });
-            if (items.length >= 8) break;
-          }
-          if (items.length >= 8) break;
-        }
-        _renderSuggestions(items);
-      } catch {}
-    };
-
-    searchEl.addEventListener('input', () => {
-      clearTimeout(debounceTimer);
-      const q = searchEl.value.trim();
-      if (q.length < 2) {
-        searchToken++;
-        suggestToken++;
-        if (suggestEl) { suggestEl.hidden = true; suggestEl.innerHTML = ''; }
-        _loadRecentAcross();
-        return;
-      }
-      // Fire suggestions immediately (cheap SQL) and defer the email search.
-      _fetchSuggestions(q);
-      debounceTimer = setTimeout(() => runSearch(q), 220);
-    });
-
-    searchEl.addEventListener('keydown', (ev) => {
-      const items = suggestEl && !suggestEl.hidden
-        ? [...suggestEl.querySelectorAll('.from-sender-suggest-item')]
-        : [];
-      if (ev.key === 'ArrowDown' && items.length) {
-        ev.preventDefault();
-        highlightedIdx = (highlightedIdx + 1) % items.length;
-        items.forEach((n, i) => n.classList.toggle('active', i === highlightedIdx));
-      } else if (ev.key === 'ArrowUp' && items.length) {
-        ev.preventDefault();
-        highlightedIdx = (highlightedIdx - 1 + items.length) % items.length;
-        items.forEach((n, i) => n.classList.toggle('active', i === highlightedIdx));
-      } else if (ev.key === 'Enter') {
-        if (items.length && highlightedIdx >= 0) {
-          ev.preventDefault();
-          const item = items[highlightedIdx];
-          _addTag({ name: item.dataset.name, address: item.dataset.addr });
-        }
-      } else if (ev.key === 'Escape') {
-        if (suggestEl && !suggestEl.hidden) {
-          ev.preventDefault();
-          suggestEl.hidden = true;
-        }
-      } else if (ev.key === 'Backspace' && searchEl.value === '' && panel._tags.length) {
-        // Empty input + Backspace pops the rightmost chip — common chip-input idiom.
-        ev.preventDefault();
-        panel._tags.pop();
-        _renderChips();
-        _refreshList();
-      }
-    });
-
-    searchEl.addEventListener('blur', () => {
-      // Hide suggestions on blur, with a tiny delay so click-on-suggestion
-      // gets a chance to fire (mousedown-add covers most cases anyway).
-      setTimeout(() => { if (suggestEl) suggestEl.hidden = true; }, 120);
-    });
-  }
-  // Stash the sender's emails for restoring after a search is cleared.
-  panel._originalEmails = (typeof emails !== 'undefined') ? emails : [];
-}
-
-const _ATT_ICON = '<svg class="from-sender-att" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="Has attachments"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>';
-
-function _renderFromSenderRows(emails, listEl, reader, opts = {}) {
-  const { showFolder = false } = opts;
-  listEl.innerHTML = emails.map(em => {
-    const subj = em.subject || '(no subject)';
-    const date = em.date ? new Date(em.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : (em.date_display || '');
-    const unread = em.is_read ? '' : ' from-sender-unread';
-    const att = em.has_attachments ? _ATT_ICON : '';
-    const folder = em._folder || state._libFolder || 'INBOX';
-    const folderChip = showFolder ? `<span class="from-sender-folder">${_esc(folder)}</span>` : '';
-    return `<div class="from-sender-row${unread}" data-uid="${_esc(em.uid)}" data-folder="${_esc(folder)}">
-      <button class="from-sender-row-main" type="button">
-        <span class="from-sender-row-top">
-          <span class="from-sender-subj">${_esc(subj)}</span>
-          ${att}
-        </span>
-        <span class="from-sender-row-bottom">
-          <span class="from-sender-date">${_esc(date)}</span>
-          ${folderChip}
-        </span>
-      </button>
-      <button class="from-sender-row-more" type="button" title="More actions" aria-label="More actions">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>
-      </button>
-    </div>`;
-  }).join('');
-  listEl.querySelectorAll('.from-sender-row').forEach(row => {
-    const main = row.querySelector('.from-sender-row-main');
-    const more = row.querySelector('.from-sender-row-more');
-    main?.addEventListener('click', async () => {
-      const uid = row.dataset.uid;
-      const folder = row.dataset.folder || state._libFolder;
-      if (!uid) return;
-      await _swapReaderToUid(reader, uid, folder);
-    });
-    more?.addEventListener('click', async (ev) => {
-      ev.stopPropagation();
-      const uid = row.dataset.uid;
-      const folder = row.dataset.folder || state._libFolder;
-      if (!uid) return;
-      // Look up the row's email in any cache we know about; the menu just
-      // needs uid + subject + folder for its actions.
-      const em = (typeof emails !== 'undefined' ? emails : []).find(e => String(e.uid) === String(uid))
-        || state._libEmails.find(e => String(e.uid) === String(uid))
-        || { uid, subject: row.querySelector('.from-sender-subj')?.textContent || '' };
-      const card = reader.closest('.doclib-card');
-      if (card) _showReaderMoreMenu(em, card, reader, more);
-    });
-  });
-}
-
 // Wire click handlers for attachment chips + "open in editor" sub-buttons
 // inside a reader. Safe to call multiple times — uses dataset.wired flag to
 // skip nodes that already have listeners.
@@ -5584,7 +5686,7 @@ function _wireAttachmentHandlers(reader, folder) {
               ownerModal.classList.add('hidden');
             }
           }
-          const docMod = await import('./document.js');
+          const docMod = await import('./document.js?v=20260722emailfastindex1');
           const load = (docMod && docMod.loadDocument) || (docMod && docMod.default && docMod.default.loadDocument);
           if (typeof load === 'function') {
             await load(json.doc_id);
@@ -5597,7 +5699,10 @@ function _wireAttachmentHandlers(reader, folder) {
         }
       } catch (e) {
         console.error('attachment-as-doc error', e);
-        try { const { showError } = await import('./ui.js'); showError(`Couldn't open ${name}`); } catch (_) {}
+        const msg = e && e.name === 'AbortError'
+          ? `Opening ${name} timed out. Try downloading it instead.`
+          : `Couldn't open ${name}`;
+        try { const { showError } = await import('./ui.js'); showError(msg); } catch (_) {}
       } finally {
         delete openBtn.dataset.opening;
         openBtn.classList.remove('is-loading');
@@ -6078,7 +6183,7 @@ async function _openEmailAsTab(em, folder) {
     const res = await fetch(`${API_BASE}/api/email/read/${em.uid}?folder=${encodeURIComponent(useFolder)}${_acct()}`);
     let data = await res.json();
     if (data.error) {
-      reader.innerHTML = `<div style="padding:20px;color:var(--red,#e55)">Error: ${_esc(data.error)}</div>`;
+      showFailedTab(`Failed to load email: ${data.error}`);
       return;
     }
     _syncEmailReadState(em.uid, true);
@@ -6157,7 +6262,7 @@ async function _openEmailAsTab(em, folder) {
       try { _showReaderMoreMenu(em, modal, reader, ev.currentTarget); } catch {}
     });
   } catch (err) {
-    reader.innerHTML = `<div style="padding:20px;color:var(--red,#e55)">Failed to load: ${_esc(String(err))}</div>`;
+    showFailedTab(err?.message ? `Failed to load email: ${err.message}` : 'Failed to load email');
   }
 }
 

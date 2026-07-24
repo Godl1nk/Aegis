@@ -15,6 +15,7 @@ let activeCategory = 'all';
 let sortOrder = 'newest';
 let selectMode = false;
 let selectedIds = new Set();
+let memoriesLoading = false;
 
 
 const MEMORY_CATEGORIES = ['fact', 'identity', 'preference', 'contact', 'project', 'goal', 'task'];
@@ -388,6 +389,7 @@ export async function loadMemories() {
     if (!response.ok) {
       console.error('Memory fetch failed with status:', response.status);
       memories = [];
+      memoriesLoading = false;
       buildCategoryChips();
       renderMemoryList();
       updateMemoryCount();
@@ -405,12 +407,14 @@ export async function loadMemories() {
       memories = [];
     }
 
+    memoriesLoading = false;
     buildCategoryChips();
     renderMemoryList();
     updateMemoryCount();
   } catch (error) {
     console.error('Failed to load memories:', error);
     memories = [];
+    memoriesLoading = false;
     buildCategoryChips();
     renderMemoryList();
     updateMemoryCount();
@@ -1077,6 +1081,11 @@ export function updateMemoryCount() {
   const h2Count = document.getElementById('memory-count-h2');
   const tabCount = document.getElementById('memory-count'); // optional (may be absent)
   if (!h2Count && !tabCount) return;
+  if (memoriesLoading) {
+    if (h2Count) h2Count.textContent = 'loading...';
+    if (tabCount) tabCount.textContent = '...';
+    return;
+  }
 
   const searchInput = document.getElementById('memory-search');
   const searchTerm = searchInput ? searchInput.value.toLowerCase().trim() : '';

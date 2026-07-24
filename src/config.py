@@ -162,7 +162,6 @@ class AppConfig(BaseSettings):
             "uploads_dir": data_dir / "uploads",
             "sessions_file": data_dir / "sessions.json",
             "memory_file": data_dir / "memory.json",
-            "memory_doc": data_dir / "memory_doc.md",
             "personal_dir": data_dir / "personal_docs",
             "runbook_dir": data_dir / "personal_docs" / "runbook",
             "max_upload_size": max_upload_size,

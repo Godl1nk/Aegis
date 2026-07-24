@@ -402,6 +402,19 @@ class WebhookManager:
         ) as client:
             return await client.post(url, content=body, headers=headers)
 
+    async def _send_request(self, url: str, body: str, headers: dict,
+                            ip: ipaddress._BaseAddress) -> httpx.Response:
+        """POST *body* to *url* with the TCP connect pinned to *ip*.
+
+        Overridable seam: tests replace this to avoid real sockets. Redirects
+        are disabled so a 3xx can't bounce the delivery to another host.
+        """
+        transport = _PinnedAsyncTransport(ip)
+        async with httpx.AsyncClient(
+            timeout=10, follow_redirects=False, transport=transport,
+        ) as client:
+            return await client.post(url, content=body, headers=headers)
+
     async def _deliver(self, webhook_id: str, url: str, secret: Optional[str], event: str, payload: dict):
         """Internal delivery. Never call directly from outside this class (use deliver_test)."""
         # Re-validate URL at delivery time in case DB was tampered with, and

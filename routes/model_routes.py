@@ -1790,6 +1790,7 @@ def setup_model_routes(model_discovery):
                 _invalidate_models_cache()
             rows = db.query(ModelEndpoint).order_by(ModelEndpoint.created_at).all()
             results = []
+            upgraded_legacy_pins = False
             for r in rows:
                 all_models = _cached_model_ids(r)
                 hidden = _hidden_model_ids(r)
@@ -1823,6 +1824,9 @@ def setup_model_routes(model_discovery):
                     "model_refresh_interval": getattr(r, "model_refresh_interval", None),
                     "model_refresh_timeout": getattr(r, "model_refresh_timeout", None),
                 })
+            if upgraded_legacy_pins:
+                db.commit()
+                _invalidate_models_cache()
             return results
         finally:
             db.close()

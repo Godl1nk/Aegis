@@ -1433,9 +1433,11 @@ def setup_cookbook_routes() -> APIRouter:
                     "nb_files": m["nb_files"],
                     "has_incomplete": m["has_incomplete"],
                     "status": "downloading" if m["has_incomplete"] else "ready",
-                    "path": m.get("path", ""),
-                    "is_diffusion": m.get("is_diffusion", False),
-                }
+	                    "path": m.get("path", ""),
+	                    "is_diffusion": m.get("is_diffusion", False),
+	                    "is_video": m.get("is_video", False),
+	                    "is_adapter": m.get("is_adapter", False),
+	                }
                 if m.get("is_local_dir"):
                     entry["is_local_dir"] = True
                 if m.get("is_gguf"):
@@ -1460,6 +1462,7 @@ def setup_cookbook_routes() -> APIRouter:
         """Register a diffusion model as an image endpoint so it appears in the model selector."""
         import re
         from core.database import SessionLocal, ModelEndpoint
+        from src.settings import load_settings, save_settings
 
         # Parse port from command (--port NNNN), default 8100 for diffusion_server
         port_match = re.search(r'--port\s+(\d+)', req.cmd)
@@ -1477,6 +1480,7 @@ def setup_cookbook_routes() -> APIRouter:
         # Friendly display name from repo_id
         short_name = req.repo_id.split("/")[-1] if "/" in req.repo_id else req.repo_id
         display_name = f"{short_name} (image)"
+        pinned_models = [req.repo_id] if req.repo_id else []
 
         db = SessionLocal()
         try:
@@ -1486,7 +1490,16 @@ def setup_cookbook_routes() -> APIRouter:
                 existing.is_enabled = True
                 existing.model_type = "image"
                 existing.name = display_name
+                existing.endpoint_kind = "local"
+                existing.model_refresh_mode = "manual"
+                if pinned_models:
+                    existing.cached_models = json.dumps(pinned_models)
+                    existing.pinned_models = json.dumps(pinned_models)
                 db.commit()
+                settings = load_settings()
+                if settings.get("image_gen_enabled") is not True:
+                    settings["image_gen_enabled"] = True
+                    save_settings(settings)
                 logger.info(f"Updated existing image endpoint: {base_url}")
                 return existing.id
 
@@ -1498,9 +1511,18 @@ def setup_cookbook_routes() -> APIRouter:
                 api_key=None,
                 is_enabled=True,
                 model_type="image",
+                endpoint_kind="local",
+                model_refresh_mode="manual",
+                cached_models=json.dumps(pinned_models) if pinned_models else None,
+                pinned_models=json.dumps(pinned_models) if pinned_models else None,
             )
             db.add(ep)
             db.commit()
+            settings = load_settings()
+            settings["image_gen_enabled"] = True
+            if not settings.get("image_model"):
+                settings["image_model"] = req.repo_id
+            save_settings(settings)
             logger.info(f"Auto-registered image endpoint: {display_name} @ {base_url}")
             return ep_id
         except Exception as e:
@@ -2588,8 +2610,8 @@ def setup_cookbook_routes() -> APIRouter:
         # endpoint; any other real model serve (i.e. not a pip-install task) gets
         # a local LLM endpoint pointed at its /v1.
         endpoint_id = None
-        is_diffusion = "diffusion_server.py" in req.cmd
-        if is_diffusion:
+        is_image_endpoint = "diffusion_server.py" in req.cmd or "mlx_image_server.py" in req.cmd
+        if is_image_endpoint:
             endpoint_id = _auto_register_image_endpoint(req, remote)
         elif not is_pip_install:
             endpoint_id = _auto_register_llm_endpoint(req, remote)

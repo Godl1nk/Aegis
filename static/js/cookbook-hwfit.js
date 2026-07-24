@@ -794,7 +794,7 @@ export async function _hwfitFetch(fresh = false, opts = {}) {
       if (v !== '') params.set(k, v);
     });
     if (hasManualOrDismissed) params.set('_hw_override_ts', String(Date.now()));
-    // Image models use a separate registry/endpoint
+    // Image models use a separate registry/endpoint.
     const isImageMode = useCase === 'image_gen';
     if ((fresh || (_paintedFromCache && !search)) && !isImageMode) {
       params.set('refresh_catalog', '1'); // update HF-backed dynamic catalogs in the background
@@ -840,7 +840,7 @@ export async function _hwfitFetch(fresh = false, opts = {}) {
         }
       }
     }
-    // Normalize image model fields to match LLM renderer expectations
+    // Normalize image model fields to match LLM renderer expectations.
     if (isImageMode && data.models) {
       data.models = data.models.map(m => ({
         ...m,
@@ -1263,9 +1263,46 @@ export const _hwfitColumns = [
   { key: null,    label: 'Mode',   cls: 'hwfit-c-mode' },
 ];
 
+function _sortHwfitRows(models) {
+  const rows = Array.isArray(models) ? [...models] : [];
+  const sortSel = document.getElementById('hwfit-sort');
+  const sortKey = sortSel?.value || 'newest';
+  const asc = sortSel?.dataset.reverse === '1';
+  if (sortKey === 'fit') {
+    const fitRank = { perfect: 4, good: 3, marginal: 2, too_tight: 1, no_fit: 0 };
+    rows.sort((a, b) => {
+      const ar = fitRank[a.fit_level] ?? -1;
+      const br = fitRank[b.fit_level] ?? -1;
+      if (ar !== br) return asc ? ar - br : br - ar;
+      const as = Number(a.score) || 0;
+      const bs = Number(b.score) || 0;
+      return asc ? as - bs : bs - as;
+    });
+    return rows;
+  }
+  if (sortKey === 'newest') {
+    rows.sort((a, b) => {
+      const ad = String(a.release_date || '');
+      const bd = String(b.release_date || '');
+      if (ad === bd) return 0;
+      if (!ad) return 1;
+      if (!bd) return -1;
+      return asc ? (ad < bd ? -1 : 1) : (ad < bd ? 1 : -1);
+    });
+    return rows;
+  }
+  const field = { score: 'score', vram: 'required_gb', speed: 'speed_tps', params: 'params_b', context: 'context' }[sortKey] || 'score';
+  rows.sort((a, b) => {
+    const av = Number(a[field]) || 0;
+    const bv = Number(b[field]) || 0;
+    return asc ? av - bv : bv - av;
+  });
+  return rows;
+}
+
 export function _hwfitRenderList(el, models) {
   if (!el) return;
-  models = models || [];
+  models = _sortHwfitRows(models);
   if (!models.length) {
     // Disambiguate WHY the list is empty so capable servers don't read as "too weak":
     // active filters vs. a likely under-reported probe vs. genuinely low hardware.
@@ -1570,7 +1607,9 @@ export function _expandModelRow(row, modelData) {
   html += `</div>`;
   html += `<div class="hwfit-panel-actions">`;
   html += `<button class="cookbook-btn hwfit-dl-btn">Download</button>`;
-  if (!modelData.is_image_gen) {
+  if (modelData.is_image_gen) {
+    html += `<button class="cookbook-btn cookbook-run-btn hwfit-quickrun-btn" title="Download + run as an image endpoint">Run Image</button>`;
+  } else {
     html += `<button class="cookbook-btn cookbook-run-btn hwfit-quickrun-btn" title="Download + launch with smart defaults">Run</button>`;
     html += `<button class="cookbook-btn hwfit-serve-expand-btn" title="Configure & serve">Configure</button>`;
   }
@@ -1889,7 +1928,7 @@ export function _expandModelRow(row, modelData) {
         uiModule.showError('Launch failed: ' + e.message);
       }
       quickRunBtn.disabled = false;
-      quickRunBtn.textContent = 'Run';
+      quickRunBtn.textContent = modelData.is_image_gen ? 'Run Image' : 'Run';
     });
   }
 
