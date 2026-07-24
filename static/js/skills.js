@@ -86,6 +86,11 @@ export async function loadSkills(cascade = false) {
   if (cascade && loaded && !_loadPromise && _playSkillsCascade()) {
     _cascadeNext = false;
     updateCount();
+    // Stale-while-revalidate: the cached list plays the entrance instantly,
+    // but skills created since the last open (agent manage_skills, teacher
+    // escalation, auto-extraction) must appear without a page reload — so
+    // still re-fetch silently and re-render when it lands.
+    loadSkills(false);
     return;
   }
   if (_loadPromise) return _loadPromise;

@@ -31,7 +31,7 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "prompt": {"type": "string", "description": "Image description prompt"},
+                    "prompt": {"type": "string", "description": "Prompt passed directly to the image model. Keep proper nouns, brand names, characters, and places verbatim (e.g. 'Ferrari', not 'red sports car with a horse logo'); append style details, never substitute names with descriptions."},
                     "model": {"type": "string", "description": "Model name (auto-detects if omitted or set to auto)"},
                     "size": {"type": "string", "description": "Image size (default 1024x1024)"},
                     "quality": {"type": "string", "description": "Quality: low, medium, high, auto (default medium)"},

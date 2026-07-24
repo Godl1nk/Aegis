@@ -292,7 +292,7 @@ function _formatServeCmdPreview(cmd) {
   }).join('\n');
   if (mlxDeepSeekV4Compat) {
     return [
-      '# Odysseus runtime compatibility: using sanitized MLX DeepSeek-V4 shim.',
+      '# Aegis runtime compatibility: using sanitized MLX DeepSeek-V4 shim.',
       formatted,
     ].join('\n');
   }
@@ -1502,7 +1502,7 @@ function _rerenderCachedModels() {
       // them without dropping back to the raw command box.
       panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm hwfit-backend-sglang"><input type="checkbox" class="hwfit-sf" data-field="reasoning_parser" data-parser="${_rp_name || ''}"${sv('reasoning_parser',_reasoningDefault)?' checked':''} /> Reasoning Parser${_rp_name ? ` <span class="hwfit-parser-tag">${_rp_name}</span>` : ''}${_h('SGLang/vLLM: splits thinking tokens into a reasoning channel using the detected parser.')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="enforce_eager"${sv('enforce_eager',false)?' checked':''} /> Disable CUDA Graphs${_h('vLLM: --enforce-eager. SGLang: --disable-cuda-graph. Slower, but useful for graph-capture crashes.')}</label>`;
-      panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="prefix_cache"${sv('prefix_cache',false)?' checked':''} /> Prefix / Radix Cache${_h('vLLM: prefix caching. SGLang: RadixAttention prefix cache; when off Odysseus adds --disable-radix-cache.')}</label>`;
+      panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="prefix_cache"${sv('prefix_cache',false)?' checked':''} /> Prefix / Radix Cache${_h('vLLM: prefix caching. SGLang: RadixAttention prefix cache; when off Aegis adds --disable-radix-cache.')}</label>`;
       // Inline the previously-second vLLM checks row so Expert Parallel /
       // Speculative / MoE Env sit next to Prefix Caching with no gap. All
       // three are vLLM-only — class-gated so they hide on SGLang. Always

@@ -33,16 +33,15 @@ def test_document_module_exports_code_stream_lifecycle():
         assert name in DOCUMENT_JS[DOCUMENT_JS.index("const documentModule ="):]
 
 
-def test_document_stream_does_not_force_editor_panel_open():
+def test_document_stream_opens_editor_panel_for_live_view():
+    # Reversed by user request: a streaming doc MOUNTS the editor pane so the
+    # code is watched being written live, instead of landing invisibly behind
+    # a closed panel with only a raw fence tag flashing in chat.
     open_start = DOCUMENT_JS.index("export function streamDocOpen")
     open_end = DOCUMENT_JS.index("/** Simulate streaming effect", open_start)
     open_body = DOCUMENT_JS[open_start:open_end]
-    update_start = DOCUMENT_JS.index("export function handleDocUpdate")
-    update_end = DOCUMENT_JS.index("/** Toggle version history panel", update_start)
-    update_body = DOCUMENT_JS[update_start:update_end]
 
-    assert "_ensureDocPaneMounted();" not in open_body
-    assert "if (!isOpen) openPanel();" not in update_body
+    assert "_ensureDocPaneMounted();" in open_body
     assert "streamDocPrepare" not in DOCUMENT_JS
     assert "doc_stream_prepare" not in CHAT_JS
 
@@ -63,7 +62,7 @@ def test_hybrid_parameter_envelope_does_not_open_or_render_as_document():
 
 def test_cancel_preserves_partial_generated_code():
     start = DOCUMENT_JS.index("export function streamDocCancel")
-    end = DOCUMENT_JS.index("/** Track a streamed document", start)
+    end = DOCUMENT_JS.index("export function streamDocOpen", start)
     body = DOCUMENT_JS[start:end]
 
     assert "_setStreamPhase('error')" in body
@@ -89,5 +88,32 @@ def test_existing_session_document_does_not_hide_create_document_tool():
     end = AGENT_LOOP.index("# The skill index injected", start)
     tool_gate = AGENT_LOOP[start:end]
 
-    assert "if _relevant_tools is not None and _active_document_relevant:" in tool_gate
+    # A non-email working doc is always editable (Codex model), so edit tools are
+    # offered whenever one is open — but create_document must NOT be hidden: the
+    # user may still want a genuinely new artifact while a doc is open.
+    assert "or _active_document_editable):" in tool_gate
+    assert '_relevant_tools.update({"edit_document", "update_document", "suggest_document"})' in tool_gate
     assert "\n    if (\n        _relevant_tools is not None\n        and _code_artifact" in tool_gate
+    assert '_relevant_tools.add("create_document")' in tool_gate
+    assert '_relevant_tools.discard("create_document")' not in tool_gate
+
+
+def test_code_artifact_streams_document_live_on_round_1():
+    """A code-artifact request tells the model to emit create_document as its
+    FIRST output. Live doc streaming was gated to round_num>1, so the huge
+    round-1 code generated silently for minutes with no doc pane — looking
+    'stuck'. The gate must also open on round 1 when _code_stream_enabled."""
+    assert "round_num > 1 or _ody_doc_stream_create_mode or _code_stream_enabled" in AGENT_LOOP
+
+
+def test_plain_language_fence_streams_live_on_code_artifact_turns():
+    """Weak models ignore the create_document directive and emit a plain
+    ```html / ```python fence — the artifact then generated invisibly for
+    minutes ('stuck') and only became a doc via the post-round fallback. On a
+    code-artifact turn with no open doc, plain fences must live-stream into
+    the doc pane, and the fallback must not re-emit the same content."""
+    assert "'```html\\n', '```python\\n', '```javascript\\n'," in AGENT_LOOP
+    assert "_code_stream_enabled and active_document is None" in AGENT_LOOP
+    assert "_plain_code_fence_streamed = True" in AGENT_LOOP
+    # Fallback double-render guard.
+    assert "if not _plain_code_fence_streamed:" in AGENT_LOOP

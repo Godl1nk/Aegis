@@ -751,6 +751,7 @@ async function initImageSettings() {
   const templateInput = el('set-imgPromptTemplate');
   const msg = el('set-imgSettingsMsg');
   const enabledToggle = el('set-imgEnabledToggle');
+  const askToggle = el('set-imgAskToggle');
   const configWrap = modelSel ? modelSel.closest('div[style*="flex-direction"]') : null;
   var _endpoints = [];
   if (!modelSel) return;
@@ -857,6 +858,7 @@ async function initImageSettings() {
     if (settings.image_prompt_format && formatSel) formatSel.value = settings.image_prompt_format;
     if (settings.image_prompt_json_template && templateInput) templateInput.value = settings.image_prompt_json_template;
     if (enabledToggle) enabledToggle.checked = settings.image_gen_enabled !== false;
+    if (askToggle) askToggle.checked = settings.ask_image_model === true;
   } catch (e) { console.warn('Failed to load settings', e); }
 
   function syncImgDisabled() {
@@ -878,6 +880,7 @@ async function initImageSettings() {
       await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           image_gen_enabled: enabledToggle ? enabledToggle.checked : true,
+          ask_image_model: askToggle ? askToggle.checked : false,
           image_model: modelSpec,
           image_edit_model: editModelSpec || '',
           image_quality: qualSel ? qualSel.value : 'medium',
@@ -904,6 +907,7 @@ async function initImageSettings() {
   if (qualSel) qualSel.addEventListener('change', saveSettings);
   if (formatSel) formatSel.addEventListener('change', saveSettings);
   if (templateInput) templateInput.addEventListener('change', saveSettings);
+  if (askToggle) askToggle.addEventListener('change', saveSettings);
   const resetBtn = el('set-imgPromptTemplateReset');
   if (resetBtn) {
     resetBtn.addEventListener('click', function(e) {
@@ -1869,6 +1873,58 @@ async function initAgentSettings() {
 
 }
 
+/* ── Terminal & Safety (Tools tab) ── */
+async function initTerminalSettings() {
+  var approvalSel = el('set-cmdApprovalMode');
+  var envSel = el('set-terminalEnv');
+  var imageInput = el('set-dockerImage');
+  var mountChk = el('set-dockerMountWs');
+  var msg = el('set-terminalMsg');
+  if (!approvalSel) return;
+
+  try {
+    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    var settings = await res.json();
+    approvalSel.value = settings.command_approval_mode === 'off' ? 'off' : 'manual';
+    envSel.value = settings.terminal_env === 'docker' ? 'docker' : 'local';
+    if (settings.docker_image) imageInput.value = settings.docker_image;
+    mountChk.checked = !!settings.docker_mount_workspace;
+  } catch (e) {}
+
+  function summary() {
+    var parts = [
+      approvalSel.value === 'off' ? 'approval off' : 'approval on',
+      'bash: ' + envSel.value,
+    ];
+    if (envSel.value === 'docker' && mountChk.checked) parts.push('workspace mounted');
+    msg.textContent = parts.join(' · ');
+  }
+
+  async function save() {
+    var payload = {
+      command_approval_mode: approvalSel.value === 'off' ? 'off' : 'manual',
+      terminal_env: envSel.value === 'docker' ? 'docker' : 'local',
+      docker_mount_workspace: !!mountChk.checked,
+    };
+    var img = (imageInput.value || '').trim();
+    if (img) payload.docker_image = img;
+    try {
+      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      summary();
+      msg.style.color = 'var(--fg)';
+    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+  }
+
+  approvalSel.addEventListener('change', save);
+  envSel.addEventListener('change', save);
+  imageInput.addEventListener('change', save);
+  mountChk.addEventListener('change', save);
+  summary();
+}
+
 /* ═══════════════════════════════════════════
    APPEARANCE TAB
    ═══════════════════════════════════════════ */
@@ -2478,6 +2534,7 @@ function initAll() {
   initResearchSettings();
   initResearchSearchSettings();
   initAgentSettings();
+  initTerminalSettings();
   initAppearance();
   initShortcuts();
   initAccount();
@@ -3118,7 +3175,7 @@ async function initEmailAccountsSettings() {
     const eafProviderNotes = {
       outlook: {
         title: 'Outlook / Office 365 needs OAuth',
-        body: 'Microsoft disables normal password login for IMAP/SMTP in most Outlook and Microsoft 365 accounts. Odysseus does not support Microsoft OAuth/Graph mail yet, so this preset is only a placeholder for future support.',
+        body: 'Microsoft disables normal password login for IMAP/SMTP in most Outlook and Microsoft 365 accounts. Aegis does not support Microsoft OAuth/Graph mail yet, so this preset is only a placeholder for future support.',
       },
     };
     const eafNoteEl = el('eaf-provider-note');
@@ -4636,7 +4693,7 @@ async function initUnifiedIntegrations() {
       },
       outlook: {
         title: 'Outlook / Office 365 needs OAuth',
-        body: 'Microsoft disables normal password login for IMAP/SMTP in most Outlook and Microsoft 365 accounts. Odysseus does not support Microsoft OAuth/Graph mail yet, so this preset is only a placeholder for future support.',
+        body: 'Microsoft disables normal password login for IMAP/SMTP in most Outlook and Microsoft 365 accounts. Aegis does not support Microsoft OAuth/Graph mail yet, so this preset is only a placeholder for future support.',
         url: 'https://learn.microsoft.com/exchange/clients-and-mobile-in-exchange-online/disable-basic-authentication-in-exchange-online',
         linkLabel: 'Read Microsoft note',
       },
@@ -5456,7 +5513,7 @@ async function initUnifiedIntegrations() {
               </button>
             </div>
             <div id="uf-codex-config-body" style="display:none;">
-              <div style="font-size:11px;opacity:0.62;margin:4px 0 6px;">Toggle which Odysseus tools this agent can use. New agents start with chat only.</div>
+              <div style="font-size:11px;opacity:0.62;margin:4px 0 6px;">Toggle which Aegis tools this agent can use. New agents start with chat only.</div>
               <div id="uf-codex-inline-scopes"></div>
             </div>
           </div>

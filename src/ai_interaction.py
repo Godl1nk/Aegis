@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import mimetypes
+import re
 import uuid
 import time
 from typing import Dict, Optional, Tuple
@@ -296,6 +297,79 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
 # Memory management tool
 # ---------------------------------------------------------------------------
 
+def _norm_memory_text(s: str) -> str:
+    """Lowercase + collapse whitespace + trim edge punctuation for comparison."""
+    return re.sub(r"\s+", " ", (s or "").lower()).strip(" .,!?:;\"'`")
+
+
+def _find_duplicate_memory(text, existing, memory_manager, memory_vector, owner):
+    """Return an existing memory that duplicates ``text``, or None.
+
+    Mirrors the auto-extractor's dedup so the agent's ``manage_memory add``
+    can't create near-duplicates (the write path previously appended
+    unconditionally). Checks, strongest first:
+
+      1. exact text match,
+      2. vector semantic match (cosine ≥ 0.85) — off when ChromaDB is down,
+      3. fuzzy Jaccard at the extractor's 0.75 threshold (deliberately high so
+         opposite facts that merely share tokens are NOT merged),
+      4. superset/prefix containment — catches "name is X" vs "name is X + more"
+         even with the vector store down; safe because opposite facts diverge
+         rather than nest.
+    """
+    nt = _norm_memory_text(text)
+    if not nt:
+        return None
+
+    # 1. exact
+    for e in existing:
+        if _norm_memory_text(e.get("text", "")) == nt:
+            return e
+
+    # 2. vector semantic match (strongest; requires a healthy store)
+    if memory_vector and getattr(memory_vector, "healthy", False):
+        try:
+            try:
+                sim_id = memory_vector.find_similar(text, threshold=0.85, owner=owner)
+            except TypeError:
+                sim_id = memory_vector.find_similar(text, threshold=0.85)
+        except Exception:
+            sim_id = None
+        if sim_id:
+            match = next((e for e in existing if e.get("id") == sim_id), None)
+            if match is not None:
+                return match
+
+    # 3. fuzzy text (same 0.75 threshold as the extractor)
+    try:
+        from services.memory.memory_extractor import _is_text_duplicate
+        if _is_text_duplicate(text, existing):
+            new_tokens = set(nt.split())
+            best, best_score = None, 0.0
+            for e in existing:
+                ot = set(_norm_memory_text(e.get("text", "")).split())
+                if not ot:
+                    continue
+                j = len(new_tokens & ot) / len(new_tokens | ot)
+                if j > best_score:
+                    best, best_score = e, j
+            if best is not None:
+                return best
+    except Exception:
+        logger.debug("fuzzy memory dedup unavailable", exc_info=True)
+
+    # 4. superset / prefix containment (≥3-token shorter side, word-boundaried)
+    for e in existing:
+        ne = _norm_memory_text(e.get("text", ""))
+        if not ne:
+            continue
+        shorter, longer = (nt, ne) if len(nt) <= len(ne) else (ne, nt)
+        if len(shorter.split()) >= 3 and (longer == shorter or longer.startswith(shorter + " ")):
+            return e
+
+    return None
+
+
 async def do_manage_memory(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """Manage memories: list, add, edit, delete, search.
 
@@ -345,8 +419,29 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
         if not text:
             return {"error": "Memory text cannot be empty"}
 
-        entry = _memory_manager.add_entry(text, source="ai_agent", category=category, owner=owner)
         memories = _memory_manager.load_all()
+        # Dedup before creating. The agent add path used to append
+        # unconditionally, so the model produced near-duplicate memories
+        # (e.g. "User's name is X" then "User's name is X, studying at Y").
+        # Mirror the auto-extractor's dedup: exact → vector → fuzzy → superset.
+        _user_mem = [
+            m for m in memories
+            if (not owner) or m.get("owner") == owner or m.get("owner") is None
+        ]
+        _dup = _find_duplicate_memory(text, _user_mem, _memory_manager, _memory_vector, owner)
+        if _dup is not None:
+            return {
+                "action": "add",
+                "memory_id": _dup["id"],
+                "duplicate": True,
+                "results": (
+                    f"Already remembered (id {str(_dup['id'])[:8]}): "
+                    f"{_dup.get('text', '')}. Not adding a duplicate — use the "
+                    f"edit action on that id if you need to refine or extend it."
+                ),
+            }
+
+        entry = _memory_manager.add_entry(text, source="ai_agent", category=category, owner=owner)
         memories.append(entry)
         _memory_manager.save(memories)
 
@@ -587,7 +682,7 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
       switch_model <model>    — Change the model for the current session
       set_theme <preset>      — Apply a built-in theme preset (dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute)
       create_theme <name> <bg> <fg> <panel> <border> <accent> [key=val ...] — Create custom theme. Optional key=val: advanced color overrides AND background effects: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false
-      open_panel <name>       — Open a panel (documents, gallery, email, sessions, notes, memories, skills, settings, cookbook)
+      open_panel <name>       — Open a panel (documents, gallery, email, sessions, notes, memories, skills, journey, settings, cookbook)
       open_email_reply <uid> [folder] [reply|reply-all|ai-reply] [body text] — Open a reply draft document for an email; does not send. ALWAYS append the body text when the user told you what to say (one-shot draft); only omit body when the user just asked to "open a reply" without content.
       get_toggles             — Return current toggle states (server-side knowledge)
     """
@@ -814,6 +909,8 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
             "memory": "memories",
             "brain": "memories",
             "skills": "skills",
+            "journey": "journey",
+            "learning": "journey",
             "settings": "settings",
             "preferences": "settings",
             "cookbook": "cookbook",
@@ -824,7 +921,7 @@ async def do_ui_control(content: str, session_id: Optional[str] = None, owner: O
         }
         target = _panel_aliases.get(panel)
         if not target:
-            return {"error": f"Unknown panel '{panel}'. Valid: documents, gallery, email, sessions, notes, memories, skills, settings, cookbook."}
+            return {"error": f"Unknown panel '{panel}'. Valid: documents, gallery, email, sessions, notes, memories, skills, journey, settings, cookbook."}
         return {
             "ui_event": "open_panel",
             "panel": target,
@@ -1315,6 +1412,239 @@ def format_ideogram_prompt(user_prompt: str, size: str, owner: Optional[str] = N
     return json.dumps(ideogram_dict)
 
 
+# ── Ask-before-generate: pending image requests awaiting a model choice ────
+# When the `ask_image_model` setting is ON, generate_image / ai_edit_image
+# tool calls are stashed here instead of executing; the frontend shows a
+# model-picker card and confirms via POST /api/chat/image-choice/<session>.
+# Bounded: one pending request per session, capped total.
+_PENDING_IMAGE_REQUESTS: Dict[str, Dict] = {}
+_PENDING_IMAGE_CAP = 64
+
+
+def stash_pending_image_request(session_id: str, tool: str, content: str, owner: Optional[str]) -> None:
+    if len(_PENDING_IMAGE_REQUESTS) >= _PENDING_IMAGE_CAP and session_id not in _PENDING_IMAGE_REQUESTS:
+        # Drop the oldest entry (insertion order) to stay bounded.
+        _PENDING_IMAGE_REQUESTS.pop(next(iter(_PENDING_IMAGE_REQUESTS)), None)
+    _PENDING_IMAGE_REQUESTS[session_id] = {
+        "tool": tool,
+        "content": content,
+        "owner": owner,
+        "created": time.time(),
+    }
+
+
+def pop_pending_image_request(session_id: str, owner: Optional[str]) -> Optional[Dict]:
+    """Pop the pending request for a session — only for the owner who queued it."""
+    pending = _PENDING_IMAGE_REQUESTS.get(session_id)
+    if not pending:
+        return None
+    if (pending.get("owner") or None) != (owner or None):
+        return None
+    return _PENDING_IMAGE_REQUESTS.pop(session_id, None)
+
+
+# Model-id substrings that unambiguously denote an image-generation model.
+# Used to AUTO-DETECT image models by name when nothing is explicitly
+# configured — so a local endpoint serving FLUX/ERNIE-Image/SDXL "just works"
+# without the user having to set a default or mark models by hand.
+_IMAGE_MODEL_NAME_RE = re.compile(
+    r"(?:flux|sdxl|sd3|sd-?[0-9]|stable[-_]?diffusion|(?<![a-z])diffusion|"
+    r"dall[-_]?e|ideogram|imagen|(?<![a-z])image(?![a-z])|kandinsky|"
+    r"playground[-_]?v|pixart|kolors|hunyuan[-_]?image|ernie[-_]?image|"
+    r"qwen[-_]?image|cogview|omnigen|seedream|recraft|luma[-_]?photon|"
+    r"gpt[-_]?image)",
+    re.IGNORECASE,
+)
+
+
+def _image_endpoints(owner: Optional[str] = None):
+    """Enabled endpoints (owner + shared), newest query — helper for resolution."""
+    from src.database import SessionLocal, ModelEndpoint
+    db = SessionLocal()
+    try:
+        q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)  # noqa: E712
+        if owner:
+            from src.auth_helpers import owner_filter
+            q = owner_filter(q, ModelEndpoint, owner)
+        # Detach the rows we need into plain tuples so the session can close.
+        return [
+            (
+                ep.name,
+                getattr(ep, "image_models", None),
+                getattr(ep, "model_type", None),
+                getattr(ep, "cached_models", None),
+            )
+            for ep in q.all()
+        ]
+    finally:
+        db.close()
+
+
+def _first_marked_image_model(owner: Optional[str] = None) -> str:
+    """Resolve an image model for `auto` generation without an explicit
+    `image_model` setting, in priority order:
+
+      1. Per-model image marks (image_models list) — the user explicitly
+         designated these in AI Defaults.
+      2. An endpoint whose whole model_type is 'image'.
+      3. Name auto-detection — any cached model whose id looks like an image
+         model (FLUX, SDXL, ERNIE-Image, dall-e, …).
+
+    Returns `model@endpoint` (bound to the exact endpoint, since mixed
+    endpoints can share model ids) or "" if nothing matched."""
+    try:
+        rows = _image_endpoints(owner)
+    except Exception as e:
+        logger.debug("Image endpoint scan failed: %s", e)
+        return ""
+
+    def _ids(raw):
+        if not raw:
+            return []
+        try:
+            v = json.loads(raw) if isinstance(raw, str) else list(raw)
+        except (TypeError, ValueError):
+            return []
+        return [str(m) for m in (v or []) if m]
+
+    # 1. Explicit per-model marks.
+    for name, image_models, _mtype, _cached in rows:
+        marked = _ids(image_models)
+        if marked:
+            return f"{marked[0]}@{name}"
+
+    # 2. Whole endpoint marked as an image endpoint.
+    for name, _image_models, mtype, cached in rows:
+        if str(mtype or "").lower() == "image":
+            cids = _ids(cached)
+            if cids:
+                return f"{cids[0]}@{name}"
+
+    # 3. Auto-detect by model name across every enabled endpoint.
+    for name, _image_models, _mtype, cached in rows:
+        for mid in _ids(cached):
+            if _IMAGE_MODEL_NAME_RE.search(mid):
+                return f"{mid}@{name}"
+
+    return ""
+
+
+def _resolve_image_model_with_fallback(model_spec: str, owner: Optional[str] = None):
+    """Resolve `model_spec` to (endpoint_url, model_id, headers), degrading a
+    bogus name to the user's real image model instead of failing.
+
+    Chat models routinely INVENT an image model name ("flux", "sdxl") they
+    were never told exists. Hard-failing on that guess broke direct generation
+    even when a perfectly good image model was configured/marked — so on a
+    resolution miss, retry with the configured `image_model` setting, then the
+    per-model marks / name auto-detection. Raises ValueError only when nothing
+    resolves."""
+    try:
+        return _resolve_model(model_spec, owner=owner)
+    except ValueError:
+        pass
+    from src.settings import get_user_setting
+    fallbacks = []
+    configured = str(get_user_setting("image_model", owner or "", default="") or "").strip()
+    if configured:
+        fallbacks.append(configured)
+    marked = _first_marked_image_model(owner)
+    if marked:
+        fallbacks.append(marked)
+    for fb in fallbacks:
+        if fb.lower() == (model_spec or "").lower():
+            continue
+        try:
+            resolved = _resolve_model(fb, owner=owner)
+            logger.info("Image model %r not found; falling back to %r", model_spec, fb)
+            return resolved
+        except ValueError:
+            continue
+    raise ValueError(f"Model '{model_spec}' not found on any configured endpoint")
+
+
+def list_image_model_options(owner: Optional[str] = None) -> list:
+    """Model choices for the ask-before-generate picker.
+
+    Options come from: the configured image/edit models, every enabled
+    endpoint marked model_type='image' (each of its models as model@endpoint),
+    and 'auto'. Deduped, labeled for display."""
+    options = []
+    seen = set()
+
+    def add(spec: str, label: str):
+        key = (spec or "").strip().lower()
+        if not key or key in seen:
+            return
+        seen.add(key)
+        options.append({"spec": spec.strip(), "label": label.strip() or spec.strip()})
+
+    add("auto", "Auto (configured default)")
+    try:
+        from src.settings import get_setting
+        for skey, slabel in (("image_model", "Default gen model"), ("image_edit_model", "Default edit model")):
+            spec = str(get_setting(skey, "", owner=owner) or "").strip()
+            if spec:
+                add(spec, f"{spec.split('@')[0].split('/')[-1]} · {slabel}")
+    except Exception:
+        pass
+    try:
+        from core.database import SessionLocal, ModelEndpoint
+        db = SessionLocal()
+        try:
+            rows = (
+                db.query(ModelEndpoint)
+                .filter(ModelEndpoint.is_enabled == True)  # noqa: E712
+                .all()
+            )
+        finally:
+            db.close()
+        def _id_list(raw):
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except (TypeError, ValueError):
+                    raw = []
+            return [str(m) for m in (raw or []) if m]
+
+        for ep in rows:
+            ep_is_image = str(getattr(ep, "model_type", "") or "").lower() == "image"
+            # Per-model marks — for mixed endpoints serving chat AND image
+            # models (endpoint-level model_type is too coarse there).
+            marked = _id_list(getattr(ep, "image_models", None))
+            for mid in marked:
+                add(f"{mid}@{ep.name}", f"{mid.split('/')[-1]} · {ep.name}")
+            if not ep_is_image:
+                continue
+            # Whole endpoint is image-typed: offer every model on it.
+            models = _id_list(getattr(ep, "cached_models", None) or getattr(ep, "models", None))
+            for mid in models:
+                add(f"{mid}@{ep.name}", f"{mid.split('/')[-1]} · {ep.name}")
+            if not models and not marked:
+                # Endpoint marked image-capable but no model list — offer the
+                # endpoint itself, resolved by name downstream.
+                add(f"auto@{ep.name}", f"Auto · {ep.name}")
+    except Exception as e:
+        logger.debug("list_image_model_options endpoint scan failed: %s", e)
+    return options
+
+
+def apply_image_model_choice(content: str, model_spec: str) -> str:
+    """Rewrite a stashed generate/edit content payload with the chosen model."""
+    parsed = _parse_image_generation_content(content)
+    parsed["model"] = (model_spec or "auto").strip()
+    out = {
+        "prompt": parsed.get("prompt", ""),
+        "model": parsed["model"],
+        "quality": parsed.get("quality") or "medium",
+    }
+    if parsed.get("size_explicit") and parsed.get("size"):
+        out["size"] = parsed["size"]
+    if parsed.get("reference_image_urls"):
+        out["reference_image_urls"] = parsed["reference_image_urls"]
+    return json.dumps(out)
+
+
 async def do_generate_image(
     content: str,
     session_id: Optional[str] = None,
@@ -1373,7 +1703,19 @@ async def do_generate_image(
     if quality == "medium" and _settings.get("image_quality"):
         quality = _settings["image_quality"]
 
-    # Auto-detect best available image model if still not set
+    # Auto-detect best available image model if still not set.
+    # FIRST: per-model image marks. A mixed endpoint (model_type='llm') that
+    # also serves image models is marked per-model via AI Defaults
+    # (image_models JSON list). The default `image_model` setting can be empty
+    # while these marks exist — without checking them here, "auto" resolution
+    # skipped straight to probing cloud gpt-image models and failed with "No
+    # image model found", even though the user HAD marked image models.
+    if not model_spec:
+        _mark = await asyncio.to_thread(_first_marked_image_model, owner)
+        if _mark:
+            model_spec = _mark
+            logger.info("Image auto-resolve: using per-model mark %r", model_spec)
+
     if not model_spec:
         for candidate in ("gpt-image-1.5", "gpt-image-1", "dall-e-3"):
             try:
@@ -1421,7 +1763,9 @@ async def do_generate_image(
 
     # Resolve the model to find the right endpoint
     try:
-        url, model_id, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
+        url, model_id, headers = await asyncio.to_thread(
+            _resolve_image_model_with_fallback, model_spec, owner
+        )
     except ValueError:
         return {"error": f"No endpoint found with image model '{model_spec}'. "
                 "Configure an OpenAI-compatible endpoint with image generation support."}

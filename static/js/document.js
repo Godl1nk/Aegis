@@ -45,6 +45,12 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   let _diffNewContent = null;
   let _diffChunks = [];          // [{id, oldLines, newLines, startLine, resolved, accepted}]
   let _diffUnresolvedCount = 0;
+  // Coalesce a burst of AI edits (a multi-edit turn) into ONE diff render.
+  // Baseline = content before the FIRST edit of the burst; the expensive
+  // enterDiffMode runs once after the edits settle instead of per edit.
+  let _coalesceDiffBaseline = null;
+  let _coalesceDiffDocId = null;
+  let _coalesceDiffTimer = null;
   let _mdPreviewClickTimes = [];
   let _mdPreviewHintLastAt = 0;
 
@@ -290,6 +296,13 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const paneEl = document.querySelector('.doc-editor-pane');
     const isDocLeft = paneEl && paneEl.classList.contains('doc-left');
     let html = '';
+    // Mobile-only "back to chat". In doc-view the hamburger and the icon rail
+    // are both hidden, the mobile footer is display:none, and a fresh panel
+    // renders a ghost tab that carries no × — so on a phone there was no
+    // on-screen way out of the document at all (Escape only, which a phone
+    // doesn't have). This is the exit.
+    html += '<button class="doc-tab-back" id="doc-tab-back" type="button" title="Back to chat" aria-label="Back to chat">'
+      + '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>';
     html += '<button class="doc-tab-arrow doc-tab-arrow-left" id="doc-tab-left" title="Scroll left">&#x2039;</button>';
     html += '<div class="doc-tab-scroll" id="doc-tab-scroll">';
     const curSession = sessionModule?.getCurrentSessionId() || '';
@@ -423,6 +436,12 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
     // Wire drag-to-reorder
     initTabDragReorder(tabBar);
+
+    // Wire mobile back-to-chat
+    const backBtn = document.getElementById('doc-tab-back');
+    if (backBtn) {
+      backBtn.addEventListener('click', () => { try { closePanel(); } catch (e) { console.error('Doc back failed:', e); } });
+    }
 
     // Wire new doc button
     const newBtn = document.getElementById('doc-tab-new-btn');
@@ -3225,8 +3244,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       _afterOdysseusAttachmentsAdded(1, label || data.filename);
       if (!opts.keepOpen) _closeOdysseusAttachMenu();
     } catch (err) {
-      console.error('Failed to attach Odysseus item:', err);
-      if (uiModule) uiModule.showError('Failed to attach from Odysseus');
+      console.error('Failed to attach Aegis item:', err);
+      if (uiModule) uiModule.showError('Failed to attach from Aegis');
     }
   }
 
@@ -3274,8 +3293,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       _afterOdysseusAttachmentsAdded(added, zip ? 'odysseus-attachments.zip' : undefined);
       _closeOdysseusAttachMenu();
     } catch (err) {
-      console.error('Failed to attach selected Odysseus items:', err);
-      if (uiModule) uiModule.showError(added ? `Attached ${added}, then failed` : 'Failed to attach from Odysseus');
+      console.error('Failed to attach selected Aegis items:', err);
+      if (uiModule) uiModule.showError(added ? `Attached ${added}, then failed` : 'Failed to attach from Aegis');
       _renderComposeAttachments();
     } finally {
       if (btn) {
@@ -4451,13 +4470,16 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     _discardEmail();
   }
 
-  function switchToDoc(docId) {
+  function switchToDoc(docId, opts = {}) {
     if (!docs.has(docId)) return;
     _hideLoadingOverlay();
     if (_diffModeActive) exitDiffMode(true);
 
-    // Save current doc state before switching
-    saveCurrentToMap();
+    // Save current doc state before switching. Skipped when the pane was JUST
+    // mounted: the fresh textarea is empty and activeDocId already points at
+    // the doc being opened, so saving here wrote '' into the map and the doc
+    // opened blank (close + reopen "fixed" it by refetching from the server).
+    if (!opts.skipSave) saveCurrentToMap();
 
     // Auto-delete the doc we're leaving if it's completely empty
     const prevId = activeDocId;
@@ -4918,6 +4940,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
           <button id="doc-email-ai-reply-btn" class="doc-action-icon-btn md-toolbar-email-only" type="button" title="Draft a reply with AI (Fast / Full + optional context)" style="display:none;align-items:center;gap:4px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="color:var(--accent, var(--red));flex-shrink:0;position:relative;top:-1px;"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg><span style="font-size:11px;">Reply</span></button>
           <button id="doc-fontsize-btn" class="doc-action-icon-btn" title="Font size" style="position:relative;width:28px;height:26px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.7;"><path d="M4 7V4h16v3"/><path d="M12 4v16"/><path d="M8 20h8"/></svg><span class="doc-fontsize-levels"><i data-sz="s">S</i><i data-sz="m">M</i><i data-sz="l">L</i></span></button>
           <button id="doc-diff-toggle-btn" class="doc-action-icon-btn" title="Compare changes" style="opacity:0.7;display:none;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"/><path d="M5 12H2l5-5 5 5H9"/><path d="M19 12h3l-5 5-5-5h3"/></svg></button>
+          <button id="doc-copy-btn" class="doc-action-icon-btn" title="Copy document to clipboard" style="opacity:0.7;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
           <span class="md-toolbar-sep md-toolbar-edit-only"></span>
           <button type="button" class="md-toolbar-edit-only" data-md="bold" title="Bold (Ctrl+B)"><b>B</b></button>
           <button type="button" class="md-toolbar-edit-only" data-md="italic" title="Italic (Ctrl+I)"><i>I</i></button>
@@ -5690,6 +5713,29 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     });
 
     // Diff toggle button — compare current content against previous version
+    const copyBtn = document.getElementById('doc-copy-btn');
+    if (copyBtn) copyBtn.addEventListener('click', async () => {
+      const ta = document.getElementById('doc-editor-textarea');
+      const text = (ta && ta.value) || (activeDocId && docs.get(activeDocId)?.content) || '';
+      if (!text) { if (uiModule) uiModule.showToast('Nothing to copy'); return; }
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (_) {
+        // Clipboard API can fail on http:// origins — textarea fallback.
+        const tmp = document.createElement('textarea');
+        tmp.value = text;
+        tmp.style.cssText = 'position:fixed;opacity:0;';
+        document.body.appendChild(tmp);
+        tmp.select();
+        try { document.execCommand('copy'); } catch (_) {}
+        tmp.remove();
+      }
+      if (uiModule) uiModule.showToast('Copied to clipboard');
+      // Brief visual confirmation on the button itself.
+      copyBtn.classList.add('doc-copy-flash');
+      setTimeout(() => copyBtn.classList.remove('doc-copy-flash'), 700);
+    });
+
     const diffToggleBtn = document.getElementById('doc-diff-toggle-btn');
     if (diffToggleBtn) diffToggleBtn.addEventListener('click', async () => {
       if (_diffModeActive) {
@@ -5837,9 +5883,51 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
           closePanel('down');
           return;
         }
+        // ── IDE-style editing (skip for email compose / markdown prose) ──
+        const _codeLang = document.getElementById('doc-language-select')?.value;
+        const _isProse = _codeLang === 'email' || _codeLang === 'markdown' || _codeLang === 'text';
         if (e.key === 'Tab') {
           e.preventDefault();
-          document.execCommand('insertText', false, '\t');
+          const s = ta.selectionStart, en = ta.selectionEnd;
+          const val = ta.value;
+          const lineStart = val.lastIndexOf('\n', s - 1) + 1;
+          const multiLine = val.slice(s, en).includes('\n');
+          if (!e.shiftKey && !multiLine) {
+            // Single caret: insert one indent unit (soft-tab: 2 spaces for
+            // code so it lines up with the model's 2-space output; real \t for
+            // prose where the user may want it).
+            document.execCommand('insertText', false, _isProse ? '\t' : '  ');
+          } else {
+            // Selection (or Shift+Tab): indent / dedent every touched line.
+            const blockStart = lineStart;
+            const blockEnd = en + (val.slice(en).indexOf('\n') === -1 ? val.length - en : val.slice(en).indexOf('\n'));
+            const lines = val.slice(blockStart, blockEnd).split('\n');
+            const unit = _isProse ? '\t' : '  ';
+            const out = lines.map(ln => {
+              if (e.shiftKey) return ln.replace(/^(\t| {1,2})/, '');
+              return ln.length ? unit + ln : ln;
+            }).join('\n');
+            ta.setSelectionRange(blockStart, blockEnd);
+            document.execCommand('insertText', false, out);
+            ta.setSelectionRange(blockStart, blockStart + out.length);
+          }
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+          return;
+        }
+        if (e.key === 'Enter' && !_isProse && !e.shiftKey) {
+          // Auto-indent: carry the current line's leading whitespace to the
+          // new line, and add one level after an opening bracket/brace/tag —
+          // the core "feels like an IDE" behavior.
+          const s = ta.selectionStart, val = ta.value;
+          const lineStart = val.lastIndexOf('\n', s - 1) + 1;
+          const line = val.slice(lineStart, s);
+          const indent = (line.match(/^[\t ]*/) || [''])[0];
+          const opensBlock = /[\{\[\(]\s*$/.test(line) || /<[a-zA-Z][^>]*[^/]>\s*$/.test(line);
+          const extra = opensBlock ? '  ' : '';
+          e.preventDefault();
+          document.execCommand('insertText', false, '\n' + indent + extra);
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+          return;
         }
         // Markdown shortcuts (only when language is markdown)
         const lang = document.getElementById('doc-language-select')?.value;
@@ -6030,6 +6118,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // If no docs loaded, show empty state with helpful placeholder
     if (docs.size === 0 || !activeDocId) {
       showEmptyState();
+    } else {
+      // Populate the freshly-mounted editor with the active doc. skipSave is
+      // required: the new textarea is empty, and switchToDoc's normal
+      // save-before-switch would write that '' into the map (blank first open).
+      switchToDoc(activeDocId, { skipSave: true });
     }
   }
 
@@ -8341,7 +8434,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
   // ---- Diff mode (line-level review) ----
 
-  const DIFF_MODE_THRESHOLD = 3; // min changed lines to trigger diff mode
+  // Any AI edit that changes at least one line is presented as a reviewable
+  // diff with per-chunk Accept/Reject (IDE-style), rather than silently
+  // animating the change in. 1 = review everything; raise to soften.
+  const DIFF_MODE_THRESHOLD = 1; // min changed lines to trigger diff mode
 
   /** Line-level LCS diff algorithm */
   function _computeLineDiff(oldText, newText) {
@@ -10181,7 +10277,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (reason && uiModule) uiModule.showToast(reason);
   }
 
-  /** Track a streamed document without forcing the editor panel open. */
+  /** Open the editor panel and stream a document into it live. */
   export function streamDocOpen(title, language) {
     // Discard any pending AI-edit diff before this stream changes the active
     // document. When the AI streams a NEW document while an unapproved diff is
@@ -10192,6 +10288,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // and saves THAT doc — same guard handleDocUpdate/switchToDoc use.
     if (_diffModeActive) exitDiffMode(true);
     _setDocWritingIndicator(true, 'generating');
+    // Live view: mount the editor pane so the user watches the code being
+    // written as it streams, instead of it landing invisibly behind a closed
+    // panel (with only a raw fence tag flashing in chat).
+    _ensureDocPaneMounted();
     // If already streaming a doc, reuse it (don't create a second temp doc)
     if (_streamDocId && docs.has(_streamDocId)) {
       const existing = docs.get(_streamDocId);
@@ -10357,38 +10457,62 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
   /** Append streaming content to the currently-streaming doc */
   let _streamHlDebounce = null;
+  let _streamRafPending = false;
+  let _streamLatestContent = '';
+  let _streamLastGutterAt = 0;
   export function streamDocDelta(content) {
     if (!_streamDocId) return;
     const doc = docs.get(_streamDocId);
     if (doc) doc.content = content;
-
-    if (_streamDocId === activeDocId) {
-      if ((doc?.language || '').toLowerCase() === 'email') {
-        _syncStreamingEmailFields(doc);
-        return;
-      }
+    if (_streamDocId !== activeDocId) return;
+    if ((doc?.language || '').toLowerCase() === 'email') {
+      _syncStreamingEmailFields(doc);
+      return;
+    }
+    // Coalesce a burst of deltas into ONE DOM update per animation frame, and
+    // DON'T syntax-highlight while streaming. The old path wrote the entire
+    // (growing) content + rebuilt line numbers + re-ran hljs on the whole doc
+    // every ~150ms \u2014 all O(n) per token, so a long file degraded to O(n\u00B2) and
+    // got "super laggy at last". Plain monospace text already respects
+    // indentation/spacing; hljs runs once in streamDocFinalize when done.
+    _streamLatestContent = content;
+    if (_streamRafPending) return;
+    _streamRafPending = true;
+    requestAnimationFrame(() => {
+      _streamRafPending = false;
+      if (!_streamDocId) return;               // stream ended before this frame
+      const text = _streamLatestContent;
       const textarea = document.getElementById('doc-editor-textarea');
       if (textarea) {
-        textarea.value = content;
-        // Auto-scroll to bottom as content streams in
+        textarea.value = text;
         textarea.scrollTop = textarea.scrollHeight;
       }
-      // Update text and line numbers immediately, debounce expensive highlighting
       const codeEl = document.getElementById('doc-editor-code');
-      if (codeEl) codeEl.textContent = content + '\n';
-      updateLineNumbers(content);
-      // Show blinking cursor at end of content
-      let cursor = document.getElementById('doc-stream-cursor');
-      if (!cursor) {
-        cursor = document.createElement('span');
-        cursor.id = 'doc-stream-cursor';
-        cursor.className = 'doc-stream-cursor';
-        cursor.textContent = '\u258F';
+      if (codeEl && !codeEl.dataset.hasDiff) {
+        codeEl.textContent = text + '\n';
+        // Drop any language-* class + highlighted flag so no stale hljs markup
+        // lingers and finalize re-highlights cleanly.
+        if (codeEl.className) codeEl.className = '';
+        codeEl.removeAttribute('data-highlighted');
+        let cursor = document.getElementById('doc-stream-cursor');
+        if (!cursor) {
+          cursor = document.createElement('span');
+          cursor.id = 'doc-stream-cursor';
+          cursor.className = 'doc-stream-cursor';
+          cursor.textContent = '\u258F';
+        }
+        if (codeEl.parentElement) codeEl.parentElement.appendChild(cursor);
       }
-      if (codeEl && codeEl.parentElement) codeEl.parentElement.appendChild(cursor);
-      clearTimeout(_streamHlDebounce);
-      _streamHlDebounce = setTimeout(syncHighlighting, 150);
-    }
+      // Line-number gutter does per-line height measurement (wrap-aware) and
+      // can't cache while text keeps changing, so rebuilding it every frame is
+      // expensive on a long doc. Throttle to ~5×/sec during streaming — the
+      // numbers just need to roughly keep up; finalize does an exact pass.
+      const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      if (now - _streamLastGutterAt > 200) {
+        _streamLastGutterAt = now;
+        updateLineNumbers(text);
+      }
+    });
   }
 
   /** Finalize streaming — called when doc_update arrives with the real ID.
@@ -10534,9 +10658,14 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       if (reuseId) docId = reuseId;
     }
 
-    // Capture old content before updating the map
+    // Capture old content before updating the map. Prefer the live textarea
+    // (it may hold unsaved user typing), but fall back to the docs map — when
+    // the panel is closed there IS no textarea, and without a fallback an AI
+    // edit read as "not an edit" and applied silently with no reviewable diff.
     const textarea = document.getElementById('doc-editor-textarea');
-    const oldContent = (docId === activeDocId && textarea) ? textarea.value : '';
+    const oldContent = (docId === activeDocId && textarea)
+      ? textarea.value
+      : ((docs.get(docId) || {}).content || '');
     const isExistingDoc = docs.has(docId);
     if (isExistingDoc) {
       const existingDoc = docs.get(docId);
@@ -10624,22 +10753,63 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
     // Animate content update for edits; apply directly for creates/streaming
     const isEdit = !isEmailUpdate && isExistingDoc && oldContent && oldContent !== newContent && !streamingId;
-    if (isEdit && textarea) {
-      // Count changed lines to decide between animation and diff mode
-      const oldLines = oldContent.split('\n');
-      const newLines = newContent.split('\n');
-      let changedLines = 0;
-      const maxLen = Math.max(oldLines.length, newLines.length);
-      for (let li = 0; li < maxLen; li++) {
-        if (oldLines[li] !== newLines[li]) changedLines++;
-      }
-      if (changedLines >= DIFF_MODE_THRESHOLD) {
-        if (markdownPreviewWasVisible) _setMarkdownPreviewActive(false, { remember: false });
-        enterDiffMode(oldContent, newContent);
-      } else if (markdownPreviewWasVisible && _refreshMarkdownPreviewIfVisible(docId, newContent)) {
-        // Preview is the visible surface, so refresh it instead of animating a hidden editor.
+    if (isEdit) {
+      // The AI edited an existing doc — open the editor pane if it's closed so
+      // the accept/reject diff is actually visible (an invisible review is a
+      // silent overwrite from the user's point of view), and re-grab the
+      // textarea the mount just created.
+      _ensureDocPaneMounted();
+      const editTextarea = document.getElementById('doc-editor-textarea') || textarea;
+      if (markdownPreviewWasVisible && _refreshMarkdownPreviewIfVisible(docId, newContent)) {
+        // Markdown docs shown as RENDERED preview: refresh the preview in place
+        // (issue #2182) rather than dropping into a code diff.
       } else {
-        _animateDocEdit(textarea, newContent);
+        // COALESCE rapid multi-edit turns. A "spam edit" (the model firing 10+
+        // edit_document calls in one turn) previously rebuilt the entire diff
+        // overlay + re-ran hljs on the whole growing doc on EVERY edit — O(n)
+        // per edit, which lagged hard. Instead: keep the pre-burst content as
+        // the diff baseline, drop out of any half-built diff, show the latest
+        // content as plain text immediately (cheap), and render the
+        // accept/reject diff ONCE after the edits settle (baseline → final).
+        if (_coalesceDiffBaseline == null) {
+          // First edit of a burst — baseline is the content before it. If a
+          // diff was already open, its stored old content is the true baseline.
+          _coalesceDiffBaseline = _diffModeActive ? (_diffOldContent ?? oldContent) : oldContent;
+        }
+        _coalesceDiffDocId = docId;
+        if (_diffModeActive) exitDiffMode(true);
+        if (editTextarea) {
+          editTextarea.value = newContent;
+          editTextarea.scrollTop = editTextarea.scrollHeight;
+        }
+        const _codeElLive = document.getElementById('doc-editor-code');
+        if (_codeElLive && !_codeElLive.dataset.hasDiff) {
+          _codeElLive.textContent = newContent + '\n';
+        }
+        updateLineNumbers(newContent);
+        clearTimeout(_coalesceDiffTimer);
+        _coalesceDiffTimer = setTimeout(() => {
+          const base = _coalesceDiffBaseline;
+          const dId = _coalesceDiffDocId;
+          _coalesceDiffBaseline = null;
+          _coalesceDiffDocId = null;
+          const finalContent = (docs.get(dId) || {}).content || '';
+          if (base == null || base === finalContent || dId !== activeDocId) {
+            // Nothing to review (identical, or user switched docs) — just paint.
+            syncHighlighting();
+            return;
+          }
+          const oL = base.split('\n'), nL = finalContent.split('\n');
+          let changed = 0;
+          const mx = Math.max(oL.length, nL.length);
+          for (let li = 0; li < mx; li++) if (oL[li] !== nL[li]) changed++;
+          if (changed >= DIFF_MODE_THRESHOLD) {
+            if (_isMarkdownPreviewVisible()) _setMarkdownPreviewActive(false, { remember: false });
+            enterDiffMode(base, finalContent);
+          } else {
+            syncHighlighting();
+          }
+        }, 500);
       }
     } else {
       if (isEmailUpdate) {

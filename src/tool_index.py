@@ -8,8 +8,10 @@ relevant ones per user message.
 
 import logging
 import hashlib
+import math
 import re
 import time
+from collections import Counter
 from typing import Dict, List, Optional, Set
 
 from src.embedding_lanes import (
@@ -90,8 +92,8 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "edit_document": "Preferred tool for editing an existing document — targeted find-and-replace. Use for any small change: add a function, fix a bug, tweak a section, rename things.",
     "update_document": "Replace the entire active document content. ONLY for full rewrites (>50% changed). Do not use for small edits — use edit_document instead.",
     "suggest_document": "Suggest changes to the active document with explanations. For code review, proofreading, feedback requests.",
-    "generate_image": "Generate an AI image from a text prompt. Use directly for generate/create/draw image requests. Model may be auto; do not probe Cookbook/Python first.",
-    "ai_edit_image": "Edit an existing gallery image using AI img2img. Pass the image ID and describe what changes to make. The model rewrites the image based on your prompt.",
+    "generate_image": "Generate an AI image from a text prompt. Use directly for generate/create/draw image requests. Keep proper nouns and brand names verbatim in the prompt (e.g. 'Ferrari', not a description of one). Model may be auto; do not probe Cookbook/Python first.",
+    "ai_edit_image": "Edit an existing gallery image using AI img2img. Pass the image ID and describe what changes to make, keeping proper nouns and brand names verbatim. The model rewrites the image based on your prompt.",
     "chat_with_model": "Send a message to a different AI model. Compare responses, get specialized help, delegate tasks.",
     "ask_teacher": "Ask a more capable model for help with a difficult problem. Escalate complex tasks.",
     "pipeline": "Run a multi-step AI pipeline with multiple models. Chain tasks together in sequence.",
@@ -365,6 +367,20 @@ class ToolIndex:
                    "check on that job", "job output", "kill the job",
                    "kill the background", "stop the background", "running job"}):
             {"manage_bg_jobs"},
+        # Shell / system / hardware intents. bash+python previously relied
+        # SOLELY on embedding retrieval — no deterministic hint — so whenever
+        # the vector index was down (ChromaDB unreachable) or the query
+        # embedded poorly, the schema list had no shell tool and the model
+        # truthfully answered "I don't have shell access", intermittently.
+        # Deterministic hints make shell availability stable; the per-user
+        # can_use_bash privilege / disabled_tools still gate actual execution.
+        frozenset({"shell", "bash", "terminal", "command line", "console",
+                   "nvidia-smi", "nvidia", "gpu", "vram", "cuda", "cpu",
+                   "system info", "hardware", "uptime", "disk space",
+                   "processes", "htop", "specs", "benchmark", "temps",
+                   "temperature", "install", "pip", "npm", "docker",
+                   "git", "run a command", "run this command", "execute"}):
+            {"bash", "python"},
         frozenset({"note", "todo", "reminder", "remind", "checklist", "remember to"}):
             {"manage_notes"},
         # Chat/session management. "rename" alone maps to documents below, so a
@@ -659,3 +675,60 @@ def reset_tool_index() -> None:
     global _tool_index, _last_attempt
     _tool_index = None
     _last_attempt = 0.0
+
+
+# ── Lexical fallback retrieval (no embeddings, no ChromaDB) ────────────────
+# When the vector index is unavailable (ChromaDB down, embedding endpoint
+# cold), tool selection used to collapse to ALWAYS_AVAILABLE + the static
+# keyword hints — anything not covered by a hint simply vanished from the
+# model's toolset, which read as "the agent randomly can't use its tools".
+# This BM25-style lexical scorer over the tool descriptions is a real
+# retriever: pure Python, sub-millisecond over ~60 tools, deterministic, and
+# needs no external service. The keyword hints remain as curated
+# force-includes on top (they encode product decisions, e.g. #1707).
+
+_LEX_WORD_RE = re.compile(r"[a-z0-9]+")
+# Cache of {corpus_fingerprint: (doc_tokens, df, N)} — the corpus only changes
+# when tools are added/removed, so tokenization is done once.
+_lex_cache: Dict[str, tuple] = {}
+
+
+def lexical_tool_retrieval(
+    query: str, k: int = 8, extra_descriptions: Optional[Dict[str, str]] = None
+) -> List[str]:
+    """Top-k tool names for `query` by lexical (BM25-ish) match over the tool
+    name + description corpus. Fallback for when embedding retrieval is down."""
+    if not query or not query.strip():
+        return []
+    docs: Dict[str, str] = dict(BUILTIN_TOOL_DESCRIPTIONS)
+    if extra_descriptions:
+        docs.update({k2: v for k2, v in extra_descriptions.items() if v})
+    fp = hashlib.sha256(",".join(sorted(docs.keys())).encode()).hexdigest()
+    cached = _lex_cache.get(fp)
+    if cached is None:
+        doc_tokens = {
+            name: set(_LEX_WORD_RE.findall(f"{name.replace('_', ' ')} {desc}".lower()))
+            for name, desc in docs.items()
+        }
+        df: Counter = Counter()
+        for toks in doc_tokens.values():
+            for t in toks:
+                df[t] += 1
+        _lex_cache.clear()  # corpus changed — old fingerprints are dead
+        _lex_cache[fp] = (doc_tokens, df, len(doc_tokens))
+        cached = _lex_cache[fp]
+    doc_tokens, df, n_docs = cached
+    q_tokens = set(_LEX_WORD_RE.findall(query.lower()))
+    if not q_tokens:
+        return []
+    scored = []
+    for name, toks in doc_tokens.items():
+        score = 0.0
+        for t in q_tokens & toks:
+            # IDF-weighted overlap: rare terms (a tool name, "calendar",
+            # "shell") dominate; ubiquitous words ("the", "use") score ~0.
+            score += math.log(1.0 + (n_docs - df[t] + 0.5) / (df[t] + 0.5))
+        if score > 0:
+            scored.append((score, name))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [name for _, name in scored[:k]]

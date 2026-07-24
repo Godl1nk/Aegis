@@ -2,6 +2,7 @@
 
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
+import { collapseSidebarToRail } from './modalSnap.js';
 
 let API_BASE = '';
 let debounceTimer = null;
@@ -13,11 +14,21 @@ function el(id) { return document.getElementById(id); }
 export function openSearch() {
   const overlay = el('search-overlay');
   if (!overlay) return;
+  // On mobile the sidebar is a full-height overlay. Search is normally opened
+  // FROM that sidebar, so without collapsing it the sidebar sits on top of the
+  // search UI — the user has to close it by hand before they can type. Modal
+  // panels (gallery, notes, …) already collapse it on open; the search overlay
+  // isn't a .modal so it never got that treatment.
+  if (window.innerWidth <= 768) {
+    try { collapseSidebarToRail(); } catch (_) {}
+  }
   overlay.classList.remove('hidden');
   const input = el('search-input');
   if (input) {
     input.value = '';
-    input.focus();
+    // Autofocus opens the on-screen keyboard, which halves the visible
+    // result list on a phone. Let the user tap the field when they want it.
+    if (window.innerWidth > 768) input.focus();
   }
   selectedIndex = -1;
   results = [];

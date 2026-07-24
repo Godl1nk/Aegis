@@ -90,7 +90,8 @@ def _is_sensitive_path(resolved: str) -> bool:
     the lowercase form, so a case-sensitive check would let it slip past the
     deny-list in every file tool that relies on it.
     """
-    parts = [p.casefold() for p in resolved.split(os.sep)]
+    normalized = resolved.replace("\\", "/")
+    parts = [p.casefold() for p in normalized.split("/")]
     filename = parts[-1] if parts else ""
 
     # Check if any path component is a sensitive directory.
@@ -126,6 +127,10 @@ def _tool_path_roots() -> list[str]:
     tmpdir = os.environ.get("TMPDIR")
     if tmpdir:
         roots.append(tmpdir)
+
+    # Windows temp directory.
+    import tempfile
+    roots.append(tempfile.gettempdir())
 
     # Opt-in extra roots from settings.
     try:
@@ -522,15 +527,36 @@ _BG_MARKERS = {"#!bg", "#bg", "# bg", "#background", "# background", "@backgroun
 
 def _split_bg_marker(content: str):
     """If the bash content's first non-empty line is a background marker
-    (e.g. `#!bg`), return (True, command_without_marker); else (False, content)."""
+    (e.g. `#!bg`), return (True, command_without_marker, watch_patterns);
+    else (False, content, None).
+
+    The marker line may carry a ``watch=`` parameter (ported from Hermes
+    ``watch_patterns``): `#!bg watch=Ready,listening on` notifies the agent
+    when a matching line appears in the job's output — for rare one-shot
+    mid-process signals on long-lived processes (server readiness,
+    migration-done markers). Comma-separated substrings, matched per line.
+    """
     lines = content.split("\n")
     i = 0
     while i < len(lines) and not lines[i].strip():
         i += 1
-    if i < len(lines) and lines[i].strip().lower() in _BG_MARKERS:
-        del lines[i]
-        return True, "\n".join(lines).strip()
-    return False, content
+    if i < len(lines):
+        first = lines[i].strip()
+        lowered = first.lower()
+        if lowered in _BG_MARKERS:
+            del lines[i]
+            return True, "\n".join(lines).strip(), None
+        # Marker with parameters: "#!bg watch=a,b"
+        for marker in _BG_MARKERS:
+            if lowered.startswith(marker + " "):
+                params = first[len(marker):].strip()
+                watch = None
+                m = re.search(r'watch=(.+)$', params, re.IGNORECASE)
+                if m:
+                    watch = [p.strip() for p in m.group(1).split(",") if p.strip()]
+                del lines[i]
+                return True, "\n".join(lines).strip(), (watch or None)
+    return False, content, None
 
 
 async def _direct_fallback(
@@ -540,8 +566,12 @@ async def _direct_fallback(
     session_id: Optional[str] = None,
     owner: Optional[str] = None,
 ) -> Optional[Dict]:
+    # Scrubbed env (Hermes port): provider API keys, bot tokens, and other
+    # Aegis-managed secrets never reach a model-authored subprocess. Explicit
+    # opt-ins go through settings `bash_env_passthrough`.
+    from src.env_scrub import scrub_subprocess_env
     _subproc_env = {
-        **os.environ,
+        **scrub_subprocess_env(),
         "TERM": "xterm-256color",
         "COLUMNS": "120",
         "LINES": "40",
@@ -736,11 +766,45 @@ async def _execute_tool_block_impl(
     # marker runs DETACHED — returns a job id immediately so the chat stream
     # isn't held open for a multi-minute install/ffmpeg/download. The always-on
     # monitor re-invokes the agent with the full output when the job finishes.
+    # Dangerous-command guard (ported from Hermes check_all_command_guards):
+    # hardline floor, sudo-stdin guard, user deny rules, pattern detection +
+    # interactive approval. Lives at this dispatcher chokepoint so BOTH bash
+    # backends (MCP server route and the direct fallback) and the `#!bg`
+    # background path are gated — none of them can bypass the approval gate.
+    # The approval request rides the progress callback; agent_loop forwards
+    # it as an `approval_request` SSE event and the user's decision comes
+    # back via POST /api/approvals.
+    if tool == "bash":
+        from src.command_approval import check_command_guard
+        from src.docker_env import get_docker_settings
+        _is_bg_probe, _guard_cmd, _ = _split_bg_marker(content)
+        # Isolated docker backend skips the guard (nothing it runs can touch
+        # the host); a workspace bind mount restores host access, so the
+        # guard stays active (Hermes has_host_access). Background jobs always
+        # run on the host, so they are guarded as local regardless.
+        _denv = get_docker_settings()
+        _env_type = "local" if _is_bg_probe else str(_denv["env_type"])
+        _guard = await check_command_guard(
+            _guard_cmd if _is_bg_probe else content,
+            session_id=session_id or "",
+            env_type=_env_type,
+            has_host_access=bool(_denv["mount_workspace"]),
+            emit_event=progress_cb,
+        )
+        if not _guard.get("approved"):
+            logger.warning("bash command blocked by approval guard")
+            return "bash: BLOCKED", {
+                "error": _guard.get("message") or "Command blocked.",
+                "exit_code": 126,
+                "blocked": True,
+            }
+
     if tool == "bash" and session_id:
-        _is_bg, _bg_cmd = _split_bg_marker(content)
+        _is_bg, _bg_cmd, _bg_watch = _split_bg_marker(content)
         if _is_bg and _bg_cmd:
             from src import bg_jobs
-            rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=agent_cwd())
+            rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=agent_cwd(),
+                                 watch_patterns=_bg_watch)
             short = _bg_cmd.strip().split(chr(10))[0][:80]
             desc = f"bash (background): {short}"
             result = {
@@ -1022,7 +1086,7 @@ def format_tool_result(description: str, result: Dict) -> str:
     if "stdout" in result:
         if result["stdout"]:
             parts.append(f"**stdout:**\n```\n{result['stdout']}\n```")
-        if result["stderr"]:
+        if result.get("stderr"):
             parts.append(f"**stderr:**\n```\n{result['stderr']}\n```")
         parts.append(f"**exit_code:** {result.get('exit_code', 'unknown')}")
     elif "output" in result:
@@ -1044,7 +1108,7 @@ def format_tool_result(description: str, result: Dict) -> str:
         parts.append(f"Session created: **{result['name']}** (id: `{result['session_id']}`, model: {result.get('model', 'unknown')})")
     elif "success" in result:
         if result["success"]:
-            parts.append(f"File written: {result['path']} ({result['size']} bytes)")
+            parts.append(f"File written: {result.get('path', '?')} ({result.get('size', '?')} bytes)")
         else:
             parts.append(f"Error: {result.get('error', 'unknown')}")
     elif "action" in result:

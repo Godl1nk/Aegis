@@ -380,7 +380,16 @@ def analyze_image_with_vl_result(image_path: str, owner: str | None = None) -> d
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Describe this image in detail"},
+                    # "/no_think" is Qwen3's soft switch to skip the <think>
+                    # block — without it a thinking-enabled VL model burned
+                    # 1000+ reasoning tokens (~1min at local speeds) BEFORE the
+                    # description, all invisible pre-stream. Other VL models
+                    # just see a stray token; harmless.
+                    {"type": "text", "text": (
+                        "Describe this image in detail, including any visible "
+                        "text. Reply with the description only — no reasoning "
+                        "preamble. /no_think"
+                    )},
                     {"type": "image_url", "image_url": {"url": f"data:image/{img_format};base64,{img_data}"}},
                 ],
             }

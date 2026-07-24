@@ -288,6 +288,7 @@ async def test_run_post_response_tasks_does_not_fire_extraction_concurrently(mon
         calls["memory"] += 1
 
     mem_extractor_mod.extract_and_store = fake_extract_and_store
+    mem_extractor_mod._fallback_memory_candidates = lambda messages: []
     monkeypatch.setitem(sys.modules, "services.memory.memory_extractor", mem_extractor_mod)
 
     skill_extractor_mod = types.ModuleType("services.memory.skill_extractor")

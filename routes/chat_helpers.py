@@ -1198,6 +1198,31 @@ def run_post_response_tasks(
             t_url, t_model, t_headers,
         )))
 
+    # Pre-compress extraction (Hermes on_pre_compress): if this turn's
+    # compaction stashed the discarded older half, run one last fact
+    # extraction over it before the detail is gone for good. Same gates as
+    # regular extraction, minus the every-4th throttle — compaction is rare.
+    _precompress = getattr(sess, "_precompress_messages", None)
+    if _precompress:
+        sess._precompress_messages = None
+        if (
+            allow_background_extraction
+            and not incognito
+            and not compare_mode
+            and uprefs.get("memory_enabled", True)
+            and uprefs.get("reference_saved_memories", True)
+            and uprefs.get("auto_memory", True)
+        ):
+            from services.memory.memory_extractor import extract_and_store
+            from src.task_endpoint import resolve_task_endpoint
+            t_url, t_model, t_headers = resolve_task_endpoint(
+                sess.endpoint_url, sess.model, sess.headers, owner=owner,
+            )
+            _extraction_jobs.append(("memory-precompress", extract_and_store(
+                sess, memory_manager, memory_vector,
+                t_url, t_model, t_headers, messages=_precompress,
+            )))
+
     if (
         not incognito
         and not compare_mode
@@ -1207,7 +1232,7 @@ def run_post_response_tasks(
         and uprefs.get("dream_source_chats", True)
     ):
         from services.memory.dreamer import dream_from_session
-        asyncio.create_task(dream_from_session(
+        _spawn_bg(dream_from_session(
             sess, memory_manager, memory_vector, owner=owner,
         ))
 

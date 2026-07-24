@@ -220,7 +220,10 @@ def _fallback_memory_candidates(messages) -> list[dict]:
     return candidates[:2]
 
 
-def _is_text_duplicate(new_text: str, existing: list, threshold: float = 0.6) -> bool:
+def _is_text_duplicate(new_text: str, existing: list, threshold: float = 0.75) -> bool:
+    # 0.75 (was 0.6): at 0.6, opposite facts that share most tokens were
+    # dropped as duplicates — "User prefers dark mode" vs "User prefers
+    # light mode" is Jaccard 3/5 = 0.6 exactly, so the new fact vanished.
     """Check if new_text is too similar to any existing memory (Jaccard similarity)."""
     new_tokens = set(new_text.lower().split())
     if not new_tokens:
@@ -280,11 +283,18 @@ async def extract_and_store(
     endpoint_url: str,
     model: str,
     headers: Optional[dict] = None,
+    messages: Optional[list] = None,
 ):
     """Extract facts from recent conversation and store them.
 
     Designed to run as a background task (asyncio.create_task).
     Errors are logged, never raised.
+
+    ``messages`` overrides the session's recent context — the pre-compress
+    hook (Hermes ``on_pre_compress``) passes the older half of the
+    conversation before compaction discards it, so durable facts buried in
+    soon-to-be-summarized turns get one last extraction pass. When given,
+    the full list is analyzed (no CONTEXT_WINDOW slice).
     """
     if not endpoint_url or not model:
         logger.debug("[memory-extract] No model or URL provided, skipping")
@@ -293,9 +303,12 @@ async def extract_and_store(
     try:
         from src.llm_core import llm_call_async
 
-        # Get last N messages from session
-        messages = session.get_context_messages()
-        recent = messages[-CONTEXT_WINDOW:] if len(messages) > CONTEXT_WINDOW else messages
+        if messages is not None:
+            recent = messages
+        else:
+            # Get last N messages from session
+            messages = session.get_context_messages()
+            recent = messages[-CONTEXT_WINDOW:] if len(messages) > CONTEXT_WINDOW else messages
 
         if len(recent) < 2:
             return  # Need at least a user message and assistant response
@@ -411,10 +424,14 @@ async def extract_and_store(
             # it does not catch failures that develop later.)
             if memory_vector and memory_vector.healthy:
                 try:
+                    # 0.85 (was 0.72): distinct facts with the same shape
+                    # ("likes Python" vs "likes Java") often exceed 0.72
+                    # cosine similarity and were silently dropped as dupes;
+                    # 0.85 still catches paraphrases of the same fact.
                     try:
-                        existing_id = memory_vector.find_similar(fact_text, threshold=0.72, owner=_owner)
+                        existing_id = memory_vector.find_similar(fact_text, threshold=0.85, owner=_owner)
                     except TypeError:
-                        existing_id = memory_vector.find_similar(fact_text, threshold=0.72)
+                        existing_id = memory_vector.find_similar(fact_text, threshold=0.85)
                 except Exception as e:
                     logger.warning(f"Memory dedup (vector) unavailable, using text fallback: {e}")
                     existing_id = None

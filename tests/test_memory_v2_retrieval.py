@@ -93,12 +93,19 @@ def test_inline_memory_command_is_owner_scoped(monkeypatch, tmp_path):
     from core.models import Session
     from src.chat_handler import ChatHandler
     from src.memory import MemoryManager
+    # conftest.py replaces src.database with a stub module that lacks this
+    # attribute, so patch the module object directly with raising=False —
+    # the string form ("src.database.update_session_last_accessed") can't
+    # resolve through the stub either.
+    import src.database as src_database
 
     class FakeSessionManager:
         def save_sessions(self):
             pass
 
-    monkeypatch.setattr("src.database.update_session_last_accessed", lambda session_id: None)
+    monkeypatch.setattr(
+        src_database, "update_session_last_accessed", lambda session_id: None, raising=False
+    )
 
     manager = MemoryManager(str(tmp_path))
     existing = manager.add_entry("Bob prefers verbose replies", owner="bob")
@@ -135,3 +142,34 @@ def test_delete_last_v2_memory_removes_it(monkeypatch, tmp_path):
 
     assert manager.delete_entry(entry["id"], owner="alice") is True
     assert manager.load(owner="alice") == []
+
+
+def test_inflection_variants_still_retrieve_memories(tmp_path):
+    """Keyword recall must survive simple English inflection: 'where do I
+    live' ↔ 'User lives in Singapore', 'my projects' ↔ '…side project'.
+    Without the light stemmer these were exact-token misses, so dream
+    memories silently failed to surface whenever the vector index was down."""
+    from types import SimpleNamespace
+    from src.chat_processor import ChatProcessor
+    from src.memory import MemoryManager
+
+    manager = MemoryManager(str(tmp_path))
+    city = manager.add_entry("User lives in Singapore", source="dream", category="identity", owner="alice")
+    proj = manager.add_entry("User is building a browser OS side project", source="dream", category="project", owner="alice")
+    manager.save([city, proj])
+
+    processor = ChatProcessor(manager, personal_docs_manager=SimpleNamespace())
+
+    def preface_text(q):
+        preface, _, _ = processor.build_context_preface(
+            q, session=SimpleNamespace(), use_memory=True, owner="alice",
+            reference_saved_memories=True, reference_chat_history=True,
+        )
+        return " ".join(m["content"] for m in preface)
+
+    assert "Singapore" in preface_text("where do i live")
+    assert "browser OS" in preface_text("tell me about my projects")
+    assert "browser OS" in preface_text("what am i building")
+    # Casual greeting must not drag memories in.
+    joined = preface_text("hi")
+    assert "Singapore" not in joined and "browser OS" not in joined

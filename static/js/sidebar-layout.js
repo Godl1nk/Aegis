@@ -337,8 +337,13 @@ export function initSidebarLayout(Storage, opts) {
   }
 
   // ── Click outside sidebar / icon rail to close (mobile only) ──
+  // Capture phase: the tap that dismisses the sidebar must NOT also activate
+  // whatever it landed on. The backdrop that would normally absorb it is
+  // disabled (it renders above the icon rail, which has no z-index), so
+  // without this a tap meant to close the sidebar also fired the message
+  // action / button underneath it.
   document.addEventListener('click', (e) => {
-    if (window.innerWidth >= 700) return; // desktop keeps sidebar open
+    if (window.innerWidth >= 768) return; // desktop keeps sidebar open
     const sb = document.getElementById('sidebar');
     const rail = document.getElementById('icon-rail');
     // Ignore clicks on elements removed from DOM (e.g. session list re-render during folder toggle)
@@ -358,6 +363,8 @@ export function initSidebarLayout(Storage, opts) {
       if (backdrop) backdrop.classList.remove('visible');
       sb.classList.add('hidden');
       syncRailSide();
+      e.stopPropagation();
+      e.preventDefault();
       return;
     }
     // Close mobile-mini icon rail overlay if open
@@ -367,8 +374,10 @@ export function initSidebarLayout(Storage, opts) {
       const backdrop = document.getElementById('sidebar-backdrop');
       if (backdrop) backdrop.classList.remove('visible');
       syncRailSide();
+      e.stopPropagation();
+      e.preventDefault();
     }
-  });
+  }, true);
 
   // ── Mobile: close sidebar/rail when a tool button is tapped ──
   // The user expects the sidebar to get out of the way the moment a tool
@@ -380,7 +389,7 @@ export function initSidebarLayout(Storage, opts) {
   let _sidebarWasOpenBeforeTool = false;
   let _railWasOpenBeforeTool = false;
   document.addEventListener('click', (e) => {
-    if (window.innerWidth >= 700) return;
+    if (window.innerWidth >= 768) return;
     const btn = e.target.closest('[id^="tool-"], [id^="rail-"]');
     if (!btn) return;
     setTimeout(() => {
@@ -418,7 +427,7 @@ export function initSidebarLayout(Storage, opts) {
   // whatever state it was in before the tool was opened. ──
   // We watch every .modal for the .hidden class going on, and if our
   // remembered "sidebar-was-open" flag is set, undo the auto-close.
-  if (window.innerWidth < 700) {
+  if (window.innerWidth < 768) {
     const _restoreSidebar = () => {
       const sb = document.getElementById('sidebar');
       const rail = document.getElementById('icon-rail');

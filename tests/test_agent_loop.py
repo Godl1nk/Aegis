@@ -108,6 +108,9 @@ def test_insert_before_latest_user_appends_when_no_user_message_exists():
 
 
 def test_code_generation_request_classifies_as_document():
+    # Topic words ("browser OS", "single script") no longer force standalone
+    # chat output: the document path stays available so follow-up fixes can
+    # edit_document instead of regenerating the whole artifact in chat.
     text = "Using HTML, CSS and JS, generate a browser OS in a single script."
     intent = _classify_agent_request([], text)
     artifact = _classify_code_artifact_request(text)
@@ -116,10 +119,20 @@ def test_code_generation_request_classifies_as_document():
     assert "documents" in intent.get("domains", [])
     assert artifact == {
         "requested": True,
-        "standalone": True,
+        "standalone": False,
         "language": "html",
         "title": "Generating HTML",
     }
+
+
+def test_explicit_chat_output_request_classifies_as_standalone():
+    artifact = _classify_code_artifact_request(
+        "Generate a snake game in HTML directly in the chat, no document."
+    )
+
+    assert artifact["requested"] is True
+    assert artifact["standalone"] is True
+    assert artifact["language"] == "html"
 
 
 def test_conceptual_code_question_does_not_open_artifact_editor():

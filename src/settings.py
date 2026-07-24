@@ -58,9 +58,33 @@ DEFAULT_SETTINGS = {
     # have been observed inventing signatures and sending to real
     # recipients without confirmation.
     "agent_email_confirm": True,
+    # ── Dangerous-command approval (src/command_approval.py, Hermes port) ──
+    # "manual" pauses flagged bash commands for an in-chat approve/deny
+    # prompt; "off" bypasses the prompt layer (the hardline blocklist and
+    # command_approval_deny rules still apply — they are un-bypassable).
+    "command_approval_mode": "manual",
+    # Seconds to wait for the user's decision before failing closed.
+    "command_approval_timeout": 60,
+    # User-defined fnmatch globs blocked unconditionally (even under yolo),
+    # e.g. ["git push*", "*prod*"].
+    "command_approval_deny": [],
+    # Env var names allowed through the bash secret scrubbing
+    # (src/env_scrub.py), e.g. ["OPENAI_API_KEY"] if a workflow needs it.
+    "bash_env_passthrough": [],
+    # ── Terminal backend (src/docker_env.py, Hermes port) ──
+    # "local" runs agent bash on the host; "docker" runs it in a
+    # security-hardened per-session container.
+    "terminal_env": "local",
+    "docker_image": "nikolaik/python-nodejs:python3.11-nodejs20",
+    # Bind-mount the agent workspace at /workspace inside the container.
+    # Restores host access, so command approval stays active in docker mode.
+    "docker_mount_workspace": False,
     "image_gen_enabled": False,
     "image_model": "",
     "image_edit_model": "",
+    # Ask-before-generate: when ON, an image generate/edit tool call pauses and
+    # shows a model-picker card in chat instead of running immediately.
+    "ask_image_model": False,
     "image_quality": "medium",
     "image_prompt_format": "auto",
     "image_prompt_json_template": DEFAULT_JSON_TEMPLATE,
@@ -133,6 +157,11 @@ DEFAULT_SETTINGS = {
     "research_run_timeout_seconds": 1800,
     "agent_max_tool_calls": 0,
     "agent_max_rounds": 20,  # per-message agent step cap (clamped 1..200)
+    # After the model writes a code document (python/js/html), run a SYNTAX-only
+    # check (ast.parse / node --check) and, on failure, feed the error back so
+    # the model fixes it via edit_document before finishing. Off by default: it
+    # adds an extra round on local models. Syntax only — not runtime/logic.
+    "agent_code_syntax_check": False,
     # Soft input-token budget for the agent loop. The DEFAULT value (6000) is the
     # "auto" sentinel: it means "scale the budget to the model's context window"
     # (#1230) — so long-context models aren't capped at 6000. Set ANY OTHER value
@@ -295,6 +324,7 @@ def is_setting_overridden(key: str) -> bool:
 _PER_USER_KEYS = {
     "vision_model", "vision_enabled", "vision_model_fallbacks",
     "image_model", "image_edit_model", "image_gen_enabled", "image_quality", "image_prompt_format", "image_prompt_json_template",
+    "ask_image_model",
     # Default chat endpoint / model — without per-user resolution every new
     # account inherited whatever the most-recent admin picked, which then
     # got injected into the chat composer on first open.

@@ -1402,11 +1402,22 @@ def setup_model_routes(model_discovery):
             provider = _safe_detect_provider(base)
             # Merge cached + pinned models, then filter out hidden ones
             ep_model_type = getattr(ep, "model_type", None) or "llm"
+            if ep_model_type == "image":
+                # Whole endpoint serves image models — none belong in the CHAT
+                # model picker (they're offered by the image-model pickers).
+                continue
             model_ids = _visible_models(
                 _cached_model_ids(ep),
                 ep.hidden_models,
                 getattr(ep, "pinned_models", None),
             )
+            # Per-model image marks (mixed endpoints): a model the user marked
+            # as image-generation is not a chat model — keep it out of the chat
+            # picker. The Settings image pickers read /api/model-endpoints,
+            # which still lists everything.
+            _img_marks = set(_normalize_model_ids(getattr(ep, "image_models", None)))
+            if _img_marks:
+                model_ids = [m for m in model_ids if m not in _img_marks]
             # Build correct URL based on provider
             chat_url = build_chat_url(base)
             kind = _effective_endpoint_kind(ep, base)
@@ -2169,12 +2180,14 @@ def setup_model_routes(model_discovery):
                     response.headers["X-Model-Refresh-Warning"] = "Model refresh failed or returned no models; kept cached models."
             pinned = _normalize_model_ids(getattr(ep, "pinned_models", None))
             pinned_set = set(pinned)
+            image_set = set(_normalize_model_ids(getattr(ep, "image_models", None)))
             return [
                 {
                     "id": m,
                     "display": m.split("/")[-1],
                     "is_hidden": m in hidden,
                     "is_pinned": m in pinned_set,
+                    "is_image": m in image_set,
                 }
                 for m in _merge_model_ids(all_models, pinned)
             ]
@@ -2208,11 +2221,17 @@ def setup_model_routes(model_discovery):
             if "pinned_models" in body or "pinned" in body:
                 pinned = _normalize_model_ids(body.get("pinned_models", body.get("pinned")))
                 ep.pinned_models = json.dumps(pinned) if pinned else None
+            # Per-model image-generation marks (mixed endpoints serve both chat
+            # and image models; endpoint-level model_type is too coarse there).
+            if "image_models" in body:
+                image_ids = _normalize_model_ids(body.get("image_models"))
+                ep.image_models = json.dumps(image_ids) if image_ids else None
             db.commit()
             _invalidate_models_cache()
             hidden_count = len(json.loads(ep.hidden_models)) if ep.hidden_models else 0
             pinned_count = len(json.loads(ep.pinned_models)) if ep.pinned_models else 0
-            return {"id": ep_id, "hidden_count": hidden_count, "pinned_count": pinned_count}
+            image_count = len(json.loads(ep.image_models)) if getattr(ep, "image_models", None) else 0
+            return {"id": ep_id, "hidden_count": hidden_count, "pinned_count": pinned_count, "image_count": image_count}
         finally:
             db.close()
 

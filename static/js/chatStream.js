@@ -226,6 +226,14 @@ export function handleUIControl(uiData) {
         var ids = { memories: 'tool-memory-btn', skills: 'skills-btn', settings: 'open-settings-btn' };
         var btn = document.getElementById(ids[panel]);
         if (btn) btn.click();
+      } else if (panel === 'journey') {
+        // Journey lives as a tab inside the Brain modal.
+        var jbtn = document.getElementById('tool-memory-btn');
+        if (jbtn) jbtn.click();
+        setTimeout(function() {
+          var tab = document.querySelector('.memory-tab[data-memory-tab="journey"]');
+          if (tab) tab.click();
+        }, 60);
       }
 
     } else if (uiEvent === 'open_email_reply' || uiData.ui_event === 'open_email_reply') {

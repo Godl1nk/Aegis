@@ -177,7 +177,12 @@ def validate_message(message: str) -> str:
     if len(message) == 0:
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
-    if len(message) > 50000:
+    # Generous cap: document editing embeds a selected code region into the
+    # message, which for a large single-file app (a browser OS is tens of
+    # thousands of chars) blew past the old 50k limit and hard-failed the edit
+    # with "Message exceeds maximum length". The backend trims context to the
+    # model's window anyway, so this only guards against absurd payloads.
+    if len(message) > 500000:
         raise HTTPException(status_code=400, detail="Message exceeds maximum length")
 
     return message

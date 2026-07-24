@@ -370,6 +370,7 @@ class ModelEndpoint(TimestampMixin, Base):
     hidden_models = Column(Text, nullable=True)    # JSON list of model IDs that failed probing
     cached_models = Column(Text, nullable=True)    # JSON list of last-known model IDs (avoids probe on list)
     pinned_models = Column(Text, nullable=True)    # JSON list of admin-pinned model IDs (manual, may not appear in /v1/models)
+    image_models = Column(Text, nullable=True)     # JSON list of model IDs marked as image-generation (per-model, for mixed endpoints)
     model_type = Column(String, nullable=True, default="llm")  # "llm" or "image"
     # auto = classify by URL; local = self-hosted server; api/proxy = external
     # OpenAI-compatible API even when reachable through a private/tailnet IP.
@@ -1140,6 +1141,10 @@ def _migrate_add_pinned_models_column():
             conn.execute("ALTER TABLE model_endpoints ADD COLUMN pinned_models TEXT")
             conn.commit()
             logging.getLogger(__name__).info("Migrated: added 'pinned_models' column to model_endpoints")
+        if columns and "image_models" not in columns:
+            conn.execute("ALTER TABLE model_endpoints ADD COLUMN image_models TEXT")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added 'image_models' column to model_endpoints")
     except Exception as e:
         logging.getLogger(__name__).warning(f"pinned_models migration failed: {e}")
     finally:

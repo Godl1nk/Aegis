@@ -65,7 +65,7 @@ async def test_local_gpt_named_image_endpoint_gets_minimal_generation_payload(mo
 @pytest.mark.asyncio
 async def test_local_gpt_named_reference_image_uses_local_img2img(monkeypatch, tmp_path):
     captured = {}
-    img_b64 = _png_b64()
+    img_b64 = _png_b64((1024, 512))
     (tmp_path / "ref.png").write_bytes(base64.b64decode(img_b64))
 
     class FakeResponse:

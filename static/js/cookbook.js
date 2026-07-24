@@ -2346,7 +2346,7 @@ function _wireTabEvents(body) {
           dlBtn.textContent = oldText;
         }
         if (!pickerInclude) {
-          uiModule.showToast('Pick a GGUF quant first. Odysseus will not download the whole GGUF repo without an include pattern.');
+          uiModule.showToast('Pick a GGUF quant first. Aegis will not download the whole GGUF repo without an include pattern.');
           return;
         }
         uiModule.showToast('Pick the GGUF quant, then press Download again.');

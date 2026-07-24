@@ -506,12 +506,13 @@ async def do_api_call(content: str) -> Dict:
 # agent surface even when the agent is admin-context; accidental account or
 # command mistakes have permanent blast radius.
 _APP_API_BLOCKLIST_PREFIXES = (
-    "/api/auth",           # login/logout/password
+    "/api/auth",           # login/logout/password (also blocks /api/auth/settings writes)
     "/api/users",          # user CRUD (bare /api/users list+create+delete must also block)
     "/api/tokens",         # api token mgmt (bare /api/tokens list+create must also block)
     "/api/admin",          # admin one-shots (wipe etc.)
     "/api/shell",          # host shell execution must stay behind named command tooling
     "/api/backup/restore", # destructive restore
+    "/api/approvals",      # dangerous-command approvals: only the HUMAN resolves these
 )
 
 # (method, prefix) pairs to refuse specifically. Used for endpoints

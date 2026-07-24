@@ -164,6 +164,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         owner, memories, _visible, scope_error = _scope_entries()
         if scope_error:
             return _text_result(scope_error)
+        # Dedup before creating (mirrors the auto-extractor). Without this the
+        # agent appends near-duplicates it should have edited instead.
+        try:
+            from src.ai_interaction import _find_duplicate_memory
+            _dup = _find_duplicate_memory(text, _visible, _memory_manager, _memory_vector, owner)
+        except Exception:
+            _dup = None
+        if _dup is not None:
+            return _text_result(
+                f"Already remembered (id: {str(_dup['id'])[:8]}): {_dup.get('text', '')}. "
+                f"Not adding a duplicate — use edit on that id to refine it."
+            )
         entry = _memory_manager.add_entry(text, source="ai_agent", category=category, owner=owner)
         memories.append(entry)
         _memory_manager.save(memories)

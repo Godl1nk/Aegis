@@ -1583,6 +1583,11 @@ document.addEventListener('DOMContentLoaded', () => {
       // Lazy-load skills tab (cascade=true → play the domino-in entrance)
       if (target === 'skills') {
         import('./skills.js').then(m => { if (m.loadSkills) m.loadSkills(true); else if (m.default?.loadSkills) m.default.loadSkills(true); });
+      } else if (target === 'journey') {
+        // force=true: skills/memories learned since the last open must show
+        // up on the timeline without a page reload (same staleness class as
+        // the skills-tab cache).
+        import('./journey.js').then(m => { if (m.loadJourney) m.loadJourney(true); else if (m.default?.loadJourney) m.default.loadJourney(true); });
       } else if (target === 'summary') {
         loadMemorySummary();
       }

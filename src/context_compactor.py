@@ -413,6 +413,21 @@ async def maybe_compact(
             if prev_model:
                 break
 
+    # Pre-compress memory hook (Hermes on_pre_compress): stash the older
+    # half before its detail is reduced to a summary. run_post_response_tasks
+    # picks this up after the turn and queues one last memory-extraction
+    # pass over it — sequential with the other side LLM calls (#2927), so
+    # durable facts buried in soon-to-be-discarded turns aren't lost.
+    try:
+        session._precompress_messages = [
+            {"role": m.get("role"), "content": _content_as_text(m.get("content"))[:2000]}
+            for m in older
+            if m.get("role") in ("user", "assistant")
+            and _content_as_text(m.get("content")).strip()
+        ]
+    except Exception:
+        logger.debug("Failed to stash pre-compress messages", exc_info=True)
+
     summary_meta = {"compacted": True}
     if prev_model and prev_url:
         summary_meta["image_previous_model"] = prev_model

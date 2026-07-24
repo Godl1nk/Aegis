@@ -21,7 +21,7 @@ from src.llm_core import (
     _is_ollama_native_url,
 )
 from src.model_context import estimate_tokens
-from src.settings import get_setting
+from src.settings import get_setting, get_user_setting
 from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, ToolPolicy
@@ -41,6 +41,40 @@ from src.agent_tools import (
 )
 
 logger = logging.getLogger(__name__)
+
+_TOOL_PROGRESS_TIMEOUT = 10.0
+
+# Session-sticky tools: once a tool has actually EXECUTED in a session, keep it
+# in that session's toolset for subsequent turns. Per-turn retrieval is lossy —
+# a tool that worked on turn N could vanish from the schema list on turn N+1
+# because the follow-up phrasing retrieved differently, and the model then
+# claimed it "doesn't have" the tool it just used. Bounded LRU-ish: oldest
+# session evicted past the cap. Keyed by session_id (unique per session), so no
+# cross-user leakage; disabled-tools/privilege filtering still applies
+# downstream at schema-build and execution time.
+_SESSION_STICKY_TOOLS: "OrderedDict[str, set]" = __import__("collections").OrderedDict()
+_SESSION_STICKY_CAP = 256
+
+
+def _sticky_tools_for(session_id: Optional[str]) -> set:
+    if not session_id:
+        return set()
+    return set(_SESSION_STICKY_TOOLS.get(session_id) or ())
+
+
+def _remember_sticky_tool(session_id: Optional[str], tool_name: str) -> None:
+    if not session_id or not tool_name:
+        return
+    bucket = _SESSION_STICKY_TOOLS.get(session_id)
+    if bucket is None:
+        bucket = set()
+        _SESSION_STICKY_TOOLS[session_id] = bucket
+        while len(_SESSION_STICKY_TOOLS) > _SESSION_STICKY_CAP:
+            _SESSION_STICKY_TOOLS.popitem(last=False)
+    else:
+        _SESSION_STICKY_TOOLS.move_to_end(session_id)
+    bucket.add(tool_name)
+
 
 
 def _looks_like_notes_list_request(text: str) -> bool:
@@ -115,7 +149,7 @@ _AGENT_RULES = """\
 - These exact tags execute automatically. For showing code examples, use ```shell, ```sh, ```py, etc. instead.
 - Multiple tool blocks per response OK. 60s timeout per tool, 10K char output limit.
 - Code/content >15 lines → ```create_document (NOT in chat). Short snippets OK in chat.
-- Long-form or structured writing is a document by default when the user asks to write/create/make/generate it and the answer would be more than a short paragraph. Use create_document instead of dumping the full content in chat.
+- A document is ONLY for content the user explicitly asked you to write/create/make/generate/save as an artifact (a file, essay, story, report, code, script). "Solve this", "answer this", "explain", "how do I", "work through", "what is" = a normal CHAT answer — reply directly in chat even when the solution is long, multi-step, or has math/formulas. Do NOT create a document for a solution, derivation, or explanation unless the user says to put it in a document/file.
 - Editing an existing document: ALWAYS use ```edit_document with FIND/REPLACE blocks. Do NOT rewrite the whole document with ```update_document unless genuinely changing more than half of it.
 - BIAS TOWARD ACTION on edit requests. If the user says "edit out X", "remove the Y paragraph", "change Z" — JUST DO IT with your best interpretation. Don't ask for clarification on minor ambiguity. The user can undo or re-prompt if wrong.
 - AFTER A TOOL SUCCEEDS, do not second-guess. The success message ("Document edited: v2, 1 edit") means it worked. Reply in ONE short sentence confirming what was done. No re-checking, no replaying the diff in your head, no validation theater.
@@ -162,8 +196,8 @@ _API_AGENT_RULES = """\
 - For web lookup/search/latest/current requests, call `web_search` or `web_fetch`. Do NOT use shell, Python, curl, requests, or scraping code for web lookup unless web tools are unavailable or already failed.
 - If `web_search` is listed in this prompt, web search is available. Do NOT tell the user search/web tools are unavailable.
 - Keep answers concise unless the user asks for depth.
-- For long code or content, use document tools instead of pasting large blocks into chat.
-- Long-form or structured writing is a document by default when the user asks to write/create/make/generate it and the answer would be more than a short paragraph. Call create_document instead of dumping the full content in chat.
+- For long code or content the user asked you to WRITE/CREATE as an artifact, use document tools instead of pasting large blocks into chat.
+- A document is ONLY for content the user explicitly asked you to write/create/make/generate/save as an artifact (file, essay, story, report, code, script). "Solve this", "answer this", "explain", "how do I", "work through", "what is" = a normal CHAT answer — reply directly in chat even when long, multi-step, or full of math. Do NOT create a document for a solution, derivation, or explanation unless the user asks to put it in a document/file.
 - Editing an existing document: ALWAYS use `edit_document` with find/replace. Only use `update_document` for genuine full rewrites (>50% changed) — do NOT echo the entire file back for small edits.
 - If the active editor document is an email draft/compose window, treat that open email as the target for "write this", "write the email", "reply with...", "make it say...", "draft this", and similar requests. Do NOT create another document, search/list/manage documents, or open a different reply unless the user explicitly asks. Edit the open email draft with `edit_document` or `update_document`; preserve To/Cc/Bcc/Subject/In-Reply-To/References/X-* header lines unless the user asks to change them.
 - "Give suggestions / feedback / review / how can I improve this / what would make it better" about the OPEN document → call `suggest_document`, do NOT write a prose list of ideas in chat. It creates inline accept/reject bubbles on the doc. Give concrete `find`/`replace`/`reason` items. To suggest an ADDITION (e.g. "add a bow to the SVG", a new section), set `find` to a short existing anchor snippet and `replace` to that same snippet PLUS the new content. Only answer in prose when no document is open, or the request is purely conceptual with no concrete change to propose.
@@ -267,7 +301,8 @@ _DOMAIN_RULES = {
 - "Research X" means `trigger_research`, not a one-off `web_search`, unless the user explicitly asks for a quick lookup.""",
     "documents": """\
 ## Document rules
-- For long code/content (>15 lines), use `create_document` instead of pasting into chat.
+- For long CODE/content (>15 lines) the user asked you to WRITE/CREATE, use `create_document` instead of pasting into chat.
+- "Solve/answer/explain/how do I/work through" a problem = a normal chat answer, even if long or full of math. Do NOT create a document for it unless the user asks to save it to a document/file.
 - If an active document is open, "fix this", "add X", "change Y", etc. usually refers to that document.
 - Use `edit_document` for targeted changes. Use `update_document` only for genuine full rewrites.
 - For feedback/review/suggestions on an open document, use `suggest_document`.""",
@@ -359,6 +394,7 @@ For LONG-running commands (package installs, pip/npm, ffmpeg, model downloads, t
 #!bg
 pip install openai-whisper
 ```
+For a LONG-LIVED process (server, daemon) where you need a one-shot mid-process signal, add `watch=` with comma-separated substrings to the marker line: `#!bg watch=Ready,listening on`. You are re-invoked once when a matching line appears in its output (hard rate limit: 1 notification per 15s; repeated floods disable the watch). Use ONLY for rare one-shot signals like server readiness — NEVER for loops/batch jobs.
 SANDBOX LIMITS: stdin/stdout are pipes, so there is NO interactive terminal — `input()`, `curses`, `termios`, `pygame`, and `tkinter` will all fail. Don't try to RUN interactive terminal games or GUI apps here — verify syntax (`python -c "import py_compile; py_compile.compile('x.py')"`) and tell the user to run it themselves in their own terminal. For anything the USER should play/use interactively (games, UIs, demos), prefer a single self-contained HTML file with `<canvas>` + inline JS — save it via `create_document` with language="html" and tell the user to hit the Run / Preview button (▶) in the document editor toolbar; it renders inline in a sandboxed iframe so the game is playable right there. Works from any machine that can reach the Odysseus UI — no need to copy files out.
 NEVER pipe multi-line Python through `python -c "..."` — shell quoting eats real newlines and `\\n` arrives as literal backslash-n, which Python parses as a line-continuation error on line 1. To run multi-line code, either use the dedicated `python` tool block above, or save to a file first with a quoted HEREDOC (`cat > /tmp/x.py << 'EOF' ... EOF`) and then `python /tmp/x.py`.""",
 
@@ -455,7 +491,7 @@ Suggest changes with explanations (for review/feedback requests).""",
 <size>
 <quality>
 ```
-Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g. 1024x1024), line 4 = quality.""",
+Generate an image. Line 1 = description, line 2 = model ("auto" unless the user names a specific model — do NOT guess names like "flux"), line 3 = WxH (e.g. 1024x1024), line 4 = quality.""",
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
@@ -1083,6 +1119,124 @@ _CODE_ARTIFACT_CONCEPT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Explicit image-generation request detector — operates on the USER MESSAGE
+# (not model output). Local reasoning models frequently "think" about calling
+# generate_image and then end the turn WITHOUT emitting the fenced call, so for
+# an unambiguous request we synthesize the call deterministically rather than
+# depending on the model to volunteer it. A concept/explanatory question
+# ("how does image generation work") must NOT match.
+_IMAGE_REQUEST_RE = re.compile(
+    r"\b(?:gen(?:erate)?|create|make|draw|render|produce|design|paint|imagine)\b"
+    r"[^.\n]{0,30}\b(?:image|images|picture|pic|photo|photos|illustration|"
+    r"artwork|drawing|wallpaper|logo|portrait|painting|selfie|avatar)\b",
+    re.IGNORECASE,
+)
+_IMAGE_REQUEST_CONCEPT_RE = re.compile(
+    r"^\s*(?:how|why|what|when|where|explain|describe|does|do|is|are|can\s+you\s+explain)\b",
+    re.IGNORECASE,
+)
+# Strips the imperative "gen me an image of" lead-in to isolate the subject.
+# Only the GENERIC containers (image/picture/photo) are consumed with their
+# "of" connector — meaningful nouns (logo/wallpaper/portrait/…) are kept as
+# part of the prompt, so "draw a logo for my startup" → "logo for my startup",
+# not "my startup".
+_IMAGE_PROMPT_STRIP_RE = re.compile(
+    r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|pls\s+|plz\s+|hey\s+)?"
+    r"(?:gen(?:erate)?|create|make|draw|render|produce|design|paint|imagine|"
+    r"give\s+me|show\s+me|generate\s+me)\s+"
+    r"(?:me\s+)?(?:an?\s+|the\s+|some\s+)?"
+    r"(?:(?:image|images|picture|pic|photo|photos)\s+"
+    r"(?:of|showing|depicting|with|that\s+shows?|:)?\s*)?",
+    re.IGNORECASE,
+)
+
+
+def _is_explicit_image_request(text: str) -> bool:
+    """True for unambiguous 'make me an image of X' requests; False for
+    explanatory questions about image generation."""
+    if not text or _IMAGE_REQUEST_CONCEPT_RE.search(text):
+        return False
+    return bool(_IMAGE_REQUEST_RE.search(text))
+
+
+def _extract_image_prompt(text: str) -> str:
+    """Strip the imperative prefix to isolate the image subject; fall back to
+    the whole message when stripping leaves nothing meaningful (empty, or a
+    bare generic noun like 'image' from a subject-less 'generate an image')."""
+    if not text:
+        return ""
+    stripped = _IMAGE_PROMPT_STRIP_RE.sub("", text.strip(), count=1).strip()
+    if not stripped or stripped.lower() in {
+        "image", "images", "picture", "pic", "photo", "photos", "one", "it",
+    }:
+        return text.strip()
+    return stripped
+
+
+# ── Optional post-generation syntax check for code documents ──────────────
+# Gated behind the `agent_code_syntax_check` setting. Catches SYNTAX errors
+# only (not runtime/logic) so the model can self-correct via edit_document
+# before handing the file to the user.
+_SYNTAX_CHECKABLE_LANGS = {"python", "py", "javascript", "js", "html", "htm"}
+_HTML_SCRIPT_RE = re.compile(r"<script\b[^>]*>([\s\S]*?)</script>", re.IGNORECASE)
+
+
+def _node_syntax_error(js: str) -> str:
+    """`node --check` on a snippet. Returns a short error string, or '' if it
+    parses (or node is unavailable — never block on a missing checker)."""
+    import shutil, subprocess, tempfile, os
+    if not js.strip() or not shutil.which("node"):
+        return ""
+    # ESM (`import`/`export`) must be checked as a module, else node reports a
+    # false syntax error on valid code.
+    suffix = ".mjs" if re.search(r"^\s*(?:import|export)\b", js, re.M) else ".js"
+    fd, path = tempfile.mkstemp(suffix=suffix)
+    try:
+        os.write(fd, js.encode("utf-8"))
+        os.close(fd)
+        r = subprocess.run(["node", "--check", path], capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            lines = (r.stderr or "").replace(path, "script").strip().splitlines()
+            return " ".join(lines[:4])[:400]
+    except Exception:
+        return ""
+    finally:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+    return ""
+
+
+def _check_code_syntax(language: str, code: str) -> str:
+    """Return a short syntax-error description, or '' when the code parses.
+    SYNTAX ONLY — a clean result does not mean the code runs correctly. The
+    checker never raises; a broken checker returns '' so it can't wedge a turn."""
+    lang = (language or "").strip().lower()
+    code = code or ""
+    if not code.strip():
+        return ""
+    try:
+        if lang in ("python", "py"):
+            import ast
+            try:
+                ast.parse(code)
+            except SyntaxError as e:
+                return f"Python syntax error line {e.lineno}: {e.msg}"
+            return ""
+        if lang in ("javascript", "js"):
+            return _node_syntax_error(code)
+        if lang in ("html", "htm"):
+            errors = []
+            for i, m in enumerate(_HTML_SCRIPT_RE.finditer(code), start=1):
+                err = _node_syntax_error(m.group(1))
+                if err:
+                    errors.append(f"inline <script> #{i}: {err}")
+            return "; ".join(errors)
+    except Exception:
+        return ""
+    return ""
+
 
 def _classify_code_artifact_request(text: str) -> Dict[str, object]:
     """Return conservative UI hints for an explicit code-generation request."""
@@ -1094,12 +1248,19 @@ def _classify_code_artifact_request(text: str) -> Dict[str, object]:
         and not _CODE_ARTIFACT_CONCEPT_RE.search(value)
     )
     lower = value.lower()
+    # Standalone (direct-chat output, document/file tools pruned) only when the
+    # user EXPLICITLY asks for chat output or refuses a document. Topic words
+    # ("single-file", "browser os", "open in chrome") used to trigger this too,
+    # which silently disabled create_document/edit_document for the whole
+    # session — every follow-up fix then regenerated the full code in chat
+    # instead of patching the existing document.
     standalone = bool(
         requested
         and (
-            re.search(r"\bsingle[- ](?:file|script)\b", lower)
-            or re.search(r"\bopen(?:ed)?\s+in\s+(?:a\s+)?(?:chrome|browser)\b", lower)
-            or "browser os" in lower
+            re.search(r"\b(?:in|into)\s+(?:the\s+)?chat\b", lower)
+            or re.search(r"\b(?:no|without|don'?t\s+(?:use|create|make))\s+(?:a\s+)?document", lower)
+            or re.search(r"\bpaste\s+(?:it\s+)?here\b", lower)
+            or re.search(r"\bdirectly\s+(?:here|in\s+(?:the\s+)?(?:chat|response|reply))\b", lower)
         )
     )
     language = ""
@@ -1114,7 +1275,7 @@ def _classify_code_artifact_request(text: str) -> Dict[str, object]:
             language = "python"
         elif "rust" in lower:
             language = "rust"
-        elif "golang" in lower or re.search(r"\bgo\b", lower):
+        elif "golang" in lower or re.search(r"\b(?:in|using|with)\s+go\b|\bgo\s+(?:program|script|code|app)\b", lower):
             language = "go"
         elif "java" in lower:
             language = "java"
@@ -1164,6 +1325,43 @@ def _document_block_as_chat_code(block: ToolBlock, fallback_language: str) -> st
     if not body:
         return ""
     return f"```{language}\n{body}\n```"
+
+
+_DOC_BLOCK_KNOWN_LANGS = {
+    "python", "py", "javascript", "js", "typescript", "ts", "html", "css",
+    "json", "yaml", "bash", "sql", "rust", "go", "java", "c", "cpp",
+    "markdown", "text", "plain", "svg", "xml", "svelte", "vue", "toml", "ini",
+}
+
+
+def _split_create_document_block(content: str) -> "tuple[str, str, str]":
+    """Parse a create_document block into (title, language, body).
+
+    Handles the common line form ('Title\\n[lang]\\nbody') and the XML-tag form
+    (<title>…</title><language>…</language><content>…</content>) that the
+    create tool itself accepts, so a redirect to update_document extracts the
+    same body the create path would have saved.
+    """
+    raw = str(content or "")
+    mt = re.search(r"<title>\s*(.*?)\s*</title>", raw, re.DOTALL | re.IGNORECASE)
+    mc = re.search(r"<content>\s*(.*?)\s*</content>", raw, re.DOTALL | re.IGNORECASE)
+    if mt or mc:
+        ml = re.search(r"<language>\s*(.*?)\s*</language>", raw, re.DOTALL | re.IGNORECASE)
+        return (
+            (mt.group(1).strip() if mt else ""),
+            (ml.group(1).strip().lower() if ml else ""),
+            (mc.group(1).strip() if mc else ""),
+        )
+    lines = raw.strip().splitlines()
+    if not lines:
+        return "", "", ""
+    title = lines[0].strip()
+    rest = lines[1:]
+    language = ""
+    if rest and rest[0].strip().lower() in _DOC_BLOCK_KNOWN_LANGS:
+        language = rest[0].strip().lower()
+        rest = rest[1:]
+    return title, language, "\n".join(rest).strip()
 
 
 def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, object]:
@@ -1895,15 +2093,22 @@ def _build_system_prompt(
                     f'purely so you can locate references like "[Doc edit: L25]" — the number and tab '
                     f'are NOT part of the document.\n'
                     f'```\n{_doc_numbered}\n```\n'
-                    f'You ALREADY HAVE this document — it is right above. Do NOT ask the user to paste '
-                    f'it, and do NOT use read_file, bash, cat, or any tool to fetch it: it lives in the '
-                    f'editor, NOT on disk, so those attempts will fail. Every request is about THIS '
-                    f'document unless the user clearly says otherwise.\n'
+                    f'You ALREADY HAVE this document — it is right above, and you can edit it directly. '
+                    f'Do NOT ask the user to paste it, and do NOT use read_file, bash, cat, or any tool '
+                    f'to fetch it: it lives in the editor, NOT on disk, so those attempts will fail.\n'
+                    f'This is your working artifact. When the user asks to change, extend, add to, fix, '
+                    f'restyle, animate, refactor, or otherwise modify it — or refers to it as "it" / '
+                    f'"this" / "that" — EDIT THIS document in place with edit_document. Do NOT create a '
+                    f'new document and do NOT paste the whole thing back into chat. Only when the message '
+                    f'is clearly unrelated to the document should you ignore it and answer normally.\n'
                     f'A "[Doc edit: L25]" prefix means the user is pointing at that line — use the '
                     f'numbers above to find the text they mean.\n'
                     f'To edit: use edit_document with <<<FIND>>>...<<<REPLACE>>>...<<<END>>>. The FIND '
                     f'text must match the document EXACTLY and must NOT include the leading line-number '
-                    f'or tab (those are reference-only). To rewrite entirely: update_document.'
+                    f'or tab (those are reference-only). To rewrite more than half of it: update_document.\n'
+                    f'BATCH your changes: put ALL the edits for this turn in ONE edit_document call as '
+                    f'multiple <<<FIND>>>...<<<REPLACE>>>...<<<END>>> blocks. Do NOT make many separate '
+                    f'edit_document calls — one call with several blocks is faster and avoids flooding the UI.'
                 )
                 if _document_writing_style:
                     doc_ctx += (
@@ -2791,6 +2996,7 @@ async def stream_agent_loop(
     _t0 = time.time()
     _needs_admin = _detect_admin_intent(messages)
     _last_user = _extract_last_user_message(messages)
+    _code_artifact = _classify_code_artifact_request(_last_user)
     _ody_qwen_finetune_model = (model or "").lower().startswith("odysseus-qwen3")
     _ody_memory_identity_turn = _looks_like_memory_identity_turn(_last_user)
     _intent = _classify_agent_request(messages, _last_user)
@@ -2804,7 +3010,19 @@ async def stream_agent_loop(
             "list_email_accounts", "list_emails", "read_email",
             "mcp__email__list_emails", "mcp__email__read_email",
         })
-    _prompt_active_document = active_document if _active_document_relevant else None
+    # Codex-style working artifact: a non-email document open in the editor is
+    # treated like a file the agent is actively working on — always in context
+    # and always editable, no keyword gating. So a follow-up like "animate it"
+    # edits the open component instead of regenerating a duplicate: the model
+    # sees the current content and has edit_document/update_document available,
+    # and decides from the request whether to edit (see doc guidance in the
+    # prompt). Email drafts keep their tighter keyword-gated handling.
+    _active_document_editable = (
+        active_document is not None and not _is_email_document_obj(active_document)
+    )
+    _prompt_active_document = (
+        active_document if (_active_document_relevant or _active_document_editable) else None
+    )
     _direct_low_signal = (
         _low_signal_turn
         and not _existing_conversation
@@ -3004,13 +3222,25 @@ async def stream_agent_loop(
     # Fallback: if RAG unavailable, use keyword-based tool selection
     # instead of sending ALL tools (which overwhelms the model).
     if not guide_only and not _relevant_tools and _retrieval_query:
-        from src.tool_index import ALWAYS_AVAILABLE, ToolIndex
+        from src.tool_index import ALWAYS_AVAILABLE, ToolIndex, lexical_tool_retrieval
         _relevant_tools = set(ALWAYS_AVAILABLE)
+        # Real retrieval even without embeddings: BM25-style lexical match over
+        # the tool descriptions. Before this, the fallback was keyword hints
+        # ONLY, so any intent not covered by a hint lost its tools whenever
+        # ChromaDB/the embedding endpoint was down — the "agent randomly can't
+        # use tools" bug.
+        try:
+            _relevant_tools.update(lexical_tool_retrieval(_retrieval_query, k=8))
+        except Exception as _lex_e:
+            logger.warning(f"[tool-rag] Lexical fallback failed: {_lex_e}")
         ql = _retrieval_query.lower()
         for keywords, tools in ToolIndex._KEYWORD_HINTS.items():
-            if any(kw in ql for kw in keywords):
+            # Word-boundary matching, same as get_tools_for_query — raw
+            # substring made short hints misfire ("pip" in "pipeline",
+            # "git" in "digit").
+            if any(re.search(rf"\b{re.escape(kw)}\b", ql) for kw in keywords):
                 _relevant_tools.update(tools)
-        logger.info(f"[tool-rag] Keyword fallback selected: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
+        logger.info(f"[tool-rag] Lexical+keyword fallback selected: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
 
     # If deterministic domain detection fired, seed the corresponding domain
     # tools into the selected tool set. This is not direct prompt-pack
@@ -3043,11 +3273,22 @@ async def stream_agent_loop(
         if "ui" in (_intent.get("domains") or set()):
             _relevant_tools.add("ui_control")
 
+    # Session-sticky tools: anything that actually EXECUTED earlier in this
+    # session stays available. Fixes retrieval whiplash where a follow-up turn
+    # loses the tool the model just used and it starts claiming it "doesn't
+    # have" it. Disabled-tools/privileges still filter downstream.
+    if not guide_only and _relevant_tools is not None and session_id:
+        _sticky = _sticky_tools_for(session_id) - _relevant_tools
+        if _sticky:
+            _relevant_tools.update(_sticky)
+            logger.info(f"[tool-rag] Session-sticky tools re-included: {sorted(_sticky)}")
+
     # If this turn targets the open document, keep editing tools available
     # regardless of which selection path (RAG, keyword, caller-provided) ran.
-    # Do not leak document tools into unrelated turns just because the editor
-    # panel is open.
-    if _relevant_tools is not None and _active_document_relevant:
+    # A non-email working document is always editable (Codex model), so the
+    # edit tools are offered whenever one is open; create_document stays too so
+    # the model can still start a genuinely new artifact.
+    if _relevant_tools is not None and (_active_document_relevant or _active_document_editable):
         _relevant_tools.update({"edit_document", "update_document", "suggest_document"})
         if _active_email_draft_relevant:
             # The open compose document already contains the recipient,
@@ -3062,6 +3303,25 @@ async def stream_agent_loop(
             if removed:
                 _relevant_tools.difference_update(_email_fetch_tools)
                 logger.info("[agent-intent] active email draft pruned fetch tools=%s", removed)
+    if (
+        _relevant_tools is not None
+        and _code_artifact["requested"]
+    ):
+        if _code_artifact["standalone"]:
+            # Standalone artifacts are returned directly in chat. Do not expose
+            # any document or workspace mutation route: weak local models loop
+            # while debating which tool syntax to use instead of writing code.
+            _relevant_tools.difference_update({
+                "create_document", "update_document", "edit_document",
+                "suggest_document", "write_file", "edit_file", "bash", "python",
+            })
+        elif "create_document" not in disabled_tools:
+            # Keep create_document available even when a document is open: the
+            # user may want a genuinely NEW artifact. edit_document/update_document
+            # are also available (added above) and the doc is injected, so the
+            # model picks edit-vs-create from the request + prompt guidance —
+            # the Codex model, rather than us hiding a tool.
+            _relevant_tools.add("create_document")
 
     # Current-turn chat uploads are real files under the upload/data root. Make
     # the read-side file/document tools visible immediately so the agent can
@@ -3257,16 +3517,64 @@ async def stream_agent_loop(
     else:
         _is_api_model = any(h in endpoint_url for h in _API_HOSTS) or _model_supports_tools
     _compact_agent_prompt = _is_api_model or _is_ollama_native or _ollama_openai_compat
+    _code_chat_direct = bool(
+        _code_artifact["requested"]
+        and _code_artifact["standalone"]
+        and not guide_only
+        and not plan_mode
+    )
+    _code_stream_enabled = bool(
+        _code_artifact["requested"]
+        and not _code_artifact["standalone"]
+        and not guide_only
+        and not plan_mode
+        and "create_document" not in disabled_tools
+    )
     messages, mcp_schemas = _build_system_prompt(
-        messages, model, _prompt_active_document, mcp_mgr, disabled_tools,
+        messages, model, None if _code_chat_direct else _prompt_active_document, mcp_mgr, disabled_tools,
         needs_admin=_needs_admin, relevant_tools=_relevant_tools,
         mcp_disabled_map=_mcp_disabled_map,
         compact=_compact_agent_prompt,
         owner=owner,
         suppress_local_context=guide_only,
         suppress_skills=_low_signal_turn,
-        active_email=active_email,
+        active_email=None if _code_chat_direct else active_email,
     )
+    if _code_chat_direct:
+        _tool_language = str(_code_artifact["language"] or "text")
+        _code_chat_directive = (
+            "## STANDALONE CODE ARTIFACT — DIRECT CHAT OUTPUT\n"
+            "Return the complete implementation directly in this chat as one "
+            f"fenced `{_tool_language}` code block. Do not call create_document, "
+            "write_file, edit_file, bash, Python, or any other tool. Do not "
+            "announce a plan or say that you will write it later. Start the "
+            "finished code in this response and include all required HTML, CSS, "
+            "and JavaScript inline when the requested format is HTML."
+        )
+        if messages and messages[0].get("role") == "system":
+            messages[0]["content"] = _code_chat_directive
+        else:
+            messages.insert(0, {"role": "system", "content": _code_chat_directive})
+    elif _code_stream_enabled:
+        _tool_language = str(_code_artifact["language"] or "text")
+        _code_tool_directive = (
+            "## CODE ARTIFACT — TOOL FIRST\n"
+            "The user explicitly requested a new code artifact. Do not announce, "
+            "describe, estimate, plan, or promise that you will create it. Your "
+            "first visible response must be the actual `create_document` call "
+            "containing the complete implementation. The FIRST line inside the "
+            "call is the document TITLE — write a short, real filename-style "
+            "title (e.g. `apple.svelte`, `NovaOS.html`), NOT a status phrase and "
+            "NOT the word 'Generating'. The SECOND line is the language. For "
+            "fenced-tool models, begin exactly with:\n"
+            f"```create_document\n<short title>.{_tool_language}\n{_tool_language}\n"
+            "<complete implementation>\n```\n"
+            "Do not emit prose before the tool call."
+        )
+        if messages and messages[0].get("role") == "system":
+            messages[0]["content"] = _code_tool_directive + "\n\n" + (messages[0].get("content") or "")
+        else:
+            messages.insert(0, {"role": "system", "content": _code_tool_directive})
     if _ody_doc_finetune_mode and not plan_mode and not approved_plan and not guide_only:
         messages = _minimal_odysseus_doc_messages(
             messages,
@@ -3391,6 +3699,26 @@ async def stream_agent_loop(
     )
     yield f"data: {json.dumps({'type': 'agent_prep', 'data': {k: round(v, 3) for k, v in prep_timings.items()}})}\n\n"
 
+    _code_stream_started = False
+    # True when a PLAIN ```html/```python fence was already live-streamed into
+    # the doc pane this turn — the post-round auto-doc fallback must not
+    # re-emit doc_stream_open/delta for the same content (double render).
+    _plain_code_fence_streamed = False
+    _code_stream_completed = False
+    _direct_code_retry_count = 0
+    _malformed_doc_nudge_count = 0
+    # Anti-loop: once a document write lands this turn, nudge the model (once)
+    # that the change is saved so it stops recreating/rewriting the same
+    # artifact round after round (the injected doc context stays the pre-edit
+    # version across rounds, which otherwise makes the model think its change
+    # never applied).
+    _doc_write_succeeded = False
+    _doc_write_nudged = False
+    # Set when a document was manufactured from a chat code block (the model
+    # answered in prose instead of calling a doc tool). One per turn, and the
+    # turn ends after that round — see the fallback block for why.
+    _auto_doc_from_chat = False
+
     full_response = ""
     total_start = time.time()
     time_to_first_token = None
@@ -3429,6 +3757,9 @@ async def stream_agent_loop(
     # an action without emitting the tool call. Capped to prevent a model
     # that *can't* call the tool from looping forever.
     _intent_nudge_count = 0
+    # Model ended a turn with ONLY a <think> block and no reply — the user gets
+    # a collapsed thinking section and nothing else (reads as "stuck").
+    _empty_answer_nudges = 0
     _MAX_INTENT_NUDGES = 2
 
     # "I said I would, then didn't" detector. The pattern that breaks debug
@@ -3462,6 +3793,18 @@ async def stream_agent_loop(
     # so the user can resume instead of the turn silently stalling.
     _exhausted_rounds = False
 
+    # Guards the deterministic image-request synthesis so it fires at most once
+    # per turn (a synthesized generate_image that executes must not re-trigger
+    # on the confirmation round and loop forever).
+    _image_request_synthesized = False
+
+    # Post-generation syntax check (opt-in): holds the last code doc written this
+    # turn (language, content) so the completion round can validate it; capped so
+    # a model that can't fix its own syntax doesn't loop forever.
+    _syntax_check_enabled = bool(get_setting("agent_code_syntax_check", False))
+    _pending_syntax_doc = None
+    _syntax_check_count = 0
+
     for round_num in range(1, max_rounds + 1):
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
@@ -3479,7 +3822,9 @@ async def stream_agent_loop(
         # Merge native tool schemas with MCP tool schemas, filtering out
         # Only send function schemas for API models (OpenAI, Anthropic, etc.).
         # Local models use fenced code blocks or <tool_code> — schemas add overhead.
-        if _force_answer:
+        if _code_chat_direct:
+            all_tool_schemas = []
+        elif _force_answer:
             # Loop-breaker decided the model has enough info but keeps
             # calling tools. Send NO tools this round so it's forced to
             # write the answer instead of flailing further.
@@ -3532,11 +3877,18 @@ async def stream_agent_loop(
         # only switches on a pre-content failure, so streamed output is never
         # duplicated; the dead-host cooldown keeps repeat primary attempts cheap.
         _candidates = [(endpoint_url, model, headers)] + list(fallbacks or [])
-        # stream_llm enforces a per-read INACTIVITY timeout (httpx read=timeout),
-        # which kills a wedged/silent endpoint. This wall-clock deadline is the
-        # complementary cap for the rare stream that trickles bytes forever and
-        # so never trips the inactivity timeout. Generous — only catches runaway.
-        _round_deadline = time.time() + max(agent_stream_timeout * 4, 1200)
+        # stream_llm enforces a per-read INACTIVITY timeout (httpx read=timeout)
+        # that kills a wedged/silent endpoint — that is the real hang detector.
+        # This wall-clock deadline is only a backstop for the rare stream that
+        # trickles bytes forever without ever going silent. It must stay well
+        # ABOVE the time a legitimate large generation takes: a slow local model
+        # (~4 tok/s) writing a big single-file app (a browser OS with 3D games
+        # is easily 10k+ tokens) needs ~40+ min of steady output, so the old
+        # 1200s (20 min) floor cut real work off mid-file. Default 1 hour;
+        # override with agent_round_max_seconds. Steady output for that long is
+        # legitimate work, not a hang (the inactivity timeout guards true hangs).
+        _round_wallclock = int(get_setting("agent_round_max_seconds", 3600) or 3600)
+        _round_deadline = time.time() + max(agent_stream_timeout * 4, _round_wallclock)
         _round_start = time.time()
         _round_first_event_logged = False
         _round_first_token_logged = False
@@ -3575,7 +3927,7 @@ async def stream_agent_loop(
                     "[agent-timing] round_deadline round=%s elapsed=%.3fs deadline_s=%s",
                     round_num,
                     time.time() - _round_start,
-                    max(agent_stream_timeout * 4, 1200),
+                    max(agent_stream_timeout * 4, _round_wallclock),
                 )
                 break
             # Forward error events from stream_llm to the frontend
@@ -3595,6 +3947,11 @@ async def stream_agent_loop(
                     # because tool_call_delta also has an "arg_delta" field.
                     if data.get("type") == "tool_call_delta":
                         if tool_policy and tool_policy.blocks(data.get("name")):
+                            continue
+                        if _code_chat_direct:
+                            # Direct-chat mode never exposes document lifecycle
+                            # events. The finalized native call, if any, is
+                            # recovered into ordinary fenced code below.
                             continue
                         # Stream document content to frontend as AI generates it
                         logger.debug(f"tool_call_delta: name={data.get('name')}, len(arg_delta)={len(data.get('arg_delta', ''))}")
@@ -3697,7 +4054,14 @@ async def stream_agent_loop(
                         # uses neutral ```document to avoid triggering learned
                         # hidden native tool-call output.
                         if (
-                            (round_num > 1 or _ody_doc_stream_create_mode)
+                            not _code_chat_direct
+                            # Round 1 is normally excluded (the model may write
+                            # prose first), but an explicit code-artifact request
+                            # is told to emit create_document AS its first output
+                            # — so its huge round-1 code must stream to the live
+                            # doc pane, else it generates silently for minutes and
+                            # looks stuck (the exact hang the user hit).
+                            and (round_num > 1 or _ody_doc_stream_create_mode or _code_stream_enabled)
                             and not _doc_acc
                             and not (tool_policy and tool_policy.blocks("create_document"))
                         ):
@@ -3706,6 +4070,18 @@ async def stream_agent_loop(
                                 if _ody_doc_stream_create_mode
                                 else ('```create_document\n',)
                             )
+                            # Weak models routinely IGNORE the create_document
+                            # directive and emit a plain ```html / ```python
+                            # fence instead — the artifact then generated
+                            # invisibly for minutes ("stuck") and only became a
+                            # doc via the post-round fallback. On an explicit
+                            # code-artifact turn with no open doc, treat those
+                            # plain fences as the document stream too.
+                            if _code_stream_enabled and active_document is None:
+                                _fence_markers = tuple(_fence_markers) + (
+                                    '```html\n', '```python\n', '```javascript\n',
+                                    '```typescript\n', '```js\n', '```ts\n', '```py\n',
+                                )
                             _fence_marker = None
                             for _mk in _fence_markers:
                                 _candidate = _mk[0] if isinstance(_mk, tuple) else _mk
@@ -3719,7 +4095,23 @@ async def stream_agent_loop(
                             # `create_document` block in the same round gets
                             # detected (previously only the first one was
                             # streamed and the rest were silently dropped).
-                            if not _doc_opened and _fence_marker:
+                            _plain_fence = _fence_marker not in (
+                                None, '```create_document\n', '```document\n', '```documen\n',
+                            )
+                            if not _doc_opened and _fence_marker and _plain_fence:
+                                # Plain language fence: no title/language header
+                                # lines — content starts right after the fence.
+                                _fi = round_response.index(_fence_marker, _doc_scan_from)
+                                _lang_tag = _fence_marker[3:-1]
+                                _lang_map = {'py': 'python', 'js': 'javascript', 'ts': 'typescript'}
+                                _flang = _lang_map.get(_lang_tag, _lang_tag)
+                                _doc_opened = True
+                                _plain_code_fence_streamed = True
+                                _ft = f"Code ({_flang})"
+                                _doc_fence_offset = _fi + len(_fence_marker)
+                                _doc_last_len = 0
+                                yield f'data: {json.dumps({"type": "doc_stream_open", "title": _ft, "language": _flang})}\n\n'
+                            elif not _doc_opened and _fence_marker:
                                 _fi = round_response.index(_fence_marker, _doc_scan_from)
                                 _fa = round_response[_fi + len(_fence_marker):]
                                 _fl = _fa.split('\n')
@@ -3759,6 +4151,11 @@ async def stream_agent_loop(
                         yield chunk
             elif chunk.startswith("event: "):
                 # Forward error events to frontend as visible text
+                yield chunk
+            elif chunk.startswith(":"):
+                # SSE comment (stream_llm's keepalive heartbeat while the
+                # model is silent). Forward it so proxies don't time the
+                # connection out mid-generation in agent mode.
                 yield chunk
             # Intercept [DONE] — don't forward until all rounds finish
 
@@ -3864,6 +4261,41 @@ async def stream_agent_loop(
                     yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
                     continue
 
+        if _code_chat_direct and tool_blocks:
+            # Runtime backstop: even if a local model ignores the clean prompt
+            # and emits create_document syntax from its chat template, never
+            # execute it or activate document UI. Recover its completed body as
+            # ordinary fenced code in chat.
+            direct_code = next(
+                (
+                    _document_block_as_chat_code(
+                        block,
+                        str(_code_artifact["language"] or "text"),
+                    )
+                    for block in tool_blocks
+                    if block.tool_type == "create_document"
+                ),
+                "",
+            )
+            tool_blocks = []
+            native_tool_calls = []
+            if direct_code:
+                direct_delta = ("\n\n" if round_response.strip() else "") + direct_code
+                round_response += direct_delta
+                full_response += direct_delta
+                yield f'data: {json.dumps({"delta": direct_delta})}\n\n'
+            elif _direct_code_retry_count < 1:
+                _direct_code_retry_count += 1
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "Do not emit any tool syntax. Output the complete code "
+                        "directly in one ordinary fenced code block now."
+                    ),
+                })
+                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                continue
+
         # Force-answer round: we told the model to STOP calling tools and
         # answer. If it ignored that and emitted a (possibly DSML) tool
         # call anyway, discard it — don't execute, don't re-loop. Keep
@@ -3908,6 +4340,44 @@ async def stream_agent_loop(
                     yield f'data: {json.dumps({"delta": _fb})}\n\n'
                     full_response += _fb
 
+        # ── Redirect a full-artifact REGENERATION into an update of the open doc ──
+        # Weak "coder" models often answer an edit request ("make the apple
+        # purple") by emitting create_document with the whole component again.
+        # Left alone that: (a) spawns a duplicate / re-streams over the open doc
+        # via the create path, so no accept/reject diff renders; and (b) can
+        # loop — the doc injected into the prompt stays the pre-edit version
+        # every round, so the model "sees" its change missing and recreates.
+        # When a working doc is open and the created artifact is the SAME one
+        # (title matches, ignoring extension), rewrite the call as
+        # update_document on the open doc: it versions in place and the frontend
+        # renders the diff. Native calls are converted in lockstep so the
+        # tool_call_id bookkeeping stays aligned.
+        if _active_document_editable and active_document is not None and tool_blocks:
+            _open_title = (getattr(active_document, "title", "") or "").strip().lower()
+            _open_stem = _open_title.rsplit(".", 1)[0] if _open_title else ""
+            if _open_title:
+                for _bi, _b in enumerate(tool_blocks):
+                    if _b.tool_type != "create_document":
+                        continue
+                    _ct, _clang, _cbody = _split_create_document_block(_b.content)
+                    if not _cbody.strip():
+                        continue
+                    _ct_l = _ct.strip().lower()
+                    _ct_stem = _ct_l.rsplit(".", 1)[0] if _ct_l else ""
+                    if _ct_l == _open_title or (_ct_stem and _ct_stem == _open_stem):
+                        logger.info(
+                            "[agent] redirecting create_document '%s' -> update_document on open doc '%s'",
+                            _ct, _open_title,
+                        )
+                        tool_blocks[_bi] = ToolBlock("update_document", _cbody)
+                        if used_native and _bi < len(converted_calls):
+                            _nc = dict(converted_calls[_bi])
+                            _nc["name"] = "update_document"
+                            _nc["arguments"] = json.dumps({"content": _cbody})
+                            converted_calls[_bi] = _nc
+                            if _bi < len(native_tool_calls):
+                                native_tool_calls[_bi] = _nc
+
         # ── Fallback: auto-create document if model dumped large code in chat ──
         # If no create_document tool was used, check for big code blocks in text
         has_doc_tool = any(
@@ -3917,7 +4387,16 @@ async def stream_agent_loop(
             tc.get("name") in ("create_document", "update_document")
             for tc in native_tool_calls
         )
-        if not has_doc_tool and session_id and "create_document" not in (disabled_tools or set()):
+        if has_doc_tool and _code_stream_enabled:
+            _code_stream_started = True
+            yield f'data: {json.dumps({"type": "doc_stream_phase", "phase": "generating"})}\n\n'
+        if (
+            not _code_chat_direct
+            and not has_doc_tool
+            and not _auto_doc_from_chat
+            and session_id
+            and "create_document" not in (disabled_tools or set())
+        ):
             _code_block_re = re.compile(r'```(\w*)\n([\s\S]*?)```')
             for m in _code_block_re.finditer(round_response):
                 lang_tag = m.group(1).lower()
@@ -3927,16 +4406,42 @@ async def stream_agent_loop(
                     continue
                 if lang_tag in TOOL_TAGS:
                     continue  # already handled as a tool execution
-                # Auto-create a document from this code block
                 lang_map = {"py": "python", "js": "javascript", "ts": "typescript", "": "text"}
                 doc_lang = lang_map.get(lang_tag, lang_tag or "text")
-                doc_title = f"Code ({doc_lang})"
-                tb = ToolBlock("create_document", f"{doc_title}\n{doc_lang}\n{code_body}")
-                tool_blocks.append(tb)
-                # Stream the document open event
-                yield f'data: {json.dumps({"type": "doc_stream_open", "title": doc_title, "language": doc_lang})}\n\n'
-                yield f'data: {json.dumps({"type": "doc_stream_delta", "content": code_body})}\n\n'
-                logger.info(f"Auto-created document from {lang_tag} code block ({code_body.count(chr(10))+1} lines)")
+                # This code block IS the model's answer for this turn. Mark it so
+                # (a) later rounds can't manufacture another doc from an echoed
+                # block, and (b) the turn ends after this round's tools run —
+                # feeding "Document created" back to a weak coder model provokes
+                # it to re-emit the same code, which re-triggered this fallback
+                # every round: the endless create → recreate loop.
+                _auto_doc_from_chat = True
+                if _active_document_editable and active_document is not None:
+                    # A working document is open: this dumped code is a revision
+                    # of it, not a new artifact. Update in place — versions the
+                    # open doc and renders the accept/reject diff (no streaming
+                    # events here for the same reason as the update pre-stream
+                    # gate above: a streaming temp doc suppresses the diff).
+                    tb = ToolBlock("update_document", code_body)
+                    tool_blocks.append(tb)
+                    logger.info(
+                        "Auto-updating open doc '%s' from %s code block (%d lines)",
+                        getattr(active_document, "title", ""), lang_tag, code_body.count(chr(10)) + 1,
+                    )
+                else:
+                    # No open doc — create one from the block (original behavior).
+                    doc_title = f"Code ({doc_lang})"
+                    tb = ToolBlock("create_document", f"{doc_title}\n{doc_lang}\n{code_body}")
+                    tool_blocks.append(tb)
+                    if _code_stream_enabled:
+                        _code_stream_started = True
+                        yield f'data: {json.dumps({"type": "doc_stream_phase", "phase": "generating"})}\n\n'
+                    # Stream the document open event — unless the plain fence
+                    # was already live-streamed into the pane while generating
+                    # (re-emitting would blank and rewrite the same content).
+                    if not _plain_code_fence_streamed:
+                        yield f'data: {json.dumps({"type": "doc_stream_open", "title": doc_title, "language": doc_lang})}\n\n'
+                        yield f'data: {json.dumps({"type": "doc_stream_delta", "content": code_body})}\n\n'
+                    logger.info(f"Auto-created document from {lang_tag} code block ({code_body.count(chr(10))+1} lines)")
                 break  # only auto-create one document per round
 
         # Save cleaned round text for history persistence
@@ -3951,7 +4456,91 @@ async def stream_agent_loop(
         if _ody_qwen_finetune_model and not tool_blocks and cleaned_round:
             yield f'data: {json.dumps({"delta": cleaned_round})}\n\n'
 
+        # ── Deterministic image-request fallback ───────────────────────────
+        # The model produced NO tool call, but the user's message is an
+        # unambiguous "make me an image of X" request. Local reasoning models
+        # routinely decide to call generate_image *inside* their <think> block
+        # and then stop without emitting the fenced call — so the image never
+        # appears and the picker never shows. Rather than depend on the model
+        # volunteering the call, synthesize it from the user's message and let
+        # it flow through the normal execution/ask-model path below. Fires at
+        # most once per turn. generate_image is in ALWAYS_AVAILABLE, so the only
+        # gate is the user's own image-gen toggle (which, when off, adds
+        # generate_image to disabled_tools) — deliberately NOT gated on
+        # _relevant_tools, since a retrieval miss there must not silently swallow
+        # an explicit image request.
+        if (
+            not tool_blocks
+            and not guide_only
+            and not _force_answer
+            and not _image_request_synthesized
+            # An image tool already ran THIS TURN (the model called it itself
+            # in an earlier round) → the tool-less round is just the model's
+            # confirmation text. Synthesizing here generated a duplicate
+            # second image on every successful request.
+            and not any(
+                ev.get("tool") in ("generate_image", "ai_edit_image")
+                for ev in tool_events
+            )
+            and _is_explicit_image_request(_last_user)
+            and "generate_image" not in (disabled_tools or set())
+        ):
+            _synth_prompt = _extract_image_prompt(_last_user)
+            tool_blocks = [ToolBlock("generate_image", _synth_prompt)]
+            _image_request_synthesized = True
+            logger.info(
+                "[agent] synthesized generate_image from explicit request "
+                "(model emitted no call): %r", _synth_prompt[:80],
+            )
+
         if not tool_blocks:
+            # Post-generation syntax check (opt-in): the model just finished a
+            # code document. Validate SYNTAX; on failure feed the error back so
+            # it self-corrects via edit_document. Capped so an unfixable error
+            # can't loop. Only fires when generate finished cleanly (no tools
+            # this round = the model is confirming/done).
+            if (
+                _syntax_check_enabled
+                and _pending_syntax_doc is not None
+                and _syntax_check_count < 2
+            ):
+                _sc_lang, _sc_code = _pending_syntax_doc
+                _pending_syntax_doc = None
+                _sc_err = await asyncio.to_thread(_check_code_syntax, _sc_lang, _sc_code)
+                if _sc_err:
+                    _syntax_check_count += 1
+                    logger.info("[agent] code syntax check failed (%s): %s", _sc_lang, _sc_err[:120])
+                    yield 'data: ' + json.dumps({"type": "agent_step", "round": round_num + 1}) + '\n\n'
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "A syntax check of the code document you just wrote "
+                            f"FAILED:\n{_sc_err}\n\nFix ONLY this syntax error using "
+                            "edit_document (a small find/replace) — do not rewrite "
+                            "the whole file. If the reported location looks correct "
+                            "as-is, say so in one sentence instead."
+                        ),
+                    })
+                    continue
+            if (
+                _code_stream_enabled
+                and _is_incomplete_document_tool_call(round_response)
+                and _malformed_doc_nudge_count < 2
+            ):
+                _malformed_doc_nudge_count += 1
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "Your create_document call was rejected because it contained "
+                        "title/language metadata but NO document content. Retry now "
+                        "with one complete create_document call. The content argument "
+                        "must contain the full implementation; do not close the tool "
+                        "call immediately after title or language."
+                    ),
+                })
+                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                continue
+
             # ── Completion verifier (mechanism 3a) ────────────────────
             # The model is finishing. If this was an effectful agentic turn,
             # have a fresh-context verifier independently check the work
@@ -4029,6 +4618,20 @@ async def stream_agent_loop(
                         "session_id from the serve/list result. Never answer with "
                         "\"check logs\" when those tools are available."
                     )
+                _tool_language = str(_code_artifact["language"] or "text")
+                _tool_instruction = (
+                    " For this standalone code artifact, do NOT call a tool. "
+                    f"Output the complete implementation directly now in one "
+                    f"```{_tool_language} fenced code block."
+                    if _code_chat_direct
+                    else (
+                        " For this code artifact, emit a create_document tool call now. "
+                        "If fenced tools are required, use exactly: "
+                        f"```create_document\\nTitle\\n{_tool_language}\\n<complete code>\\n```."
+                        if _code_artifact["requested"]
+                        else ""
+                    )
+                )
                 messages.append({
                     "role": "system",
                     "content": (
@@ -4040,9 +4643,41 @@ async def stream_agent_loop(
                         f"{_cookbook_log_hint}"
                         "If you decided not to do it after all, say so plainly in "
                         "one sentence instead of restating the plan."
+                        + _tool_instruction
                     ),
                 })
                 # Visible signal in the stream so the user knows we caught it.
+                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                continue
+
+            # ── Thinking-only turn (no reply at all) ──────────────────────
+            # Reasoning models sometimes finish a turn having emitted only a
+            # <think> block: no answer text, no tool call. The loop used to
+            # break here, so the turn ended as a collapsed "Thinking (N lines)"
+            # section with NOTHING after it — indistinguishable from a hang.
+            # Ask once for the actual answer. Checked against the WHOLE turn so
+            # a round that merely adds nothing after an earlier reply is fine.
+            if (
+                not guide_only
+                and not _force_answer
+                and _empty_answer_nudges < 1
+                and not _strip_think_blocks(full_response).strip()
+            ):
+                _empty_answer_nudges += 1
+                logger.info(
+                    "[agent] empty-answer nudge on round %d (reasoning only, no reply)",
+                    round_num,
+                )
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "Your last turn contained only internal reasoning — the "
+                        "user sees an empty reply. Write the actual answer now, "
+                        "in plain text. Do not reason further; state your "
+                        "conclusion. If you genuinely could not determine it, "
+                        "say that plainly in one sentence."
+                    ),
+                })
                 yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
                 continue
             break  # no tools — done
@@ -4134,7 +4769,18 @@ async def stream_agent_loop(
                         yield f'data: {json.dumps({"type": "doc_stream_delta", "content": content})}\n\n'
                     break
                 elif block.tool_type == "update_document":
-                    # Pre-stream the full replacement content so user sees it immediately
+                    # Pre-stream the full replacement content so user sees it
+                    # immediately — but NOT when the update targets the open
+                    # working document. The stream opens a `_streaming_` temp
+                    # doc on the frontend, and handleDocUpdate's isEdit check
+                    # requires no streamingId — so pre-streaming here silently
+                    # replaced the content instead of rendering the
+                    # accept/reject diff. Skipping it loses nothing: the block
+                    # content is already complete (one-shot, not incremental),
+                    # and the doc_update event lands moments later as a
+                    # reviewable diff.
+                    if _active_document_editable:
+                        break
                     content = block.content.strip()
                     yield f'data: {json.dumps({"type": "doc_stream_open", "title": "", "language": ""})}\n\n'
                     yield f'data: {json.dumps({"type": "doc_stream_delta", "content": content})}\n\n'
@@ -4161,7 +4807,48 @@ async def stream_agent_loop(
             else:
                 cmd_display = full_command
 
-            if tool_policy and tool_policy.blocks(block.tool_type):
+            # Ask-before-generate: with the `ask_image_model` setting ON, an
+            # image generate/edit call pauses here — the request is stashed,
+            # the frontend shows a model-picker card, and the turn ends (same
+            # contract as ask_user). The pick confirms via
+            # POST /api/chat/image-choice/<session>, which runs the generation
+            # out-of-band and renders the image directly — no LLM round-trip.
+            _pending_image_choice_event = None
+            if (
+                block.tool_type in ("generate_image", "ai_edit_image")
+                and session_id
+                and not (tool_policy and tool_policy.blocks(block.tool_type))
+                and get_user_setting("ask_image_model", owner or "", False)
+            ):
+                from src.ai_interaction import stash_pending_image_request, list_image_model_options
+                stash_pending_image_request(session_id, block.tool_type, block.content, owner)
+                _img_prompt_preview = block.content.strip().split(chr(10))[0][:200]
+                if _img_prompt_preview.startswith("{"):
+                    try:
+                        _img_prompt_preview = (json.loads(block.content.strip()) or {}).get("prompt", _img_prompt_preview)[:200]
+                    except Exception:
+                        pass
+                _image_choice_payload = {
+                    "tool": block.tool_type,
+                    "prompt": _img_prompt_preview,
+                    "options": list_image_model_options(owner),
+                }
+                # Live event for immediate render …
+                yield 'data: ' + json.dumps({"type": "image_model_choice", **_image_choice_payload}) + '\n\n'
+                # … and persist on the tool event so the picker survives the
+                # turn-end re-render + reloads (same durability as ask_user).
+                _pending_image_choice_event = _image_choice_payload
+                desc = f"{block.tool_type}: awaiting model choice"
+                result = {
+                    "output": (
+                        "The user is choosing which image model to use; the image "
+                        "will be generated and shown to them directly. Your part is "
+                        "done — end the turn with a brief confirmation."
+                    ),
+                    "exit_code": 0,
+                }
+                _awaiting_user = True
+            elif tool_policy and tool_policy.blocks(block.tool_type):
                 desc = f"{block.tool_type}: BLOCKED"
                 result = {
                     "error": tool_policy.reason_for(block.tool_type),
@@ -4170,6 +4857,8 @@ async def stream_agent_loop(
                 }
                 logger.info("Tool blocked before start by policy: %s", block.tool_type)
             else:
+                if is_doc_tool and _code_stream_enabled:
+                    yield f'data: {json.dumps({"type": "doc_stream_phase", "phase": "saving"})}\n\n'
                 yield (
                     f'data: {json.dumps({"type": "tool_start", "tool": block.tool_type, "command": cmd_display, "full_command": full_command, "round": round_num})}\n\n'
                 )
@@ -4201,14 +4890,34 @@ async def stream_agent_loop(
                 _tool_task = asyncio.create_task(_run_tool())
                 # Drain progress events as they arrive — block until the
                 # next event OR the tool finishes (sentinel = None).
+                # Send periodic heartbeats to prevent connection timeouts.
                 while True:
-                    evt = await _progress_q.get()
+                    try:
+                        evt = await asyncio.wait_for(_progress_q.get(), timeout=_TOOL_PROGRESS_TIMEOUT)
+                    except asyncio.TimeoutError:
+                        yield ": heartbeat\n\n"
+                        continue
                     if evt is None:
                         break
+                    if "approval_request" in evt:
+                        # Dangerous-command approval gate (src.command_approval):
+                        # surface as its own SSE event so the UI renders the
+                        # approve/deny dialog instead of a progress tail.
+                        yield (
+                            f'data: {json.dumps({"type": "approval_request", "tool": block.tool_type, "round": round_num, **evt["approval_request"]})}\n\n'
+                        )
+                        continue
                     yield (
                         f'data: {json.dumps({"type": "tool_progress", "tool": block.tool_type, "round": round_num, **evt})}\n\n'
                     )
-                desc, result = await _tool_task
+                try:
+                    desc, result = await _tool_task
+                except Exception as _tool_exc:
+                    # A tool crash must degrade to an error result the model can
+                    # see and react to — not kill the SSE generator mid-turn.
+                    logger.exception("Tool %s raised unexpectedly", block.tool_type)
+                    desc = f"{block.tool_type}: ERROR"
+                    result = {"error": f"{block.tool_type}: {_tool_exc}", "exit_code": 1}
 
             # A skill the model just loaded can prescribe tools that weren't
             # RAG-selected this turn (declared via requires_toolsets in its
@@ -4341,7 +5050,7 @@ async def stream_agent_loop(
                 # On a bash/python timeout the result carries error + (often
                 # empty) stdout/stderr; fall back to the error so the "timed
                 # out" reason reaches the UI instead of a blank result.
-                raw = result["stdout"] or result["stderr"] or result.get("error", "")
+                raw = result["stdout"] or result.get("stderr") or result.get("error", "")
                 output_text = _truncate(raw)
             elif "output" in result:
                 # bash / python canonical result: {"output": ..., "exit_code": ...}
@@ -4399,7 +5108,7 @@ async def stream_agent_loop(
                     if k in result:
                         tool_output_data[k] = result[k]
             # Forward image data from generate_image tool
-            for k in ("image_url", "image_prompt", "image_model", "image_size", "image_quality"):
+            for k in ("image_url", "image_prompt", "image_model", "image_size", "image_quality", "image_id"):
                 if k in result:
                     tool_output_data[k] = result[k]
             # Forward screenshots from browser tools (base64 images)
@@ -4457,6 +5166,11 @@ async def stream_agent_loop(
             # back as active_doc_id next turn (otherwise the agent can't "see"
             # the document it just created on the follow-up message).
             if block.tool_type in ("create_document", "update_document", "edit_document") and result.get("doc_id"):
+                _doc_write_succeeded = True
+                if _code_stream_enabled:
+                    _code_stream_started = True
+                    _code_stream_completed = True
+                    yield f'data: {json.dumps({"type": "doc_stream_phase", "phase": "complete"})}\n\n'
                 yield (
                     'data: ' + json.dumps({
                         "type": "doc_update",
@@ -4467,6 +5181,13 @@ async def stream_agent_loop(
                         "version": result.get("version", 1),
                     }) + '\n\n'
                 )
+
+            # The "Open document" button is rendered by the frontend from the
+            # persisted doc tool_event (which carries doc_id + doc_title) — both
+            # live (doc_update handler) and on reload (chatRenderer). Sourcing it
+            # from the tool_event, not a text anchor in round_texts, is what makes
+            # it reliably survive a full page reload and reopen after the panel is
+            # closed. (The doc_id/title are already on tool_event below.)
 
             # Inline research: emit the open-link as part of the assistant's
             # actual response text — a `#research-<id>` anchor that chatRenderer
@@ -4500,7 +5221,7 @@ async def stream_agent_loop(
                 "exit_code": result.get("exit_code"),
             }
             if result.get("image_url"):
-                for ik in ("image_url", "image_prompt", "image_model", "image_size", "image_quality"):
+                for ik in ("image_url", "image_prompt", "image_model", "image_size", "image_quality", "image_id"):
                     if result.get(ik):
                         tool_event[ik] = result[ik]
             if result.get("doc_id"):
@@ -4515,11 +5236,47 @@ async def stream_agent_loop(
                 # reload, chatRenderer can restore the card; a later user
                 # message removes it as answered.
                 tool_event["ask_user"] = _pending_ask_user_event
+            if _pending_image_choice_event:
+                # Same for the image-model picker: persist so chatRenderer
+                # re-renders the card after the turn-end re-render / reload,
+                # instead of it vanishing (the exact bug the user hit).
+                tool_event["image_choice"] = _pending_image_choice_event
             tool_events.append(tool_event)
             if block.tool_type in _VERIFIER_EFFECTFUL_TOOLS:
                 _effectful_used = True
+            # Remember the last code document written this turn so the
+            # completion round can syntax-check it (opt-in). The result carries
+            # the FINAL content, so this covers edits too.
+            if (
+                _syntax_check_enabled
+                and block.tool_type in ("create_document", "update_document")
+                and not result.get("error")
+                and str(result.get("language") or "").lower() in _SYNTAX_CHECKABLE_LANGS
+            ):
+                _pending_syntax_doc = (result.get("language"), result.get("content"))
+            # Executed successfully → keep this tool available for the rest of
+            # the session (session-sticky; see _SESSION_STICKY_TOOLS).
+            if not result.get("blocked") and not result.get("error"):
+                _remember_sticky_tool(session_id, block.tool_type)
 
             formatted = format_tool_result(desc, result)
+            # Image tools: the generated image is shown to the user via the
+            # structured image_url (rendered as an image bubble). Do NOT feed the
+            # raw /api/generated-image/<id> URL back into history — the model
+            # imitates it and, on the NEXT "another one" turn, writes a fabricated
+            # image link instead of calling the tool again (the image never
+            # generates and the link 404s). Replace it with a clean, URL-free
+            # confirmation that steers the model back to the tool.
+            if block.tool_type in ("generate_image", "ai_edit_image") and not result.get("error") and result.get("image_url"):
+                _img_desc = (result.get("image_prompt") or "").strip()
+                formatted = (
+                    "The image was generated and is already displayed to the user. "
+                    "Do NOT write an image URL, /api/generated-image link, or markdown "
+                    "image yourself — you cannot know a valid image URL. To make "
+                    "ANOTHER image (e.g. \"another one\"), call the generate_image "
+                    "tool again."
+                    + (f" (Just generated: {_img_desc})" if _img_desc else "")
+                )
             tool_results.append(formatted)
             tool_result_texts.append(formatted)
             if (
@@ -4564,6 +5321,16 @@ async def stream_agent_loop(
             logger.info("[agent] odysseus notes completed from deterministic tool output")
             break
 
+        # The doc was manufactured from a code block the model wrote as its
+        # ANSWER (prose + code, no tool call). The turn is complete — the user
+        # already has the explanation and the saved document. Feeding the
+        # "Document created" result back re-provokes weak coder models into
+        # echoing the same code, which used to re-trigger the fallback and loop
+        # create → recreate forever.
+        if _auto_doc_from_chat:
+            logger.info("[agent] turn complete after auto doc from chat code block")
+            break
+
         # Feed results back to LLM for next round
         # Pass the CONVERTED calls (aligned 1:1 with tool_result_texts), not the
         # raw native_tool_calls: a call that failed to convert is dropped from
@@ -4573,6 +5340,26 @@ async def stream_agent_loop(
         _append_tool_results(messages, round_response, converted_calls,
                              tool_results, tool_result_texts, used_native, round_num,
                              round_reasoning=round_reasoning)
+
+        # Anti-loop nudge: a document write just succeeded. The doc context
+        # injected at the top of the turn is the PRE-edit version and does not
+        # refresh across rounds, so without this the model re-reads the old
+        # content, concludes its change never applied, and rewrites the whole
+        # artifact again — the create/rewrite loop the user hit. Tell it once
+        # that the change is saved and to stop unless the user asked for more.
+        if _doc_write_succeeded and not _doc_write_nudged:
+            _doc_write_nudged = True
+            messages.append({
+                "role": "system",
+                "content": (
+                    "The document was saved with exactly the content you just wrote "
+                    "and is now visible to the user in the editor. Do NOT recreate or "
+                    "rewrite the whole document again — your change already applied. "
+                    "If the user's request is satisfied, reply with a brief one-line "
+                    "confirmation and STOP. Only call edit_document/update_document "
+                    "again if the user asked for a further, different change."
+                ),
+            })
 
         # Emit agent_step event
         yield (
@@ -4595,6 +5382,10 @@ async def stream_agent_loop(
     if _exhausted_rounds:
         logger.info("[agent] round cap (%d) reached mid-task — emitting rounds_exhausted", max_rounds)
         yield f'data: {json.dumps({"type": "rounds_exhausted", "rounds": max_rounds})}\n\n'
+
+    if _code_stream_enabled and not _code_stream_completed:
+        _reason = "Generation stopped" if _code_stream_started else "No code document was produced"
+        yield f'data: {json.dumps({"type": "doc_stream_cancel", "reason": _reason})}\n\n'
 
     # If the response is completely empty and no tools were executed,
     # yield a fallback message so the user is not left hanging.

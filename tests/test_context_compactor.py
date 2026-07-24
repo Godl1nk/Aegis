@@ -194,6 +194,83 @@ class TestMaybeCompactFourthMessage:
         assert len(result) == 3 and result[2] is True
 
 
+class TestPreCompressMemoryStash:
+    """Compaction must stash the discarded older half on the session so
+    run_post_response_tasks can queue a final memory-extraction pass over it
+    (Hermes on_pre_compress port). Tool/None-content turns are excluded."""
+
+    def _run_with_session(self, messages, session, *, context_length=500):
+        orig_ctx = cc.get_context_length
+        orig_call = cc.llm_call_async
+        orig_resolve = cc.resolve_endpoint
+        orig_update = cc._update_session_history
+
+        async def _fake_summary(*a, **k):
+            return "compact summary text"
+
+        cc.get_context_length = lambda url, model: context_length
+        cc.llm_call_async = _fake_summary
+        cc.resolve_endpoint = lambda which, owner=None: (None, None, None)
+        cc._update_session_history = lambda *a, **k: None
+        try:
+            return asyncio.run(
+                maybe_compact(
+                    session=session,
+                    endpoint_url="http://local/v1/chat/completions",
+                    model="local-model",
+                    messages=list(messages),
+                    headers={},
+                )
+            )
+        finally:
+            cc.get_context_length = orig_ctx
+            cc.llm_call_async = orig_call
+            cc.resolve_endpoint = orig_resolve
+            cc._update_session_history = orig_update
+
+    def test_older_half_stashed_on_session(self):
+        from types import SimpleNamespace
+
+        session = SimpleNamespace()
+        messages = [
+            {"role": "system", "content": "You are a helpful agent. " * 200},
+            {"role": "user", "content": "my name is Sam and I live in Oslo"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c1", "type": "function",
+                             "function": {"name": "web_search", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "search results"},
+            {"role": "assistant", "content": "Nice to meet you, Sam."},
+            {"role": "user", "content": "turn 2"},
+            {"role": "assistant", "content": "reply 2"},
+            {"role": "user", "content": "turn 3"},
+            {"role": "assistant", "content": "reply 3"},
+        ]
+        _, _, was_compacted = self._run_with_session(messages, session)
+        assert was_compacted is True
+
+        stashed = session._precompress_messages
+        assert stashed, "older half must be stashed for post-turn extraction"
+        joined = " ".join(m["content"] for m in stashed)
+        assert "my name is Sam" in joined
+        # tool results and None-content tool-call turns are excluded
+        assert all(m["role"] in ("user", "assistant") for m in stashed)
+        assert "search results" not in joined
+
+    def test_no_stash_when_not_compacted(self):
+        from types import SimpleNamespace
+
+        session = SimpleNamespace()
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+        _, _, was_compacted = self._run_with_session(
+            messages, session, context_length=100000
+        )
+        assert was_compacted is False
+        assert getattr(session, "_precompress_messages", None) is None
+
+
 class TestResearchPrimerPreserved:
     """A research-spinoff primer (metadata research_spinoff_from) must never be
     trimmed away — it is the Discuss chat's sole knowledge base (drift fix)."""

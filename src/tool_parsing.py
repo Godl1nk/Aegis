@@ -156,6 +156,35 @@ _STEPFUN_CALL_END = "<｜tool▁call▁end｜>"
 _STEPFUN_CALLS_BEGIN = "<｜tool▁calls▁begin｜>"
 _STEPFUN_CALLS_END = "<｜tool▁calls▁end｜>"
 
+# Qwopus / Qwen3-derived local finetunes emit the same call structure but with
+# PLAIN-ASCII delimiters and an <arg_value> separator instead of StepFun's
+# fullwidth tokens, e.g.:
+#   <|tool_call_begin|>edit_document<arg_value>{"find": "...", "replace": "..."}<|tool_call_end|>
+#   <|tool_calls_end|>
+# llama.cpp/Ollama pass these through as visible text when they don't return
+# structured tool_calls, so without normalization the raw markup floods the chat
+# and the call never executes. Rewrite the ASCII/arg_value variant into the
+# canonical StepFun tokens so the StepFun parser + stripper handle both. Literal
+# `[｜|]` / `[▁_]` classes match either width; `re.sub` over fixed tokens is
+# linear (no ReDoS). `<arg_value>` maps to the name/args separator.
+_PIPE_TOKEN_NORMALIZE = [
+    (re.compile(r"<[｜|]tool[▁_]calls[▁_]begin[｜|]>", re.IGNORECASE), _STEPFUN_CALLS_BEGIN),
+    (re.compile(r"<[｜|]tool[▁_]calls[▁_]end[｜|]>", re.IGNORECASE), _STEPFUN_CALLS_END),
+    (re.compile(r"<[｜|]tool[▁_]call[▁_]begin[｜|]>", re.IGNORECASE), _STEPFUN_CALL_BEGIN),
+    (re.compile(r"<[｜|]tool[▁_]call[▁_]end[｜|]>", re.IGNORECASE), _STEPFUN_CALL_END),
+    (re.compile(r"<[｜|]tool[▁_]sep[｜|]>", re.IGNORECASE), _STEPFUN_CALL_SEP),
+    (re.compile(r"<arg_value>", re.IGNORECASE), _STEPFUN_CALL_SEP),
+]
+
+
+def _normalize_pipe_tool_calls(text: str) -> str:
+    """Normalize ASCII pipe-delimited native tool-call tokens into StepFun form."""
+    if not text or not isinstance(text, str) or "tool_call" not in text.lower():
+        return text
+    for pat, canon in _PIPE_TOKEN_NORMALIZE:
+        text = pat.sub(canon, text)
+    return text
+
 _HYBRID_PARAM_RE = re.compile(
     r'<parameter(?:\s+name\s*=\s*|\s*=\s*)["\']?(\w+)["\']?\s*>'
     r'([\s\S]*?)</parameter>',
@@ -1270,8 +1299,10 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
     """
     blocks = []
 
-    # Normalize DeepSeek DSML markup into standard <invoke> form so the
-    # XML patterns below catch it.
+    # Normalize ASCII pipe tool-call tokens (Qwopus/Qwen3 `<|tool_call_begin|>`
+    # …`<arg_value>`…`<|tool_call_end|>`) into StepFun form, then DeepSeek DSML
+    # into <invoke>, so the downstream parsers catch both.
+    text = _normalize_pipe_tool_calls(text)
     text = _normalize_dsml(text)
 
     # Hybrid local-model document calls use a create_document fence but close
@@ -1453,8 +1484,10 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
     Patterns 2-5 + DSML markup are always stripped, since that markup should
     never reach the user regardless of whether it converted to a tool call.
     """
-    # Normalize DSML first so its markup gets stripped by the <invoke>
-    # / <tool_call> removers below instead of leaking to the user.
+    # Normalize ASCII pipe tool-call tokens + DSML first so their markup gets
+    # stripped by the StepFun / <invoke> removers below instead of leaking to
+    # the user as raw text.
+    text = _normalize_pipe_tool_calls(text)
     text = _normalize_dsml(text)
     cleaned = _HYBRID_FENCED_DOC_ENVELOPE_RE.sub('', text)
     # Keep the executed-vs-illustrative fence distinction (only strip fences

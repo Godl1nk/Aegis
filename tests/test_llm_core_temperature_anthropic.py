@@ -31,4 +31,4 @@ def test_anthropic_payload_clamps_negative():
 
 def test_anthropic_payload_none_temperature_does_not_crash():
     payload = _anthropic_payload(None)
-    assert payload["temperature"] is None
+    assert payload.get("temperature") is None

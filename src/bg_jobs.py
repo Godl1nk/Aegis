@@ -79,7 +79,8 @@ def _pid_alive(pid: Optional[int]) -> bool:
 
 
 def launch(command: str, session_id: str, cwd: Optional[str] = None,
-           max_runtime_s: int = DEFAULT_MAX_RUNTIME_S) -> Dict[str, Any]:
+           max_runtime_s: int = DEFAULT_MAX_RUNTIME_S,
+           watch_patterns: Optional[List[str]] = None) -> Dict[str, Any]:
     """Launch `command` detached. Returns the job record (status='running').
 
     Output + the final exit code are written to files so status survives a
@@ -130,12 +131,17 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
         )
         argv = [os.environ.get("ComSpec", "cmd.exe"), "/c", str(script_path)]
 
+    # Scrubbed env (Hermes port): background jobs inherit the same sanitized
+    # environment as foreground bash — provider keys / bot tokens never reach
+    # a model-authored subprocess via the detached path either.
+    from src.env_scrub import scrub_subprocess_env
     proc = subprocess.Popen(
         argv,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
         cwd=cwd or None,
+        env=scrub_subprocess_env(),
         **detached_popen_kwargs(),  # detach from the request lifecycle (setsid / DETACHED_PROCESS)
     )
 
@@ -153,6 +159,17 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
         "log_path": str(log_path),
         "exit_path": str(exit_path),
     }
+    if watch_patterns:
+        # Watch-pattern state (ported from Hermes process_registry): the
+        # monitor scans new log output for these substrings and re-invokes
+        # the agent on a match, rate-limited + strike-disabled below.
+        rec["watch_patterns"] = list(watch_patterns)
+        rec["watch_offset"] = 0            # log-file read offset
+        rec["watch_cooldown_until"] = 0.0
+        rec["watch_strikes"] = 0
+        rec["watch_strike_candidate"] = False
+        rec["watch_disabled"] = False
+        rec["watch_suppressed"] = 0
     jobs = _load()
     jobs[job_id] = rec
     _save(jobs)
@@ -233,6 +250,108 @@ def refresh() -> Dict[str, Dict[str, Any]]:
 def _kill(pid: Optional[int]) -> None:
     # Cross-platform process-tree teardown (POSIX killpg / Windows taskkill /T).
     kill_process_tree(pid)
+
+
+# Watch-pattern limits (ported from Hermes process_registry): at most ONE
+# watch-match notification per WATCH_MIN_INTERVAL_SECONDS per job. Any match
+# arriving inside the cooldown window is dropped and counts as ONE strike for
+# that window. After WATCH_STRIKE_LIMIT consecutive strike windows,
+# watch_patterns is disabled for the job — the normal on-completion follow-up
+# still fires, so the agent gets exactly one notification when it ends.
+WATCH_MIN_INTERVAL_SECONDS = 15
+WATCH_STRIKE_LIMIT = 3
+
+
+def check_watch_events() -> List[Dict[str, Any]]:
+    """Scan running watched jobs' new log output for pattern matches.
+
+    Called by the bg monitor each tick. Returns events to deliver:
+    ``{"type": "watch_match"|"watch_disabled", "job": rec, ...}``.
+    State (offset, cooldown, strikes) persists on the job record so it
+    survives server restarts like everything else in this module.
+    """
+    events: List[Dict[str, Any]] = []
+    jobs = _load()
+    changed = False
+    now = time.time()
+
+    for rec in jobs.values():
+        if (
+            rec.get("status") != "running"
+            or not rec.get("watch_patterns")
+            or rec.get("watch_disabled")
+        ):
+            continue
+        try:
+            with open(rec["log_path"], "r", encoding="utf-8", errors="replace") as f:
+                f.seek(int(rec.get("watch_offset", 0) or 0))
+                new_text = f.read()
+                rec["watch_offset"] = f.tell()
+                changed = True
+        except OSError:
+            continue
+        if not new_text:
+            continue
+
+        # Scan new text line-by-line for pattern matches
+        matched_lines = []
+        matched_pattern = None
+        for line in new_text.splitlines():
+            for pat in rec["watch_patterns"]:
+                if pat in line:
+                    matched_lines.append(line.rstrip())
+                    if matched_pattern is None:
+                        matched_pattern = pat
+                    break  # one match per line is enough
+        if not matched_lines:
+            continue
+
+        # Case 1: still inside the cooldown from the last emission. Count this
+        # as a strike for the current window (only once per window) and drop
+        # the event. At the strike limit, disable watch — completion follow-up
+        # still delivers exactly one notification when the job ends.
+        if rec.get("watch_cooldown_until", 0) and now < rec["watch_cooldown_until"]:
+            rec["watch_suppressed"] = int(rec.get("watch_suppressed", 0)) + len(matched_lines)
+            if not rec.get("watch_strike_candidate"):
+                rec["watch_strike_candidate"] = True
+                rec["watch_strikes"] = int(rec.get("watch_strikes", 0)) + 1
+                if rec["watch_strikes"] >= WATCH_STRIKE_LIMIT:
+                    rec["watch_disabled"] = True
+                    events.append({
+                        "type": "watch_disabled",
+                        "job": dict(rec),
+                        "message": (
+                            f"Watch patterns disabled for job {rec['id']} — "
+                            f"{WATCH_STRIKE_LIMIT} consecutive rate-limit windows "
+                            f"triggered (min spacing {WATCH_MIN_INTERVAL_SECONDS}s). "
+                            f"You'll get exactly one notification when the job exits."
+                        ),
+                    })
+            continue
+
+        # Case 2: cooldown expired. If the prior window was clean (no drops),
+        # reset the consecutive-strike counter — healthy emission cadence.
+        if rec.get("watch_cooldown_until", 0) and not rec.get("watch_strike_candidate"):
+            rec["watch_strikes"] = 0
+        rec["watch_strike_candidate"] = False
+        rec["watch_cooldown_until"] = now + WATCH_MIN_INTERVAL_SECONDS
+        suppressed = int(rec.get("watch_suppressed", 0))
+        rec["watch_suppressed"] = 0
+
+        output = "\n".join(matched_lines[:20])
+        if len(output) > 2000:
+            output = output[:2000] + "\n...(truncated)"
+        events.append({
+            "type": "watch_match",
+            "job": dict(rec),
+            "pattern": matched_pattern,
+            "output": output,
+            "suppressed": suppressed,
+        })
+
+    if changed:
+        _save(jobs)
+    return events
 
 
 def pending_followups() -> List[Dict[str, Any]]:

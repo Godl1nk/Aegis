@@ -74,10 +74,33 @@ _STOPWORDS = frozenset(
     "that's there's here's what's who's how's let's can't".split()
 )
 
+def _light_stem(word: str) -> str:
+    """Very light English suffix stemmer for retrieval matching.
+
+    Without it, memory recall required an EXACT token match: "where do I
+    live" could not retrieve "User lives in Singapore" (live≠lives), and
+    "my projects" missed "…side project" (projects≠project). Deliberately
+    conservative — only the common inflections, with length guards so short
+    words and -ss words ("class") are left alone. Applied symmetrically to
+    query and memory tokens, so stems only ever compare against stems.
+    """
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"          # cities -> city
+    if len(word) > 4 and word.endswith("ing"):
+        return word[:-3]                 # building -> build
+    if len(word) > 3 and word.endswith("ed"):
+        return word[:-2]                 # visited -> visit
+    if len(word) > 4 and word.endswith(("xes", "zes", "ches", "shes", "sses")):
+        return word[:-2]                 # boxes -> box, watches -> watch, classes -> class
+    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]                 # lives -> live, projects -> project, notes -> note
+    return word
+
+
 def _content_tokens(text: str) -> list:
-    """Extract meaningful content words: no stopwords, min 3 chars, lowercase."""
+    """Extract meaningful content words: no stopwords, min 3 chars, lowercase, stemmed."""
     words = re.findall(r'[a-z0-9]+(?:[-_][a-z0-9]+)*', text.lower())
-    return [w for w in words if len(w) >= 3 and w not in _STOPWORDS]
+    return [_light_stem(w) for w in words if len(w) >= 3 and w not in _STOPWORDS]
 
 
 class ChatProcessor:
@@ -102,6 +125,18 @@ class ChatProcessor:
         now = time.time()
         query_tokens = _content_tokens(message)
 
+        # Broad self-recall questions ("What do you know about me?", "Do you
+        # remember me?") are made entirely of stopwords, so both keyword and
+        # token gating below would return nothing — exactly the query where
+        # the user most expects memories to surface. Return the most recent
+        # entries instead of nothing.
+        if not query_tokens and re.search(
+            r"\b(?:about me|know me|remember|who am i)\b", message.lower()
+        ):
+            return sorted(
+                mem_entries, key=lambda m: m.get("timestamp", 0), reverse=True
+            )[:k]
+
         # If the query has no meaningful tokens, skip keyword retrieval entirely
         if not query_tokens:
             # Fall back to vector-only if available
@@ -118,6 +153,10 @@ class ChatProcessor:
             for t in toks:
                 doc_freq[t] += 1
 
+        # Hoisted out of _bm25_score: recomputing this per memory made
+        # scoring O(N^2) in the number of memories.
+        avg_len = max(sum(len(v) for v in mem_token_cache.values()) / N, 1)
+
         def _bm25_score(query_toks, mem_id):
             """BM25-inspired score between query and a memory."""
             mem_toks = mem_token_cache.get(mem_id, set())
@@ -125,7 +164,6 @@ class ChatProcessor:
                 return 0.0
             score = 0.0
             mem_len = len(mem_toks)
-            avg_len = max(sum(len(v) for v in mem_token_cache.values()) / N, 1)
             k1, b = 1.5, 0.75
             for qt in query_toks:
                 if qt not in mem_toks:

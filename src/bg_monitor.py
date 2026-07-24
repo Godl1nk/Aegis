@@ -77,10 +77,14 @@ async def _drain_agent(sess, messages):
     return full, tool_events
 
 
-async def _run_followup(rec: dict) -> bool:
+async def _run_followup(rec: dict, inject: str | None = None) -> bool:
     """Re-invoke the agent in the job's session with the result. Returns True
     if the follow-up completed (or there's nothing to do) — i.e. it's safe to
-    mark followed_up. Returns False to retry on the next tick."""
+    mark followed_up. Returns False to retry on the next tick.
+
+    ``inject`` overrides the default completion message — the watch-pattern
+    path (Hermes ``watch_patterns`` port) delivers mid-process match events
+    through the same re-invocation machinery."""
     from src.ai_interaction import get_session_manager
     from core.models import ChatMessage
 
@@ -106,7 +110,7 @@ async def _run_followup(rec: dict) -> bool:
     except Exception:
         pass
 
-    inject = (
+    inject = inject or (
         f"[Background job {rec['id']} finished]\n\n"
         f"{bg_jobs.result_text(rec)}\n\n"
         "Continue the task using this output. Don't repeat work that's already done. "
@@ -147,6 +151,28 @@ async def _loop():
                 except Exception as e:
                     # Idempotent: leave followed_up=False so the next tick retries.
                     logger.warning("bg-followup failed for %s (will retry): %s", rec.get("id"), e)
+            # Watch-pattern events (Hermes port): mid-process match / disable
+            # notices on still-running jobs. Best-effort — a failed delivery
+            # is dropped rather than retried (the state machine already
+            # emitted it once; the on-completion follow-up remains the
+            # guaranteed signal).
+            for evt in bg_jobs.check_watch_events():
+                job = evt["job"]
+                try:
+                    if evt["type"] == "watch_match":
+                        _sup = f" ({evt['suppressed']} earlier matches suppressed)" if evt.get("suppressed") else ""
+                        inject = (
+                            f"[Background job {job['id']} — watch pattern matched: "
+                            f"{evt['pattern']!r}]{_sup}\n\n{evt['output']}\n\n"
+                            "The job is still running. React to this signal if it "
+                            "unblocks the task (e.g. the server is now ready); "
+                            "otherwise keep waiting for completion."
+                        )
+                    else:
+                        inject = f"[Background job {job['id']}]\n\n{evt['message']}"
+                    await _run_followup(job, inject=inject)
+                except Exception as e:
+                    logger.warning("bg-watch delivery failed for %s: %s", job.get("id"), e)
         except Exception as e:
             logger.warning("bg-monitor tick error: %s", e)
         await asyncio.sleep(POLL_INTERVAL_S)

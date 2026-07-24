@@ -528,6 +528,18 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
                 or any(t in k for t in ("api_key", "_key", "secret", "password"))
             )
 
+        # Security-policy keys the agent must NEVER write (set OR reset): these
+        # ARE the approval gate. A model that can flip command_approval_mode=off,
+        # wipe command_approval_deny, or allowlist secrets into its own shell env
+        # via bash_env_passthrough can disarm its own safety layer — the exact
+        # self-disarm path the command guard blocks for file writes to
+        # settings.json. The user changes these in Settings → Tools.
+        _SECURITY_KEYS = {
+            "command_approval_mode", "command_approval_timeout",
+            "command_approval_deny", "bash_env_passthrough",
+            "terminal_env", "docker_image", "docker_mount_workspace",
+        }
+
         # Friendly aliases → real keys, so natural phrasing resolves.
         _ALIASES_SET = {
             "voice": "tts_voice", "tts voice": "tts_voice", "tts": "tts_enabled",
@@ -544,6 +556,7 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             "research max tokens": "research_max_tokens",
             "vision model": "vision_model", "vision": "vision_enabled",
             "image model": "image_model", "image quality": "image_quality",
+            "image edit model": "image_edit_model", "image editing model": "image_edit_model",
             "image gen": "image_gen_enabled", "image generation": "image_gen_enabled",
             "reminder channel": "reminder_channel", "reminders": "reminder_channel",
             "ntfy topic": "reminder_ntfy_topic",
@@ -565,6 +578,8 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
         _ENUMS = {
             "image_quality": ["low", "medium", "high"],
             "reminder_channel": ["browser", "email", "ntfy", "webhook"],
+            "command_approval_mode": ["manual", "off"],
+            "terminal_env": ["local", "docker"],
         }
         def _coerce(value, default):
             if isinstance(default, bool):
@@ -646,6 +661,8 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
                 return {"error": f"Unknown setting '{raw}'. Use action='list' to see available settings.", "exit_code": 1}
             if _is_secret(key):
                 return {"response": f"'{key}' is a credential/secret. For security I can't set it from chat. Open Settings and set it there.", "exit_code": 0}
+            if key in _SECURITY_KEYS:
+                return {"response": f"'{key}' is a security-policy setting. For safety it can only be changed by the user in Settings → Tools, never from chat.", "exit_code": 0}
             # Structured settings (dicts/lists like keybinds, default_model_fallbacks)
             # have no safe scalar coercion; _coerce would pass a bare string
             # straight through and clobber the structure. Refuse them here; they're
@@ -679,6 +696,10 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
                 return {"error": f"Unknown setting '{args.get('key')}'.", "exit_code": 1}
             if _is_secret(key):
                 return {"response": f"'{key}' is a credential. Reset it in the panel.", "exit_code": 0}
+            if key in _SECURITY_KEYS:
+                # Reset is a write too: resetting command_approval_deny wipes the
+                # user's forbid rules.
+                return {"response": f"'{key}' is a security-policy setting. Change it in Settings → Tools yourself.", "exit_code": 0}
             s = load_settings()
             s[key] = DEFAULT_SETTINGS[key]
             save_settings(s)

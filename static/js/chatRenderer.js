@@ -2180,6 +2180,207 @@ export function removeAskUserCards(root) {
 }
 
 /**
+ * Ask-before-generate: render the image-model picker as a DURABLE card.
+ *
+ * Lives here (not the streaming loop) so it is re-rendered from the persisted
+ * `image_choice` tool event after the turn-end re-render and page reloads —
+ * exactly like renderAskUserCard. Picking confirms via
+ * POST /api/chat/image-choice/<session>, which runs the generation directly
+ * and returns the image (no extra LLM round-trip).
+ */
+export function renderImageChoiceCard(payload, options) {
+  const pl = payload || {};
+  const box = document.getElementById('chat-history');
+  if (!box) return null;
+  const renderOptions = options || {};
+  const sessionId = renderOptions.sessionId
+    || (window.sessionModule && window.sessionModule.getCurrentSessionId());
+  if (!sessionId) return null;
+  const apiBase = window.API_BASE || '';
+
+  // One picker at a time.
+  box.querySelectorAll('.image-choice-card').forEach((n) => n.remove());
+
+  const isEdit = (pl.tool || '') === 'ai_edit_image';
+  const card = document.createElement('div');
+  card.className = 'ask-user-card image-choice-card';
+  card.setAttribute('role', 'group');
+  card.setAttribute('aria-label', 'Choose image model');
+
+  const title = document.createElement('div');
+  title.className = 'ask-user-question';
+  title.textContent = isEdit ? 'Edit image with which model?' : 'Generate image with which model?';
+  card.appendChild(title);
+
+  if (pl.prompt) {
+    const promptEl = document.createElement('div');
+    promptEl.className = 'image-choice-prompt';
+    promptEl.textContent = pl.prompt;
+    card.appendChild(promptEl);
+  }
+
+  const select = document.createElement('select');
+  select.className = 'settings-select image-choice-select';
+  const opts = Array.isArray(pl.options) && pl.options.length
+    ? pl.options
+    : [{ spec: 'auto', label: 'Auto (configured default)' }];
+  opts.forEach((opt) => {
+    const o = document.createElement('option');
+    o.value = (opt && opt.spec) || 'auto';
+    o.textContent = (opt && (opt.label || opt.spec)) || 'auto';
+    select.appendChild(o);
+  });
+  card.appendChild(select);
+
+  const row = document.createElement('div');
+  row.className = 'image-choice-actions';
+  const goBtn = document.createElement('button');
+  goBtn.type = 'button';
+  goBtn.className = 'image-choice-btn image-choice-go';
+  goBtn.textContent = isEdit ? 'Edit image' : 'Generate';
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'image-choice-btn image-choice-cancel';
+  cancelBtn.textContent = 'Cancel';
+  row.appendChild(goBtn);
+  row.appendChild(cancelBtn);
+  card.appendChild(row);
+
+  const setBusy = (busy) => {
+    select.disabled = busy;
+    goBtn.disabled = busy;
+    cancelBtn.disabled = busy;
+    goBtn.textContent = busy ? 'Generating…' : (isEdit ? 'Edit image' : 'Generate');
+  };
+
+  const showPlaceholder = (prompt, toolName = '') => {
+    let displayPrompt = (prompt || '').trim();
+    if (displayPrompt.startsWith('{')) {
+      try {
+        const parsedPrompt = JSON.parse(displayPrompt);
+        if (parsedPrompt && typeof parsedPrompt === 'object' && parsedPrompt.prompt) {
+          displayPrompt = String(parsedPrompt.prompt || '').trim();
+        }
+      } catch (_) {}
+    }
+    const wrap = document.createElement('div');
+    wrap.className = 'msg msg-ai generated-image-loading-wrap';
+    const body = document.createElement('div');
+    body.className = 'body';
+    const cardEl = document.createElement('div');
+    cardEl.className = 'generated-image-loading-card';
+    const isEdit = (toolName || '').toLowerCase().includes('edit_image');
+    const titleText = isEdit ? 'Editing image' : 'Creating image';
+    cardEl.innerHTML = `<div class="generated-image-loading-title">${titleText}</div><div class="generated-image-loading-grid" aria-hidden="true"></div>`;
+    if (displayPrompt) {
+      const caption = document.createElement('div');
+      caption.className = 'generated-image-loading-prompt';
+      caption.textContent = displayPrompt;
+      cardEl.appendChild(caption);
+    }
+    body.appendChild(cardEl);
+    wrap.appendChild(body);
+    return wrap;
+  };
+
+  const cancelPlaceholder = (placeholderEl) => {
+    if (placeholderEl) {
+      const loadingCard = placeholderEl.querySelector('.generated-image-loading-card');
+      if (loadingCard) loadingCard.classList.add('cancelled');
+      const titleEl = placeholderEl.querySelector('.generated-image-loading-title');
+      if (titleEl) titleEl.textContent = 'Cancelled';
+    }
+  };
+
+  goBtn.addEventListener('click', async () => {
+    setBusy(true);
+    const placeholder = showPlaceholder(pl.prompt || '', pl.tool || '');
+    const liveCard = box.querySelector('.image-choice-card');
+    if (liveCard) liveCard.replaceWith(placeholder);
+    else if (card.isConnected) card.replaceWith(placeholder);
+    else box.appendChild(placeholder);
+    if (uiModule.scrollHistory) uiModule.scrollHistory();
+
+    try {
+      const res = await fetch(`${apiBase}/api/chat/image-choice/${encodeURIComponent(sessionId)}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        // prompt/tool let the backend rebuild the request if its in-memory
+        // stash was lost (failed earlier attempt or backend restart) — without
+        // them a retry from the persisted card always 404'd.
+        body: JSON.stringify({
+          action: 'confirm',
+          model: select.value || 'auto',
+          prompt: pl.prompt || '',
+          tool: pl.tool || 'generate_image',
+        }),
+      });
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try { detail = (await res.json()).detail || detail; } catch (_) {}
+        throw new Error(detail);
+      }
+      // The endpoint streams (SSE): keepalive comments (": …") during the ~1min
+      // generation keep the tunnel alive, then one final `data:` event carries
+      // the image. Read the stream and pull that event out.
+      let data = null;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buf.indexOf('\n\n')) >= 0) {
+          const evt = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          for (const line of evt.split('\n')) {
+            if (line.startsWith('data:')) {
+              try { data = JSON.parse(line.slice(5).trim()); } catch (_) {}
+            }
+          }
+        }
+      }
+      if (!data) throw new Error('no response from server');
+      if (data.error) throw new Error(data.error);
+      if (!data.image_url) throw new Error('no image returned');
+      const bubble = buildImageBubble(
+        data.image_url, data.image_prompt || pl.prompt || '',
+        data.image_model, data.image_size, data.image_quality, data.image_id,
+      );
+      if (placeholder.isConnected) placeholder.replaceWith(bubble);
+      else box.appendChild(bubble);
+      if (uiModule.scrollHistory) uiModule.scrollHistory();
+      window.dispatchEvent(new CustomEvent('gallery-refresh'));
+    } catch (e) {
+      cancelPlaceholder(placeholder);
+      setBusy(false);
+      if (uiModule.showToast) uiModule.showToast('Image generation failed: ' + (e.message || e));
+    }
+  });
+
+  cancelBtn.addEventListener('click', async () => {
+    setBusy(true);
+    try {
+      await fetch(`${apiBase}/api/chat/image-choice/${encodeURIComponent(sessionId)}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'cancel' }),
+      });
+    } catch (_) {}
+    // Remove whatever picker card is live (this one may have been re-rendered).
+    box.querySelectorAll('.image-choice-card').forEach((n) => n.remove());
+  });
+
+  box.appendChild(card);
+  if (renderOptions.scroll !== false && uiModule.scrollHistory) uiModule.scrollHistory();
+  return card;
+}
+
+/**
  * Render an ask_user payload as a durable choice card.
  *
  * This lives in the history renderer rather than the streaming loop so the
@@ -2322,6 +2523,8 @@ export function addMessage(role, content, modelName, metadata) {
     // answered.  This also removes the live card as soon as a manual reply is
     // appended, even when the user did not click one of its buttons.
     if (role === 'user') removeAskUserCards(box);
+    // A later user message answers/obsoletes any pending image picker too.
+    if (role === 'user') box.querySelectorAll('.image-choice-card').forEach((n) => n.remove());
 
     var esc = uiModule.esc;
     const textRaw = Array.isArray(content) ? markdownModule.renderContent(content) : content;
@@ -2331,6 +2534,7 @@ export function addMessage(role, content, modelName, metadata) {
       const roundTexts = metadata.round_texts || [];
       const toolEvents = metadata.tool_events;
       let pendingAskUser = null;
+      let pendingImageChoice = null;
       let lastWrap = null;
       let firstMsgAi = null;
       let lastMsgAi = null;
@@ -2341,6 +2545,9 @@ export function addMessage(role, content, modelName, metadata) {
         if (!toolsByRound[r]) toolsByRound[r] = [];
         toolsByRound[r].push(ev);
       }
+      // One "Open document" button per doc across the whole message (a
+      // multi-edit turn has many edit_document events for the same doc).
+      const _docBtnSeen = new Set();
 
       const maxRound = Math.max(...Object.keys(toolsByRound).map(Number), roundTexts.length);
 
@@ -2408,6 +2615,7 @@ export function addMessage(role, content, modelName, metadata) {
           }
           for (const ev of roundTools) {
             if (ev.ask_user) pendingAskUser = ev.ask_user;
+            if (ev.image_choice) pendingImageChoice = ev.image_choice;
             const ok = (ev.exit_code === 0 || ev.exit_code == null);
             let outHtml = '';
             if (ev.output && ev.output.trim()) {
@@ -2443,7 +2651,16 @@ export function addMessage(role, content, modelName, metadata) {
             node.className = 'agent-thread-node' + (ok ? '' : ' error');
             // Hide the raw JSON command when a diff says it better (same as live).
             const evCmdHtml = (ev.command && !(ev.diff && ev.diff.text)) ? `<pre class="agent-thread-cmd">${esc(ev.command)}</pre>` : '';
-            node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(ev.tool)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${evCmdHtml}${outHtml}${evDiffHtml}</div>`;
+            // Open-document button, sourced from the persisted tool_event (NOT a
+            // text anchor) so it always survives a page reload and lets the user
+            // reopen the doc after closing the panel. `#document-<id>` is routed
+            // to loadDocument() by the global click delegate.
+            const _isDocEv = ok && ev.doc_id && /document/i.test(ev.tool || '') && !_docBtnSeen.has(ev.doc_id);
+            if (_isDocEv) _docBtnSeen.add(ev.doc_id);
+            const _docOpenHtml = _isDocEv
+              ? `<a class="agent-doc-open-btn" href="#document-${esc(ev.doc_id)}" title="Open in the document editor">Open ${esc(ev.doc_title || 'document')}</a>`
+              : '';
+            node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(ev.tool)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${evCmdHtml}${outHtml}${evDiffHtml}</div>${_docOpenHtml}`;
             // Click handling is delegated globally \u2014 see chat.js init.
             threadWrap.appendChild(node);
           }
@@ -2476,6 +2693,12 @@ export function addMessage(role, content, modelName, metadata) {
         // removes this card; if there is none, the pending choice survives a
         // refresh.  Avoid stealing focus while the history is loading.
         renderAskUserCard(pendingAskUser, { focus: false, scroll: false });
+      }
+      if (pendingImageChoice) {
+        // Same durability contract as ask_user: the picker is re-rendered from
+        // the persisted tool event so it survives the turn-end re-render and
+        // page reloads. A later user message means it was already answered.
+        renderImageChoiceCard(pendingImageChoice, { scroll: false });
       }
       return lastWrap;
     }
@@ -2815,6 +3038,7 @@ const chatRenderer = {
   safeDisplayImageSrc,
   removeAskUserCards,
   renderAskUserCard,
+  renderImageChoiceCard,
   buildSourcesBox,
   buildFindingsBox,
   appendReportButton,

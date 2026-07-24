@@ -2621,6 +2621,9 @@ body.bg-pattern-sparkles {
     /* Document indicator — hidden by default, shown when docs exist */
     #doc-indicator-btn { display: none !important; }
     #doc-indicator-btn.visible { display: inline-flex !important; }
+    /* Space between the doc icon and its label ("Icon Writing"). */
+    #doc-indicator-btn { align-items: center; gap: 6px; }
+    #doc-indicator-btn > svg { flex: 0 0 auto; }
     /* On mobile, the minimized-dock chip replaces this indicator — keep
        it hidden regardless of `.visible`. */
     @media (max-width: 768px) {
@@ -2643,19 +2646,11 @@ body.bg-pattern-sparkles {
       background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent) !important;
       animation: doc-writing-indicator-pulse 1.4s ease-in-out infinite;
     }
-    #doc-indicator-btn.doc-writing::after,
-    #rail-documents.doc-writing::after {
-      content: "";
-      width: 5px;
-      height: 5px;
-      border-radius: 50%;
-      background: currentColor;
-      box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent);
-      flex: 0 0 auto;
-    }
+    /* No trailing dot — it overlapped the label text ("Writing"). The gentle
+       whole-chip brightness pulse is the "writing in progress" signal. */
     @keyframes doc-writing-indicator-pulse {
-      0%, 100% { filter: brightness(0.9); }
-      50% { filter: brightness(1.35); }
+      0%, 100% { filter: brightness(0.92); }
+      50% { filter: brightness(1.3); }
     }
     #overflow-doc-btn.has-docs,
     #overflow-doc-btn.active {
@@ -6577,6 +6572,140 @@ body.bg-pattern-sparkles {
     .generated-image-markdown-link {
       cursor: zoom-in;
     }
+    /* ── Image-generation loading card (restored from 2c634b7) ── */
+    .msg-ai.generated-image-loading-wrap {
+      width: min(620px, 85%);
+      max-width: 85%;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      overflow: visible;
+    }
+    .generated-image-loading-wrap .body {
+      width: 100%;
+      text-align: left;
+      overflow: visible;
+    }
+    .generated-image-loading-card {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      min-height: min(520px, 62vh);
+      padding: 28px 32px 30px;
+      overflow: hidden;
+      border: 1px solid var(--bubble-border, var(--border));
+      border-radius: 18px 18px 18px 0;
+      background:
+        linear-gradient(180deg,
+          color-mix(in srgb, var(--ai-bubble-bg, var(--panel)) 94%, var(--fg) 6%),
+          color-mix(in srgb, var(--ai-bubble-bg, var(--panel)) 86%, var(--bg) 14%));
+      color: var(--fg);
+      text-align: left;
+      box-sizing: border-box;
+      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg) 7%, transparent);
+    }
+    .generated-image-loading-card::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      border-radius: inherit;
+      background: linear-gradient(115deg,
+        transparent 0%,
+        transparent 38%,
+        color-mix(in srgb, var(--accent, var(--red)) 10%, transparent) 50%,
+        transparent 62%,
+        transparent 100%);
+      transform: translateX(-45%);
+      animation: generated-image-sheen 3.6s ease-in-out infinite;
+    }
+    .generated-image-loading-title {
+      position: relative;
+      z-index: 1;
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1.2;
+      color: var(--fg);
+    }
+    .generated-image-loading-title::before {
+      content: '';
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent, var(--red));
+      box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, var(--red)) 16%, transparent);
+      animation: generated-image-pulse 1.4s ease-in-out infinite;
+    }
+    .generated-image-loading-grid {
+      position: absolute;
+      inset: 76px 26px 74px;
+      opacity: 0.86;
+      background-image: radial-gradient(circle, color-mix(in srgb, var(--fg) 22%, transparent) 1.15px, transparent 1.6px);
+      background-size: 18px 18px;
+      mask-image:
+        radial-gradient(ellipse at 20% 22%, #000 0 26%, transparent 54%),
+        radial-gradient(ellipse at 78% 74%, #000 0 24%, transparent 54%);
+      -webkit-mask-image:
+        radial-gradient(ellipse at 20% 22%, #000 0 26%, transparent 54%),
+        radial-gradient(ellipse at 78% 74%, #000 0 24%, transparent 54%);
+      animation: generated-image-dots 2.2s ease-in-out infinite alternate;
+    }
+    .generated-image-loading-prompt {
+      position: relative;
+      z-index: 1;
+      margin-top: auto;
+      color: color-mix(in srgb, var(--fg) 52%, transparent);
+      font-size: 13px;
+      font-style: italic;
+      line-height: 1.4;
+      text-align: center;
+      max-width: 88%;
+      align-self: center;
+    }
+    @keyframes generated-image-dots {
+      from { opacity: 0.42; transform: translate3d(-4px, -2px, 0); }
+      to { opacity: 0.82; transform: translate3d(4px, 2px, 0); }
+    }
+    @keyframes generated-image-sheen {
+      0%, 58% { transform: translateX(-48%); opacity: 0; }
+      72% { opacity: 1; }
+      100% { transform: translateX(48%); opacity: 0; }
+    }
+    @keyframes generated-image-pulse {
+      0%, 100% { transform: scale(0.85); opacity: 0.72; }
+      50% { transform: scale(1); opacity: 1; }
+    }
+    .generated-image-loading-card.cancelled::after {
+      animation: none !important;
+      display: none !important;
+    }
+    .generated-image-loading-card.cancelled .generated-image-loading-title {
+      color: color-mix(in srgb, var(--fg) 60%, transparent) !important;
+    }
+    .generated-image-loading-card.cancelled .generated-image-loading-title::before {
+      background: color-mix(in srgb, var(--fg) 35%, transparent) !important;
+      box-shadow: none !important;
+      animation: none !important;
+    }
+    .generated-image-loading-card.cancelled .generated-image-loading-grid {
+      animation: none !important;
+      opacity: 0.15 !important;
+    }
+    @media (max-width: 768px) {
+      .msg-ai.generated-image-loading-wrap {
+        width: 100% !important;
+        max-width: 100% !important;
+      }
+      .generated-image-loading-card {
+        min-height: min(420px, 58vh);
+        padding: 22px;
+        border-radius: 16px 16px 16px 0;
+      }
+    }
     .memory-source-check {
       display: flex;
       align-items: center;
@@ -7528,10 +7657,12 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
         background-clip: padding-box;
         animation: none;
       }
-      .memory-modal-content .close-btn,
-      .memory-modal-content .modal-close,
-      .settings-modal-content .close-btn,
-      .settings-modal-content .modal-close {
+      /* Same has-touch gate as the generic modal rule below: only hide the ×
+         when the swipe-down gesture is actually armed. */
+      html.has-touch .memory-modal-content .close-btn,
+      html.has-touch .memory-modal-content .modal-close,
+      html.has-touch .settings-modal-content .close-btn,
+      html.has-touch .settings-modal-content .modal-close {
         display: none !important;
       }
       .memory-modal-content,
@@ -7643,18 +7774,22 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
         border-bottom: 6px solid transparent;
         background-clip: padding-box;
       }
-      /* Hide close X on mobile — swipe down to dismiss */
-      .modal-content .close-btn,
-      .modal-content .modal-close,
-      #theme-popup .close-btn {
+      /* Hide close X on mobile — swipe down to dismiss.
+         Gated on html.has-touch (set by the swipe handler itself) so the ×
+         only disappears when the swipe gesture actually exists. Keying this
+         on viewport width alone trapped narrow NON-touch windows: no ×, no
+         swipe, closable only by Escape. */
+      html.has-touch .modal-content .close-btn,
+      html.has-touch .modal-content .modal-close,
+      html.has-touch #theme-popup .close-btn {
         display: none !important;
       }
       /* Hide the auto-injected minimize (_) button on mobile — the dock
          chip already represents the minimized state, and the swipe-down
-         gesture is the canonical minimize action. */
-      .modal-minimize-btn,
-      .minimize-btn,
-      [data-minimize] {
+         gesture is the canonical minimize action. Same has-touch gate. */
+      html.has-touch .modal-minimize-btn,
+      html.has-touch .minimize-btn,
+      html.has-touch [data-minimize] {
         display: none !important;
       }
       /* Lock modals to vertical touch only, prevent horizontal dragging */
@@ -8666,8 +8801,17 @@ button.hamburger {
 
 /* Lists */
 .msg ul, .msg ol {
-  margin: 0.3em 0 0.3em 1.2em;
-  padding: 0;
+  margin: 0.3em 0;
+  /* Indent via padding, NOT margin: the list marker (list-style-position:
+     outside) is drawn INSIDE the padding-left box. With the old margin-left
+     + padding:0, a 2-digit marker like "10." rendered left of the content
+     and overflowed the bubble's `overflow:hidden` left edge — clipping the
+     tens digit, so 10/11/12 showed as 0/1/2. */
+  padding-left: 1.5em;
+}
+/* Ordered lists need more room so 2–3 digit numbers ("10.", "14.") fit. */
+.msg ol {
+  padding-left: 2.2em;
 }
 .msg li {
   margin: 0.15em 0;
@@ -11047,6 +11191,11 @@ details a:hover {
 .memory-modal-content {
   width: min(560px, 90vw);
   max-height: 78vh;
+  /* Fixed height on purpose: the window is flex-centered, so a content-driven
+     height made the whole window (header + tab row) jump vertically on every
+     tab switch — the ✖/─ header buttons landed under the cursor and the next
+     tab click closed the window. Panels scroll internally instead. */
+  height: min(78vh, 640px);
   font-size: 12px;
   overflow: hidden;   /* clip both axes; the inner .memory-modal-body owns scrolling.
                          (overflow-x alone promotes overflow-y to `auto` → a stray vertical scrollbar) */
@@ -11137,7 +11286,8 @@ details a:hover {
   display: flex;
   flex-direction: column;
   max-height: 78vh;
-  height: min(78vh, max-content);
+  /* No max-content here — must match the fixed .memory-modal-content height,
+     or the window re-centers (jumps) when switching to/from the browse tab. */
   overflow: hidden;
 }
 #memory-modal .memory-modal-content:has(
@@ -12940,6 +13090,9 @@ textarea.memory-add-input {
 .doc-tab-close:hover { opacity: 1; }
 /* Mobile-only footer (Close + Copy); hidden on desktop and in email mode. */
 .doc-mobile-footer { display: none; }
+/* Mobile-only back-to-chat. Desktop keeps the hamburger and icon rail, so it
+   only needs to exist on phones (enabled in the max-width:768px block). */
+.doc-tab-back { display: none; }
 .doc-tab-new {
   background: none;
   border: none;
@@ -13745,6 +13898,11 @@ textarea.memory-add-input {
   background: var(--bg);
   container-type: inline-size;
   container-name: doceditor;
+  /* Card chrome — inset ring instead of a border so no layout shift for the
+     absolutely-positioned gutter/highlight overlay children. */
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 9%, transparent),
+              0 2px 10px rgba(0, 0, 0, 0.12);
 }
 
 /* When the editor itself is narrow, soft-wrap makes one logical line
@@ -13770,8 +13928,9 @@ textarea.memory-add-input {
   line-height: 1.45;
   text-align: right;
   color: var(--fg);
-  opacity: 0.18;
-  background: var(--bg);
+  opacity: 0.35;
+  background: color-mix(in srgb, var(--fg) 3%, var(--bg));
+  border-right: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
   overflow: hidden;
   white-space: pre;
   tab-size: 4;
@@ -14226,67 +14385,91 @@ mark.doc-find-mark.current {
 }
 /* ---- Diff mode ---- */
 .diff-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 6;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 12px;
-  background: color-mix(in srgb, var(--fg) 4%, var(--bg));
+  padding: 6px 12px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   border-bottom: 1px solid var(--border);
   font-size: 11px;
   flex-shrink: 0;
 }
 .diff-toolbar-status {
-  opacity: 0.5;
+  opacity: 0.75;
   font-size: 10px;
   margin-right: auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  letter-spacing: 0.02em;
 }
 .diff-toolbar-btn {
   background: none;
   border: 1px solid var(--border);
   color: var(--fg);
   font-size: 10px;
-  padding: 3px 10px;
-  border-radius: 4px;
+  font-weight: 600;
+  padding: 4px 14px;
+  border-radius: 6px;
   cursor: pointer;
   font-family: inherit;
-  transition: border-color 0.15s, background 0.15s;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s, transform 0.1s;
 }
 .diff-toolbar-btn:hover {
   border-color: var(--accent, var(--red));
   background: color-mix(in srgb, var(--accent, var(--red)) 8%, transparent);
 }
-.diff-toolbar-btn-accept { color: #58a6ff; border-color: color-mix(in srgb, #58a6ff 36%, transparent); }
-.diff-toolbar-btn-accept:hover { border-color: #58a6ff; background: color-mix(in srgb, #58a6ff 12%, transparent); }
-.diff-toolbar-btn-reject { color: #f2cc60; border-color: color-mix(in srgb, #f2cc60 36%, transparent); }
-.diff-toolbar-btn-reject:hover { border-color: #f2cc60; background: color-mix(in srgb, #f2cc60 12%, transparent); }
+.diff-toolbar-btn:active { transform: translateY(1px); }
+/* IDE-conventional colors: green = added, red = removed. */
+.diff-toolbar-btn-accept { color: #3fb950; border-color: color-mix(in srgb, #3fb950 40%, transparent); }
+.diff-toolbar-btn-accept:hover {
+  border-color: #3fb950;
+  background: color-mix(in srgb, #3fb950 14%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, #3fb950 35%, transparent);
+}
+.diff-toolbar-btn-reject { color: #f85149; border-color: color-mix(in srgb, #f85149 40%, transparent); }
+.diff-toolbar-btn-reject:hover {
+  border-color: #f85149;
+  background: color-mix(in srgb, #f85149 14%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, #f85149 35%, transparent);
+}
 .diff-line-del {
   display: block;
-  background: color-mix(in srgb, #f2cc60 24%, transparent);
-  border-left: 3px solid #f2cc60;
-  color: #f2cc60;
+  background: color-mix(in srgb, #f85149 16%, transparent);
+  border-left: 3px solid #f85149;
+  color: #f85149;
   padding-left: 4px;
   margin-left: -7px;
   text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, #f85149 55%, transparent);
 }
 .diff-line-add {
   display: block;
-  background: color-mix(in srgb, #58a6ff 24%, transparent);
-  border-left: 3px solid #58a6ff;
-  color: #58a6ff;
+  background: color-mix(in srgb, #3fb950 16%, transparent);
+  border-left: 3px solid #3fb950;
+  color: #3fb950;
   padding-left: 4px;
   margin-left: -7px;
 }
+.diff-line-del:hover { background: color-mix(in srgb, #f85149 24%, transparent); }
+.diff-line-add:hover { background: color-mix(in srgb, #3fb950 24%, transparent); }
 /* Inline diff summary (version history cards) */
 .diff-del {
-  color: #f2cc60;
-  background: color-mix(in srgb, #f2cc60 16%, transparent);
+  color: #f85149;
+  background: color-mix(in srgb, #f85149 14%, transparent);
   text-decoration: line-through;
   border-radius: 2px;
   padding: 0 2px;
 }
 .diff-add {
-  color: #58a6ff;
-  background: color-mix(in srgb, #58a6ff 16%, transparent);
+  color: #3fb950;
+  background: color-mix(in srgb, #3fb950 14%, transparent);
   font-weight: 600;
   border-radius: 2px;
   padding: 0 2px;
@@ -14326,15 +14509,15 @@ mark.doc-find-mark.current {
   color: inherit;
 }
 .doc-editor-wrap.diff-mode .diff-line-del {
-  color: #f2cc60 !important;
+  color: #f85149 !important;
 }
 .doc-editor-wrap.diff-mode .diff-line-add {
-  color: #58a6ff !important;
+  color: #3fb950 !important;
 }
 .diff-chunk-btn {
-  width: 20px;
-  height: 20px;
-  border-radius: 4px;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
   border: 1px solid var(--border);
   background: var(--bg);
   cursor: pointer;
@@ -14343,14 +14526,137 @@ mark.doc-find-mark.current {
   justify-content: center;
   font-size: 12px;
   line-height: 1;
-  transition: border-color 0.15s, background 0.15s;
-  opacity: 0.6;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s, opacity 0.15s;
+  opacity: 0.75;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
 }
 .diff-chunk-btn:hover { opacity: 1; }
-.diff-chunk-btn-accept { color: #58a6ff; }
-.diff-chunk-btn-accept:hover { border-color: #58a6ff; background: color-mix(in srgb, #58a6ff 15%, transparent); }
-.diff-chunk-btn-reject { color: #f2cc60; }
-.diff-chunk-btn-reject:hover { border-color: #f2cc60; background: color-mix(in srgb, #f2cc60 15%, transparent); }
+.diff-chunk-btn-accept { color: #3fb950; }
+.diff-chunk-btn-accept:hover {
+  border-color: #3fb950;
+  background: color-mix(in srgb, #3fb950 16%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, #3fb950 40%, transparent);
+}
+.diff-chunk-btn-reject { color: #f85149; }
+.diff-chunk-btn-reject:hover {
+  border-color: #f85149;
+  background: color-mix(in srgb, #f85149 16%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, #f85149 40%, transparent);
+}
+
+/* "Open document" chip — the [Open …](#document-<id>) anchor the agent drops
+   into chat after a doc write. Rendered as a button so it reads as the way to
+   open the editor panel, not as a prose link. */
+#chat-history a[href^="#document-"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  margin: 2px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s, transform 0.1s;
+}
+#chat-history a[href^="#document-"]::before {
+  content: "";
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  background: currentColor;
+  -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>') no-repeat center / contain;
+  mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>') no-repeat center / contain;
+}
+#chat-history a[href^="#document-"]:hover {
+  border-color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent, var(--red)) 25%, transparent);
+}
+#chat-history a[href^="#document-"]:active { transform: translateY(1px); }
+/* Open-document button rendered inside a tool node (live + on reload). Sits on
+   its own row below the node header so it reads as an action, not inline text. */
+#chat-history .agent-thread-node .agent-doc-open-btn {
+  display: inline-flex;
+  margin: 8px 0 2px 24px;
+}
+
+/* Live-writing caret shown at the end of streamed doc content. */
+.doc-stream-cursor {
+  display: inline-block;
+  color: var(--accent, var(--red));
+  font-weight: 700;
+  animation: doc-cursor-blink 0.9s steps(1) infinite;
+  pointer-events: none;
+}
+@keyframes doc-cursor-blink {
+  0%, 60% { opacity: 1; }
+  61%, 100% { opacity: 0; }
+}
+
+/* Copy-button confirmation flash (green tick moment). */
+#doc-copy-btn.doc-copy-flash {
+  color: #3fb950;
+  opacity: 1 !important;
+  box-shadow: 0 0 8px color-mix(in srgb, #3fb950 40%, transparent);
+}
+
+/* ── Ask-before-generate: image model-picker card ──
+   Extends .ask-user-card (same container tokens); these rules style the
+   picker-specific children. */
+.image-choice-prompt {
+  margin: -4px 0 10px;
+  font-size: 12px;
+  font-style: italic;
+  line-height: 1.4;
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.image-choice-select {
+  width: 100%;
+  min-height: 36px;
+  margin-bottom: 10px;
+}
+.image-choice-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.image-choice-btn {
+  padding: 7px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease, box-shadow 0.15s, transform 0.1s;
+}
+.image-choice-btn:disabled { opacity: 0.55; cursor: default; }
+.image-choice-btn:active:not(:disabled) { transform: translateY(1px); }
+.image-choice-go {
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 45%, transparent);
+  background: color-mix(in srgb, var(--accent, var(--red)) 14%, var(--panel));
+  color: var(--accent, var(--red));
+}
+.image-choice-go:hover:not(:disabled) {
+  border-color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--accent, var(--red)) 22%, var(--panel));
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent, var(--red)) 25%, transparent);
+}
+.image-choice-cancel:hover:not(:disabled) {
+  border-color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--fg) 6%, var(--panel));
+}
 
 .doc-suggestion-accept-all {
   flex: 1;
@@ -14760,8 +15066,27 @@ body:has(.compare-active) .hamburger-btn { display: none !important; }
     height: 14px !important;
   }
   /* Footer is identical to desktop now, so the separate mobile Close/Copy
-     footer is dropped and the per-tab × stays (matching desktop). */
+     footer is dropped and the per-tab × stays (matching desktop). The per-tab
+     × is NOT a way out though — it unlinks the doc, and the ghost tab shown
+     for a fresh panel has none at all — so the tab bar carries an explicit
+     back-to-chat button instead. */
   .doc-mobile-footer { display: none !important; }
+  .doc-tab-back {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 40px;
+    height: 40px;
+    margin-right: 2px;
+    padding: 0;
+    background: none;
+    border: none;
+    color: var(--text);
+    opacity: 0.75;
+    cursor: pointer;
+  }
+  .doc-tab-back:active { opacity: 1; }
   .doc-tab-new {
     font-size: 13px !important;
     padding: 0 14px !important;
@@ -15337,6 +15662,45 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
 }
 .adm-model-row:active .adm-check-dot {
   border-color: color-mix(in srgb, var(--accent, var(--red)) 78%, var(--fg));
+}
+/* Per-model image-generation mark. Ghost icon at the row's right edge —
+   faint until hovered, accent-tinted chip when active (mirrors the endpoint
+   "Image" badge colors). */
+.adm-model-img-btn {
+  flex: 0 0 auto !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-left: auto;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: none;
+  color: var(--fg);
+  opacity: 0.18;
+  cursor: pointer;
+  transition: opacity 0.15s, border-color 0.15s, background 0.15s, color 0.15s;
+}
+.adm-model-row:hover .adm-model-img-btn { opacity: 0.55; }
+/* Touch devices have no hover: hover-revealed controls must rest visible,
+   or they're functionally invisible (still hit-testable, but users can't
+   see them). Message-level .copy-btn is deliberately NOT restored here —
+   the message footer already provides copy on every bubble. */
+@media (hover: none) {
+  .adm-model-img-btn { opacity: 0.5; }
+  .folder-delete-btn { opacity: 0.45; }
+}
+.adm-model-img-btn:hover {
+  opacity: 1 !important;
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 45%, transparent);
+}
+.adm-model-img-btn.active {
+  opacity: 1 !important;
+  color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--accent, var(--red)) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 40%, transparent);
 }
 .adm-cb-hidden:checked + .adm-check-dot {
   background: var(--accent, var(--red));
@@ -41093,4 +41457,140 @@ body.theme-frosted .modal {
 @media (max-width: 768px) {
   .compare-grid[data-cols] { grid-template-columns: 1fr !important; overflow-y: auto; }
   .compare-pane { min-height: 60dvh; }
+}
+
+/* ── Journey tab (learning timeline, ported from Hermes) ─────────────────── */
+.journey-summary {
+  font-size: 0.8em;
+  opacity: 0.85;
+  margin: 4px 0 8px;
+}
+.journey-grid {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: pre;
+  overflow-x: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border, rgba(128,128,128,0.25));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg, #0a0a0e) 92%, var(--accent, #888) 8%);
+  min-height: 120px;
+}
+.journey-row { min-height: 1.35em; }
+.journey-label-row { margin-top: 2px; }
+.j-bg { color: transparent; }
+.j-skill { color: var(--accent, var(--red, #e05a5a)); }
+.j-memory { color: var(--fg, #e8e8e8); }
+.j-label { color: color-mix(in srgb, var(--fg, #e8e8e8) 65%, transparent); }
+.j-dim { color: color-mix(in srgb, var(--fg, #e8e8e8) 35%, transparent); }
+.journey-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 0.75em;
+  margin: 8px 0;
+}
+.journey-chip { white-space: nowrap; }
+.journey-buckets { flex: 1; min-height: 0; overflow-y: auto; }
+.journey-bucket-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+  padding: 5px 4px;
+  font-size: 0.85em;
+  border-bottom: 1px solid var(--border, rgba(128,128,128,0.15));
+}
+.journey-bucket-head:hover { background: rgba(128,128,128,0.08); }
+.journey-bucket-caret { width: 12px; opacity: 0.6; }
+.journey-bucket-date { font-weight: 600; }
+.journey-bucket-nodes { padding: 4px 4px 8px 24px; }
+.journey-node { font-size: 0.8em; padding: 3px 0; }
+.journey-node-label { margin-left: 4px; }
+.journey-node-meta { margin-left: 8px; font-size: 0.9em; }
+.journey-node-body {
+  margin: 3px 0 3px 18px;
+  padding: 5px 8px;
+  border-left: 2px solid var(--border, rgba(128,128,128,0.3));
+  opacity: 0.75;
+  white-space: pre-wrap;
+}
+
+/* ── Dangerous-command approval card (ported from Hermes approval gate) ── */
+.approval-card {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--red, #e05a5a);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--red, #e05a5a) 8%, transparent);
+  font-size: 0.85em;
+}
+.approval-card.resolved { opacity: 0.65; border-color: var(--border, rgba(128,128,128,0.3)); }
+.approval-card.resolved .approval-actions { display: none; }
+.approval-title { font-weight: 600; margin-bottom: 4px; }
+.approval-desc { opacity: 0.85; margin-bottom: 6px; }
+.approval-cmd {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  background: rgba(0,0,0,0.18);
+  border-radius: 4px;
+  max-height: 120px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 11px;
+}
+.approval-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.approval-btn {
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border, rgba(128,128,128,0.35));
+  background: var(--panel, rgba(128,128,128,0.1));
+  color: var(--fg, inherit);
+  cursor: pointer;
+  font-size: 0.95em;
+}
+.approval-btn:hover { border-color: var(--accent, var(--red)); }
+.approval-btn.danger { border-color: var(--red, #e05a5a); color: var(--red, #e05a5a); }
+.approval-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* ── Mobile readability fixes (audited at 375px) ───────────────────────── */
+@media (max-width: 768px) {
+  /* The model-route label ("Qwen3.6-27B → Qwen3.6-MTP-27B-IQ4_NL") is
+     white-space:nowrap, so this flex row grew to 395px inside a 343px bubble
+     and pushed the timestamp completely off-screen (right edge 417 > 375).
+     Wrapping keeps BOTH the route and the time readable, costing an extra
+     line only when the name is genuinely too long to fit. */
+  .msg .role {
+    flex-wrap: wrap;
+    white-space: normal;
+    min-width: 0;
+    row-gap: 2px;
+  }
+  .msg .role .role-timestamp { flex-shrink: 0; }
+
+  /* Thinking blocks inherit 0.85em on top of an already-reduced mobile base,
+     landing at ~10.4px — below the ~12px comfortable-reading floor on a
+     phone. Pin a readable size instead of compounding the scale. */
+  .thinking-content-inner { font-size: 12px; }
+
+  /* The picker is anchored right:0 to a wrap that sits ~22px from the right
+     edge, so its 360px max-width put the LEFT edge at -7px on a 375px screen —
+     the first row's name ran off-screen and the provider logos were clipped,
+     with dead space left over on the right. Clamping to the viewport keeps the
+     whole menu on screen at any phone width. */
+  .model-picker-menu { max-width: calc(100vw - 32px); }
+
+  /* This file already asks for 44×44 touch targets via
+     `.section-header-btn { min-width/min-height: 44px }` above, but the two
+     buttons that carry BOTH classes also match .list-item-plus-btn, which
+     locks `height: 14px !important; min-height: 0 !important` — so the touch
+     rule was silently defeated and they rendered 14px tall. "manage" is the
+     only route to per-chat actions on a phone (the per-row .session-menu-btn
+     is display:none under 768px), so it has to be tappable. Their header row
+     is already 46px with align-items:center, so this costs no layout change. */
+  .list-item-plus-btn {
+    height: 32px !important;
+    min-height: 32px !important;
+  }
 }

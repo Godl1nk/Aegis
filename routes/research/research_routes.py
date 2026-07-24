@@ -280,10 +280,10 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         user = _require_user(request)
         _validate_session_id(session_id)
         if not _owns_in_memory(session_id, user):
-            return {"status": "not_found", "message": "No research found for this session"}
+            raise HTTPException(404, "No research found for this session")
         status = research_handler.get_status(session_id)
         if status is None:
-            return {"status": "not_found", "message": "No research found for this session"}
+            raise HTTPException(404, "No research found for this session")
         return status
 
     @router.post("/api/research/cancel/{session_id}")

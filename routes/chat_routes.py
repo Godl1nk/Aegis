@@ -46,6 +46,49 @@ from src.tool_policy import build_effective_tool_policy
 
 logger = logging.getLogger(__name__)
 
+# Upstream proxies (Cloudflare tunnels return 524 after ~100s) drop a streaming
+# connection that goes silent too long. Inner heartbeats cover model prefill and
+# tool execution, but a run can still block WITHOUT yielding — queued behind
+# another local generation (the model-slot lock), heavy prompt/context prep, or
+# a slow tool that doesn't report progress. This wrapper guarantees a byte on the
+# wire at least every SSE_KEEPALIVE_SECONDS regardless of what the inner
+# generator is doing. The `:`-prefixed line is an SSE comment: proxies pass it
+# through and the client parser ignores it.
+# 15s: comfortably under Cloudflare's ~100s origin timeout AND under the
+# client's 20s "reader looks stale" tab-recovery threshold, so a live run keeps
+# the reader marked active instead of tripping a false interruption.
+SSE_KEEPALIVE_SECONDS = float(os.getenv("SSE_KEEPALIVE_SECONDS", "15") or "15")
+
+
+async def _sse_keepalive(agen, interval: float = SSE_KEEPALIVE_SECONDS):
+    """Forward an SSE async-generator, injecting a keepalive comment whenever it
+    stalls longer than `interval` seconds. Cancels + closes the inner generator
+    on teardown (client disconnect / cancellation)."""
+    import contextlib
+    ait = agen.__aiter__()
+    pending = asyncio.ensure_future(ait.__anext__())
+    try:
+        while True:
+            done, _ = await asyncio.wait({pending}, timeout=interval)
+            if not done:
+                yield ": keepalive\n\n"
+                continue
+            try:
+                chunk = pending.result()
+            except StopAsyncIteration:
+                return
+            yield chunk
+            pending = asyncio.ensure_future(ait.__anext__())
+    finally:
+        if not pending.done():
+            pending.cancel()
+            with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration, Exception):
+                await pending
+        aclose = getattr(agen, "aclose", None)
+        if aclose is not None:
+            with contextlib.suppress(Exception):
+                await aclose()
+
 # Track active streams for partial-save safety net
 _active_streams: Dict[str, dict] = {}
 _IMAGE_MODEL_PREFIXES = ("gpt-image", "dall-e", "chatgpt-image")
@@ -812,6 +855,21 @@ def setup_chat_routes(
         )
         allow_tool_preprocessing = not pre_context_tool_policy.block_all_tool_calls
 
+        # Register the stream BEFORE preprocessing. Mobile browsers kill the
+        # in-flight fetch when the app is backgrounded, and the client probes
+        # /api/chat/stream_status to decide reconnect-vs-reprompt. Preprocessing
+        # (vision describe of photos — can run minutes) happens before the
+        # response generator registers itself, so the probe said "idle" during
+        # that window and the client re-prompted — duplicating the turn (this
+        # route keeps running after the disconnect and the detached run
+        # completes regardless). setdefault: never clobber a live record.
+        # _safe_stream's finally pops it on every generator path; stream_status
+        # self-heals a stale 'preparing' entry if the route dies in between.
+        _active_streams.setdefault(session, {
+            "status": "streaming", "phase": "preparing", "ts": time.time(),
+            "partial": "", "query": message,
+        })
+
         # Build shared context (stream path uses enhanced_message for context preface)
         ctx = await build_chat_context(
             sess, request, chat_handler, chat_processor,
@@ -917,6 +975,38 @@ def setup_chat_routes(
                             logger.info(f"[doc-inject] found by in-memory active id: title={active_doc.title!r} (session_id={cand.session_id!r})")
                 except Exception as _e:
                     logger.debug(f"[doc-inject] in-memory fallback failed: {_e}")
+            # This conversation's own tool history knows which document it has
+            # been working on — tool_events carry doc_id (the same persisted
+            # data the UI's "Open document" button uses). If every lookup above
+            # missed (doc panel closed after a reload, or the doc was rebound
+            # to a different session by the cross-session accept above), the
+            # working doc silently vanished mid-conversation: edit_document got
+            # dropped from the toolset and the model started treating its own
+            # artifact as a file on disk. Recover the doc from history so a
+            # session that was editing keeps editing.
+            if not active_doc:
+                try:
+                    _sess_obj = session_manager.get_session(session)
+                    _hist_doc_id = None
+                    for _m in reversed(getattr(_sess_obj, "history", []) or []):
+                        _md = getattr(_m, "metadata", None) or {}
+                        for _ev in reversed(_md.get("tool_events") or []):
+                            if isinstance(_ev, dict) and _ev.get("doc_id"):
+                                _hist_doc_id = _ev["doc_id"]
+                                break
+                        if _hist_doc_id:
+                            break
+                    if _hist_doc_id:
+                        _hist_q = _doc_db.query(DBDocument).filter(
+                            DBDocument.id == _hist_doc_id,
+                            DBDocument.is_active == True,  # noqa: E712 — deleted docs stay gone
+                        )
+                        cand = _owner_session_filter(_hist_q, ctx.user).first()
+                        if cand:
+                            active_doc = cand
+                            logger.info(f"[doc-inject] recovered from session tool history: title={cand.title!r}")
+                except Exception as _e:
+                    logger.debug(f"[doc-inject] history fallback failed: {_e}")
             if not active_doc:
                 logger.info(f"[doc-inject] no active doc for session {session}")
             if active_doc:
@@ -934,6 +1024,7 @@ def setup_chat_routes(
         # by default without having to send allow_bash in every request.
         if allow_bash is not None and str(allow_bash).lower() != "true":
             disabled_tools.add("bash")
+        _explicit_web_intent = bool(_tool_intent and _tool_intent.category == "web")
         if (
             allow_web_search is not None
             and str(allow_web_search).lower() != "true"
@@ -1487,6 +1578,7 @@ def setup_chat_routes(
                                     "rounds_exhausted",
                                     "ask_user",
                                     "plan_update",
+                                    "image_model_choice",
                                 ):
                                     if data.get("type") == "agent_step":
                                         _agent_rounds = max(_agent_rounds, data.get("round", 1))
@@ -1633,10 +1725,10 @@ def setup_chat_routes(
         # the run keeps going and saves the assistant message on completion
         # regardless. Reconnect via /api/chat/resume.
         if compare_mode:
-            return StreamingResponse(_safe_stream(), media_type="text/event-stream")
+            return StreamingResponse(_sse_keepalive(_safe_stream()), media_type="text/event-stream")
 
         agent_runs.start(session, _safe_stream())
-        return StreamingResponse(agent_runs.subscribe(session), media_type="text/event-stream")
+        return StreamingResponse(_sse_keepalive(agent_runs.subscribe(session)), media_type="text/event-stream")
 
     # ------------------------------------------------------------------ #
     # GET /api/chat/resume — reconnect to a detached run that's still going
@@ -1647,7 +1739,7 @@ def setup_chat_routes(
         _verify_session_owner(request, session_id)
         if not agent_runs.is_active(session_id):
             raise HTTPException(404, "No active run for this session")
-        return StreamingResponse(agent_runs.subscribe(session_id), media_type="text/event-stream")
+        return StreamingResponse(_sse_keepalive(agent_runs.subscribe(session_id)), media_type="text/event-stream")
 
     # ------------------------------------------------------------------ #
     # POST /api/chat/stop — cancel a detached run (Stop button). Closing the SSE
@@ -1658,6 +1750,128 @@ def setup_chat_routes(
         _verify_session_owner(request, session_id)
         stopped = agent_runs.stop(session_id)
         return {"stopped": stopped}
+
+    # ------------------------------------------------------------------ #
+    # Ask-before-generate: confirm / cancel a pending image request. The
+    # agent loop stashed the tool call and showed a model-picker card; the
+    # pick runs the generation here directly (no LLM round-trip) and the
+    # frontend renders the returned image.
+    # ------------------------------------------------------------------ #
+    @router.post("/api/chat/image-choice/{session_id}")
+    async def chat_image_choice(request: Request, session_id: str) -> Dict[str, Any]:
+        _verify_session_owner(request, session_id)
+        user = effective_user(request)
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            pass
+        action = str((body or {}).get("action") or "confirm").lower()
+        from src.ai_interaction import (
+            pop_pending_image_request, apply_image_model_choice, do_generate_image,
+        )
+        pending = pop_pending_image_request(session_id, user)
+        if action == "cancel":
+            try:
+                sess = session_manager.get_session(session_id)
+                if sess:
+                    for _msg in reversed(getattr(sess, "history", []) or []):
+                        _md = getattr(_msg, "metadata", None) or {}
+                        _tevs = _md.get("tool_events")
+                        if not isinstance(_tevs, list):
+                            continue
+                        _hit = next((t for t in _tevs if isinstance(t, dict) and t.get("image_choice")), None)
+                        if _hit is not None:
+                            _hit.pop("image_choice", None)
+                            _hit["output"] = "Cancelled."
+                            session_manager.save_sessions()
+                            break
+            except Exception as _persist_e:
+                logger.warning("Failed to persist image-choice cancellation: %s", _persist_e)
+            return {"ok": True, "cancelled": True}
+        model_spec = str((body or {}).get("model") or "auto").strip() or "auto"
+        # The stash is in-memory and popped on first use — after a failed
+        # attempt or a backend restart it's gone while the persisted picker
+        # card is still on screen, which made every retry 404. The card echoes
+        # its own prompt/tool back in the confirm body, so rebuild from that.
+        raw_content = (pending or {}).get("content")
+        tool = (pending or {}).get("tool") or ""
+        if not raw_content:
+            raw_content = str((body or {}).get("prompt") or "").strip()
+            tool = tool or str((body or {}).get("tool") or "").strip()
+            if not raw_content:
+                raise HTTPException(404, "No pending image request for this session")
+        if tool not in ("generate_image", "ai_edit_image"):
+            tool = "generate_image"
+        content = apply_image_model_choice(raw_content, model_spec)
+
+        # Image generation can take ~1 minute. A plain blocking POST goes idle
+        # for that whole time and gets killed by the Cloudflare tunnel / proxy
+        # (the same reason chat responses stream) — so the browser never sees
+        # the result and the picker sits on "Generating…" forever. Stream the
+        # response through _sse_keepalive so a keepalive comment is emitted every
+        # 15s while do_generate_image is running, then send the image as the
+        # final SSE event. This mirrors how every other long op in the app works.
+        async def _image_choice_stream():
+            if tool == "ai_edit_image":
+                from src.tool_implementations import do_ai_edit_image
+                result = await do_ai_edit_image(content, session_id=session_id, owner=user)
+            else:
+                result = await do_generate_image(content, session_id=session_id, owner=user)
+            if result.get("error"):
+                yield "data: " + json.dumps({"ok": False, "error": str(result["error"])[:500]}) + "\n\n"
+                return
+
+            # Persist the image into the paused tool event so it survives a
+            # reload and the picker does NOT re-appear (image_url makes
+            # chatRenderer draw the bubble; dropping image_choice stops the
+            # picker re-rendering).
+            try:
+                sess = session_manager.get_session(session_id)
+                if sess:
+                    for _msg in reversed(getattr(sess, "history", []) or []):
+                        _md = getattr(_msg, "metadata", None) or {}
+                        _tevs = _md.get("tool_events")
+                        if not isinstance(_tevs, list):
+                            continue
+                        _hit = next((t for t in _tevs if isinstance(t, dict) and t.get("image_choice")), None)
+                        if _hit is not None:
+                            _hit.pop("image_choice", None)
+                            _hit["image_url"] = result.get("image_url", "")
+                            _hit["image_prompt"] = result.get("image_prompt", "")
+                            _hit["image_model"] = result.get("image_model", model_spec)
+                            _hit["image_size"] = result.get("image_size", "")
+                            _hit["image_quality"] = result.get("image_quality", "")
+                            _hit["image_id"] = result.get("image_id", "")
+                            _img_desc = (result.get("image_prompt") or "").strip()
+                            _hit["output"] = (
+                                "The image was generated and is already displayed to the user. "
+                                "Do NOT write an image URL, /api/generated-image link, or markdown "
+                                "image yourself — you cannot know a valid image URL. To make "
+                                "ANOTHER image (e.g. \"another one\"), call the generate_image "
+                                "tool again."
+                                + (f" (Just generated: {_img_desc})" if _img_desc else "")
+                            )
+                            session_manager.save_sessions()
+                            break
+            except Exception as _persist_e:
+                logger.warning("Failed to persist image-choice result: %s", _persist_e)
+
+            yield "data: " + json.dumps({
+                "ok": True,
+                "image_url": result.get("image_url", ""),
+                "image_prompt": result.get("image_prompt", ""),
+                "image_model": result.get("image_model", model_spec),
+                "image_size": result.get("image_size", ""),
+                "image_quality": result.get("image_quality", ""),
+                "image_id": result.get("image_id", ""),
+            }) + "\n\n"
+
+        return StreamingResponse(
+            _sse_keepalive(_image_choice_stream()),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     # ------------------------------------------------------------------ #
     # GET /api/chat/stream_status — check if a stream is active for a session
@@ -1671,6 +1885,12 @@ def setup_chat_routes(
         # check and the indexed read if a sibling stream's finally pops the
         # entry in between (same pattern _stream_set already uses).
         rec = _active_streams.get(session_id)
+        # Self-heal: a 'preparing' entry is registered before preprocessing and
+        # normally replaced/popped by the generator. If the route died in
+        # between, don't report a phantom stream forever.
+        if rec is not None and rec.get("phase") == "preparing" and time.time() - rec.get("ts", 0) > 900:
+            _active_streams.pop(session_id, None)
+            rec = None
         if rec is None:
             if agent_runs.is_active(session_id):
                 return {"status": "streaming", "detached": True}

@@ -203,24 +203,26 @@
     @font-face { font-family: 'Inter'; font-weight: 600; font-style: normal; font-display: swap; src: url('/static/fonts/Inter-SemiBold.woff2') format('woff2'); }
   </style>
   <!-- KaTeX CSS is loaded with media="print" so it doesn't block render,
-       then flipped to "all" via JS after load. Mermaid init runs once the
-       library finishes loading. Both hooks are wired via addEventListener
-       below (inline onload= attrs are blocked by CSP script-src-attr). -->
+       then flipped to "all" via JS after load. The hook is wired via
+       addEventListener below (inline onload= attrs are blocked by CSP
+       script-src-attr).
+
+       Mermaid is NOT loaded here. It is 3.5 MB, and even served from cache
+       its parse/compile measured 4546 ms of main-thread time, with
+       DOMContentLoaded at 4693 ms — it was essentially the entire startup
+       cost, and much worse on a phone. markdown.js now fetches it on demand
+       the first time a `pre.mermaid` block actually needs rendering, so
+       sessions without diagrams never pay for it. -->
   <link id="katex-css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" media="print">
   <script async src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js"></script>
-  <script id="mermaid-script" async src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <script nonce="{{CSP_NONCE}}">
     (function(){
       var k = document.getElementById('katex-css');
       if (k) k.addEventListener('load', function(){ k.media = 'all'; }, { once: true });
-      var m = document.getElementById('mermaid-script');
-      if (m) m.addEventListener('load', function(){
-        if (window.odysseusInitMermaid) window.odysseusInitMermaid();
-      }, { once: true });
     })();
   </script>
-  <link rel="stylesheet" href="/static/style.css?v=20260702">
-  <link rel="modulepreload" href="/static/app.js?v=20260702">
+  <link rel="stylesheet" href="/static/style.css?v=20260709">
+  <link rel="modulepreload" href="/static/app.js?v=20260709">
   <link rel="modulepreload" href="/static/js/chat.js">
   <link rel="modulepreload" href="/static/js/ui.js">
   <link rel="modulepreload" href="/static/js/sessions.js">
@@ -257,6 +259,7 @@
         <div class="memory-tabs">
           <button class="memory-tab active" data-memory-tab="browse"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.5-3 5.7V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.3C6.2 13.5 5 11.4 5 9a7 7 0 0 1 7-7z"/><line x1="10" y1="22" x2="14" y2="22"/></svg>Memories <span id="memory-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span></button>
           <button class="memory-tab" data-memory-tab="skills"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Skills <span id="skills-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span></button>
+          <button class="memory-tab" data-memory-tab="journey"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Journey</button>
           <button class="memory-tab" data-memory-tab="summary"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M4 5h16"/><path d="M4 12h16"/><path d="M4 19h10"/></svg>Summary</button>
           <button class="memory-tab" data-memory-tab="add"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>Add</button>
           <button class="memory-tab" data-memory-tab="settings"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</button>
@@ -425,6 +428,21 @@
               <button id="skills-bulk-cancel" class="memory-toolbar-btn" title="Cancel (Esc)" style="padding:3px 6px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
             </div>
             <div id="skills-list" class="memory-list"></div>
+          </div>
+        </div>
+        <!-- ── Journey tab ── -->
+        <div class="memory-tab-panel hidden" data-memory-panel="journey">
+          <div class="admin-card" style="display:flex;flex-direction:column;overflow:hidden;flex:1;min-height:0;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px;">
+              <h2 style="display:flex;align-items:center;gap:6px;margin:0;padding:0;line-height:1;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Journey</h2>
+              <span style="flex:1"></span>
+              <button id="journey-replay-btn" class="memory-toolbar-btn" title="Replay the learning timeline"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><polygon points="5 3 19 12 5 21 5 3"/></svg>Replay</button>
+            </div>
+            <p class="memory-desc doclib-desc" style="margin-top:6px;">What the AI has learned over time — skills and memories on one timeline.</p>
+            <div id="journey-summary" class="journey-summary"></div>
+            <div id="journey-grid" class="journey-grid" aria-label="Learning timeline"></div>
+            <div id="journey-legend" class="journey-legend"></div>
+            <div id="journey-buckets" class="journey-buckets memory-list"></div>
           </div>
         </div>
         <!-- ── Settings tab ── -->
@@ -1601,6 +1619,13 @@
           <div class="admin-card">
             <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:1px;opacity:0.6;flex-shrink:0"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>Image Generation<span style="flex:1"></span><label class="admin-switch"><input type="checkbox" id="set-imgEnabledToggle" checked><span class="admin-slider"></span></label></h2>
             <div class="admin-toggle-sub" style="margin-bottom:8px">Configure which model to use for image generation.</div>
+            <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:8px;">
+              <div style="flex:1;min-width:0;">
+                <div style="font-size:12px;font-weight:600;">Ask before generate / edit</div>
+                <div class="admin-toggle-sub" style="margin:2px 0 0;">Pause image requests and pick the model in chat each time.</div>
+              </div>
+              <label class="admin-switch"><input type="checkbox" id="set-imgAskToggle"><span class="admin-slider"></span></label>
+            </div>
             <div style="display:flex;flex-direction:column;gap:0.5rem;">
               <div style="display:flex;align-items:center;gap:0.75rem;">
                 <label class="settings-label">Endpoint</label>
@@ -2328,6 +2353,10 @@
                   <option value="https://integrate.api.nvidia.com/v1" data-logo="nvidia">NVIDIA</option>
                 </select>
                 <div class="admin-model-form-row" id="adm-epApiKey-row">
+                  <select id="adm-epType" class="settings-select" title="What this endpoint serves — image endpoints appear in the image-model picker" style="flex:0 0 auto;min-width:96px;height:32px;box-sizing:border-box;">
+                    <option value="llm" selected>LLM</option>
+                    <option value="image">Image</option>
+                  </select>
                   <div style="position:relative;flex:1;display:flex;align-items:center;">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);opacity:0.55;pointer-events:none;"><path d="M21 2l-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/><path d="M15.5 7.5l3 3"/></svg>
                     <input id="adm-epApiKey" type="password" placeholder="API key, e.g. sk-proj-AbCdEf…" autocomplete="off" style="flex:1;padding-left:28px;height:32px;box-sizing:border-box;">
@@ -2401,6 +2430,35 @@
                 <input id="set-agentMaxRounds" type="text" inputmode="numeric" placeholder="20" class="settings-select" style="width:120px;">
               </div>
               <div id="set-agentMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
+            </div>
+          </div>
+          <div class="admin-card" style="margin-bottom:12px;">
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><rect x="3" y="4" width="18" height="16" rx="2"/><polyline points="7 9 10 12 7 15"/><line x1="12" y1="15" x2="17" y2="15"/></svg>Terminal &amp; Safety</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Where agent shell commands run, and the dangerous-command approval gate.</div>
+            <div class="settings-col">
+              <div class="settings-row">
+                <label class="settings-label" title="manual: flagged commands pause for an in-chat approve/deny prompt. off: skip the prompt layer (the hardline blocklist still applies).">Command approval</label>
+                <select id="set-cmdApprovalMode" class="settings-select" style="width:120px;">
+                  <option value="manual">Manual</option>
+                  <option value="off">Off</option>
+                </select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" title="local: run agent bash on this machine. docker: run it in a security-hardened per-session container.">Bash backend</label>
+                <select id="set-terminalEnv" class="settings-select" style="width:120px;">
+                  <option value="local">Local</option>
+                  <option value="docker">Docker</option>
+                </select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label">Docker image</label>
+                <input id="set-dockerImage" type="text" class="settings-select" style="width:280px;" placeholder="nikolaik/python-nodejs:python3.11-nodejs20">
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" title="Bind-mount the agent workspace at /workspace inside the container. Restores host access, so command approval stays active in docker mode.">Mount workspace in container</label>
+                <label class="admin-switch"><input type="checkbox" id="set-dockerMountWs" /><span class="admin-slider"></span></label>
+              </div>
+              <div id="set-terminalMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
             </div>
           </div>
           <div class="admin-card" style="margin-bottom:12px;">
@@ -2607,10 +2665,10 @@
 <script type="module" src="/static/js/tts-ai.js"></script>
 <script type="module" src="/static/js/document.js"></script>
 <script type="module" src="/static/js/gallery.js"></script>
-<script type="module" src="/static/js/chatRenderer.js?v=20260702"></script>
+<script type="module" src="/static/js/chatRenderer.js?v=20260709"></script>
 <script type="module" src="/static/js/codeRunner.js"></script>
 <script type="module" src="/static/js/chatStream.js"></script>
-<script type="module" src="/static/js/chat.js?v=20260702"></script>
+<script type="module" src="/static/js/chat.js?v=20260709"></script>
 <script type="module" src="/static/js/cookbook.js"></script>
 <script src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>
@@ -2620,7 +2678,7 @@
 <script type="module" src="/static/js/settings.js"></script>
 <script type="module" src="/static/js/admin.js"></script>
 <script type="module" src="/static/js/assistant.js"></script>
-<script type="module" src="/static/app.js?v=20260702"></script>  <!-- app.js must be LAST -->
+<script type="module" src="/static/app.js?v=20260709"></script>  <!-- app.js must be LAST -->
 <script type="module" src="/static/js/init.js"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>

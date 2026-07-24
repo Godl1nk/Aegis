@@ -469,9 +469,15 @@ async function loadEndpoints() {
   // Fallback to the legacy single list if the split containers don't exist
   // (older HTML or third-party embedding).
   const listLegacy = el('adm-epList');
-  // Refresh model picker so new endpoints show up in chat
+  // Refresh the chat model picker so new endpoints show up — from CACHE, not a
+  // forced network probe. Forcing (`refreshModels(true)`) hit
+  // /api/models?refresh=true, which network-probes every endpoint on each
+  // Added Models open; a single slow/down remote endpoint then stalled the
+  // whole page (the cache-only list route got starved behind the probe in the
+  // sync threadpool). Endpoint adds already prime the cache, and the explicit
+  // Probe button covers a manual re-test.
   if (window.modelsModule && window.modelsModule.refreshModels) {
-    window.modelsModule.refreshModels(true);
+    window.modelsModule.refreshModels(false);
     setTimeout(() => {
       if (window.sessionModule && window.sessionModule.updateModelPicker) {
         window.sessionModule.updateModelPicker();
@@ -530,6 +536,7 @@ async function loadEndpoints() {
               ${hasModels ? `<span style="font-size:10px;opacity:0.4;${category === 'api' ? 'flex-basis:100%;' : ''}">Click to manage models</span>` : ''}
             </div>
             <div style="display:flex;gap:4px;align-items:center;">
+              <button class="admin-btn-sm" data-adm-type-ep="${ep.id}" data-adm-type-next="${ep.model_type === 'image' ? 'llm' : 'image'}" title="${ep.model_type === 'image' ? 'Serve chat models (remove from the image-model picker)' : 'Mark as an image-generation endpoint (appears in the image-model picker)'}">${ep.model_type === 'image' ? 'Mark LLM' : 'Mark image'}</button>
               <button class="admin-btn-sm" data-adm-toggle-ep="${ep.id}">${ep.is_enabled ? 'Disable' : 'Enable'}</button>
               <button class="admin-btn-delete" data-adm-del-ep="${ep.id}" data-adm-ep-online="${ep.online ? '1' : '0'}">Delete</button>
               ${hasModels ? '<svg class="admin-user-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3;transition:transform 0.2s,opacity 0.2s;"><polyline points="6 9 12 15 18 9"/></svg>' : ''}
@@ -573,6 +580,21 @@ async function loadEndpoints() {
     };
     queryAll('[data-adm-toggle-ep]').forEach(btn => {
       btn.addEventListener('click', async (e) => { e.stopPropagation(); await fetch(`/api/model-endpoints/${btn.dataset.admToggleEp}`, { method: 'PATCH' }); loadEndpoints(); });
+    });
+    // LLM ↔ Image role toggle: image endpoints surface in the image-model
+    // picker (Settings → AI Defaults → Image Generation, and the in-chat
+    // ask-before-generate card).
+    queryAll('[data-adm-type-ep]').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await fetch(`/api/model-endpoints/${btn.dataset.admTypeEp}`, {
+          method: 'PATCH',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model_type: btn.dataset.admTypeNext }),
+        });
+        loadEndpoints();
+      });
     });
     queryAll('[data-adm-copy-url]').forEach(btn => {
       btn.addEventListener('click', (e) => {
@@ -706,6 +728,9 @@ async function loadEndpoints() {
                 <input type="checkbox" class="adm-cb-hidden" data-ep-model-id="${esc(m.id)}" ${!m.is_hidden ? 'checked' : ''}>
                 <span class="adm-check-dot" aria-hidden="true"></span>
                 <span>${esc(m.display)}</span>
+                <button type="button" class="adm-model-img-btn${m.is_image ? ' active' : ''}" data-ep-model-img="${esc(m.id)}" title="${m.is_image ? 'Marked as image-generation model — click to unmark' : 'Mark as image-generation model (appears in the image-model picker)'}" aria-pressed="${m.is_image ? 'true' : 'false'}">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+                </button>
               </label>`
             ).join('') + '</div>';
             const filterRows = (q) => {
@@ -732,6 +757,38 @@ async function loadEndpoints() {
             });
             panel.querySelectorAll('input[type=checkbox]').forEach(cb => {
               cb.addEventListener('change', () => _saveEpModelState(epId, panel));
+            });
+            // Per-model image-generation marks. The button lives inside the
+            // row <label>, so preventDefault keeps the click from toggling the
+            // enable checkbox. Saves the full marked list in one PATCH —
+            // marked models surface in the image-model pickers.
+            panel.querySelectorAll('[data-ep-model-img]').forEach(btn => {
+              btn.addEventListener('click', async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                btn.classList.toggle('active');
+                const nowActive = btn.classList.contains('active');
+                btn.setAttribute('aria-pressed', nowActive ? 'true' : 'false');
+                btn.title = nowActive
+                  ? 'Marked as image-generation model — click to unmark'
+                  : 'Mark as image-generation model (appears in the image-model picker)';
+                const marked = Array.from(panel.querySelectorAll('[data-ep-model-img].active'))
+                  .map(b => b.dataset.epModelImg);
+                try {
+                  const res = await fetch(`/api/model-endpoints/${epId}/models`, {
+                    method: 'PATCH',
+                    credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ image_models: marked }),
+                  });
+                  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                } catch (err) {
+                  // Revert the optimistic toggle on failure.
+                  btn.classList.toggle('active');
+                  btn.setAttribute('aria-pressed', btn.classList.contains('active') ? 'true' : 'false');
+                  if (uiModule?.showToast) uiModule.showToast('Failed to save image-model mark');
+                }
+              });
             });
           };
           try {
@@ -1915,6 +1972,23 @@ async function loadBuiltinTools() {
           </label>
         </div>`;
       }
+      if (cat === 'Code') {
+        // Behaviour setting, not a tool — lives here because it's about code
+        // the agent writes. Uses data-setting-id so the tool save/counter
+        // selectors (data-tool-id) never pick it up.
+        html += `
+        <div class="admin-tool-row">
+          <div class="admin-tool-info">
+            <span class="admin-tool-name">Syntax Check</span>
+            <span class="admin-tool-desc">Check Python/JS/HTML documents after writing; errors are fed back to fix</span>
+          </div>
+          <span class="admin-tool-ctx" title="Runs after a code document is written">post-write</span>
+          <label class="admin-switch" style="flex-shrink:0;">
+            <input type="checkbox" data-setting-id="agent_code_syntax_check">
+            <span class="admin-slider"></span>
+          </label>
+        </div>`;
+      }
       html += '</div></div>';
     }
     list.innerHTML = html;
@@ -1953,7 +2027,10 @@ async function loadBuiltinTools() {
     }
     function _updateCatCounter(catEl) {
       if (!catEl) return;
-      const catChecks = catEl.querySelectorAll('input[data-tool-id]');
+      // Count tool rows AND setting rows — both are visible options in the
+      // category, so the counter must match what the user actually sees
+      // (a Code category showing 5 rows read "4/4" when settings were skipped).
+      const catChecks = catEl.querySelectorAll('input[data-tool-id], input[data-setting-id]');
       const catEnabled = Array.from(catChecks).filter(c => c.checked).length;
       const counter = catEl.querySelector('.admin-tool-cat-count');
       if (counter) counter.textContent = catEnabled + '/' + catChecks.length;
@@ -1969,6 +2046,21 @@ async function loadBuiltinTools() {
       });
     });
 
+    // Behaviour settings rendered inside a tool category (e.g. Code → Syntax
+    // Check). These are app settings, not tools, so they load/save through
+    // /api/auth/settings instead of /api/tools — but they count toward the
+    // category and follow its master toggle like any other row.
+    async function _saveSettingRow(chk) {
+      try {
+        await fetch('/api/auth/settings', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ [chk.dataset.settingId]: !!chk.checked }),
+        });
+      } catch (_) {}
+    }
+
     // Wire category-level toggle (enable/disable all in category)
     list.querySelectorAll('input[data-tool-cat-toggle]').forEach(chk => {
       chk.addEventListener('change', async () => {
@@ -1977,9 +2069,35 @@ async function loadBuiltinTools() {
         const checked = chk.checked;
         catEl.querySelectorAll('input[data-tool-id]').forEach(c => { c.checked = checked; });
         await _saveToolState();
+        const catSettings = catEl.querySelectorAll('input[data-setting-id]');
+        for (const s of catSettings) {
+          if (s.checked !== checked) {
+            s.checked = checked;
+            await _saveSettingRow(s);
+          }
+        }
         _updateCatCounter(catEl);
       });
     });
+
+    const settingRows = list.querySelectorAll('input[data-setting-id]');
+    if (settingRows.length) {
+      try {
+        const sres = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+        const settings = await sres.json();
+        settingRows.forEach(chk => { chk.checked = !!settings[chk.dataset.settingId]; });
+      } catch (_) {}
+      // The category header was rendered from tool counts only; refresh it now
+      // that the setting rows know their real state.
+      new Set(Array.from(settingRows).map(c => c.closest('.admin-tool-category')))
+        .forEach(catEl => _updateCatCounter(catEl));
+      settingRows.forEach(chk => {
+        chk.addEventListener('change', async () => {
+          await _saveSettingRow(chk);
+          _updateCatCounter(chk.closest('.admin-tool-category'));
+        });
+      });
+    }
   } catch (e) {
     console.error('Failed to load tools:', e);
     list.innerHTML = '<div class="admin-empty">Failed to load tools</div>';

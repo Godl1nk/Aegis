@@ -668,6 +668,10 @@ memory_router = setup_memory_routes(memory_manager, session_manager, memory_vect
 app.include_router(memory_router)
 from routes.skills_routes import setup_skills_routes
 app.include_router(setup_skills_routes(skills_manager))
+from routes.learning_routes import setup_learning_routes
+app.include_router(setup_learning_routes(skills_manager, memory_manager))
+from routes.approval_routes import setup_approval_routes
+app.include_router(setup_approval_routes())
 
 # Chat
 from routes.chat_routes import setup_chat_routes
@@ -1038,6 +1042,14 @@ async def _startup_event():
         _startup_tasks.append(start_bg_monitor())
     except Exception as _e:
         logger.warning("Failed to start background-job monitor: %s", _e)
+    # Reap docker terminal containers orphaned by a previous process — only
+    # relevant when the docker bash backend is (or was) enabled.
+    try:
+        from src.docker_env import get_docker_settings, reap_orphan_containers, find_docker
+        if find_docker() and get_docker_settings()["env_type"] == "docker":
+            reap_orphan_containers()
+    except Exception as _e:
+        logger.debug("Docker orphan reap skipped: %s", _e)
     # MCP servers can be slow or blocked by local tooling. Connect them after
     # the web server is accepting traffic instead of delaying the whole UI.
     async def _startup_mcp_connections():

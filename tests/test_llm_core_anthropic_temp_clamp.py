@@ -17,7 +17,7 @@ def _temp(t):
     payload = _build_anthropic_payload(
         "claude-x", [{"role": "user", "content": "hi"}], t, 100
     )
-    return payload["temperature"]
+    return payload.get("temperature")
 
 
 def test_above_range_is_clamped_to_one():

@@ -85,6 +85,7 @@ def _run_markdown_case(markdown: str, render_expr: str = "mod.mdToHtml(input)", 
         capture_output=True,
         timeout=15,
         text=True,
+        encoding="utf-8",
     )
     if result.returncode != 0:
         raise AssertionError(f"node failed:\nSTDERR:\n{result.stderr}\nSTDOUT:\n{result.stdout}")
@@ -121,6 +122,61 @@ def test_table_separator_row_not_rendered_as_data(node_available):
     assert "<th" in html
     assert "<td" in html
     assert "---" not in html
+
+
+_LLAMA_SWAP_BANNER = (
+    "————————\n"
+    "llama-swap loading model: GRM2.6-27B\n\n"
+    "Compressing optimism into FP16 ........\n\n"
+    "Done! (7.26s)\n\n"
+    "————————\n\n"
+)
+
+
+def test_llama_swap_banner_does_not_leak_untagged_reasoning_into_body(node_available):
+    """llama-swap prepends a model-load banner as ORDINARY content. It made the
+    text start with the banner instead of a reasoning phrase, so untagged
+    reasoning failed detection and rendered as the visible reply (user saw the
+    loading lines + 'The user wants…' in chat). Banner and reasoning must both
+    end up inside the collapsed thinking section."""
+    html = _run_markdown_case(
+        _LLAMA_SWAP_BANNER
+        + "The user wants a browser-based OS in a single HTML file.\n\n"
+        + "NovaOS.html has been saved and is ready to open in Chrome.",
+        "mod.processWithThinking(input)",
+    )
+
+    assert "thinking-section" in html
+    # Reasoning + banner are collapsed, not part of the visible reply.
+    think_start = html.index("thinking-section")
+    think_end = html.index("NovaOS.html has been saved")
+    assert "The user wants a browser-based OS" in html[think_start:think_end]
+    assert "llama-swap loading model" in html[think_start:think_end]
+    # The actual reply still renders.
+    assert "NovaOS.html has been saved" in html
+
+
+def test_llama_swap_banner_collapsed_even_without_reasoning(node_available):
+    """Banner is infrastructure noise — it never belongs in the visible reply,
+    even when the model replies directly with no reasoning."""
+    html = _run_markdown_case(
+        _LLAMA_SWAP_BANNER + "Here is your answer.",
+        "mod.processWithThinking(input)",
+    )
+    assert "thinking-section" in html
+    assert "Here is your answer." in html
+    assert html.index("llama-swap loading model") < html.index("Here is your answer.")
+
+
+def test_ordinary_text_mentioning_llama_swap_is_not_stripped(node_available):
+    """Only the real banner (loading model: … Done! (Ns)) is folded away —
+    prose that merely mentions the words must render normally."""
+    html = _run_markdown_case(
+        "Here is how llama-swap works: it swaps models on demand.",
+        "mod.processWithThinking(input)",
+    )
+    assert "thinking-section" not in html
+    assert "it swaps models on demand" in html
 
 
 def test_process_with_thinking_handles_gemma4_thought_channel(node_available):
@@ -248,6 +304,37 @@ def test_katex_error_span_for_cdot_is_repaired(node_available):
 
     assert "&centerdot;" in html
     assert "katex-error" not in html
+
+
+def test_two_currency_dollar_signs_on_one_line_do_not_pair_as_math(node_available):
+    """Two unrelated dollar amounts on one line ('~$96.35 ... ($110...') were
+    being paired as a $...$ math span, swallowing the whole sentence between
+    them (markdown syntax and all) into KaTeX — which ignores markdown and
+    collapses whitespace, rendering the prose as squished italic math text.
+    Regression for the exact financial-assistant report seen in production."""
+    html = _run_markdown_case(
+        "The stock is at ~$96.35 *as of July 13 — recovering from the May "
+        "crash* ($110 before the drop), so sentiment remains sensitive.",
+        katex_expr="{ renderToString() { throw new Error('must not be called'); } }",
+    )
+
+    assert "MATH_BLOCK" not in html
+    assert "$96.35" in html
+    assert "$110" in html
+    assert "<em>as of July" in html
+
+
+def test_short_legit_inline_math_still_renders(node_available):
+    """The prose guard must not swallow real short inline math on the same
+    line as other $ pairs."""
+    html = _run_markdown_case(
+        "We know $a + b = 10$ and $a - b = 4$.",
+        katex_expr="{ renderToString(math) { return '<span class=\"katex\">' + math + '</span>'; } }",
+    )
+
+    assert html.count('class="katex"') == 2
+    assert "a + b = 10" in html
+    assert "a - b = 4" in html
     assert "\\cdot" not in html
 
 
@@ -310,3 +397,105 @@ def test_dom_cdot_repair_replaces_cached_katex_error_span(node_available):
     )
 
     assert result == "\u00b7"
+
+
+def test_blank_line_separated_ordered_items_keep_counting_up(node_available):
+    """A "loose" list (blank lines between items) renders as one <ol> per item.
+    That is fine structurally, but every list restarted at 1, so the UI showed
+    "1. 1. 1." — reproduced live as 5 sibling <ol>s with a single <li> each.
+    Each list must carry the number the author actually wrote.
+
+    The lists are deliberately NOT merged into one <ol>: merging makes a
+    streaming cut's safety depend on text that has not arrived yet, which
+    breaks the segmenter freeze invariant in tests/streaming/invariant.test.mjs.
+    A `start` attribute is derived locally, so it stays stream-safe.
+    """
+    import re as _re
+
+    html = _run_markdown_case(
+        "\n".join([
+            "1. **First** item here.",
+            "",
+            "2. **Second** item here.",
+            "",
+            "3. **Third** item here.",
+        ])
+    )
+    starts = [m or "1" for m in _re.findall(r'<ol(?: start="(\d+)")?>', html)]
+    assert starts == ["1", "2", "3"], f"markers would render as {starts}: {html}"
+
+
+def test_interrupted_ordered_list_resumes_at_the_authored_number(node_available):
+    """Indented sub-bullets split the list; items after the interruption must
+    continue the count rather than restarting at 1."""
+    import re as _re
+
+    html = _run_markdown_case(
+        "\n".join([
+            "1. First.",
+            "",
+            "2. Second.",
+            "",
+            "3. Smart move: set orders in tranches:",
+            "   - $95-100 zone: start small",
+            "   - $85-90 zone: add more",
+            "",
+            "4. Fourth.",
+            "",
+            "5. Fifth.",
+        ])
+    )
+    # The indented bullets become a real <ul>, not literal "- " paragraph text.
+    assert html.count("<ul>") == 1
+    assert not _re.search(r"<p>\s*-\s", html), f"literal dash left: {html}"
+    starts = [m or "1" for m in _re.findall(r'<ol(?: start="(\d+)")?>', html)]
+    assert starts == ["1", "2", "3", "4", "5"], f"got {starts}: {html}"
+
+
+def test_indented_bullets_render_as_bullets(node_available):
+    """Up to 3 leading spaces is still a list marker per CommonMark."""
+    html = _run_markdown_case("Intro:\n\n   - alpha\n   - beta")
+    assert "<ul>" in html
+    assert "<li>alpha</li>" in html
+    assert "<li>beta</li>" in html
+
+
+def test_ordered_list_starting_above_one_keeps_its_number(node_available):
+    html = _run_markdown_case("4. four\n5. five")
+    assert '<ol start="4">' in html
+    assert html.count("<li>") == 2
+
+
+# KaTeX stub that tags whatever it is asked to render, so a test can tell
+# whether a $...$ span was treated as math or left as literal currency text.
+_KATEX_TAGGING_STUB = "{ renderToString: (s) => '<<MATH:' + s + '>>' }"
+
+
+def _math_spans(markdown):
+    html = _run_markdown_case(markdown, katex_expr=_KATEX_TAGGING_STUB)
+    return [seg.split(">>", 1)[0] for seg in html.split("<<MATH:")[1:]]
+
+
+def test_currency_pair_is_not_swallowed_as_inline_math(node_available):
+    """Two dollar amounts on one line were paired as a $...$ span, feeding the
+    prose between them to KaTeX — it ignores markdown and collapses spaces, so
+    "$110.18** (already crossed $110)" rendered as run-together italic math.
+    Reproduced live from a real reply. The 3-word prose guard missed it
+    ("already crossed" is only 2 words); the markdown ** is the tell."""
+    assert _math_spans("**Today's high:** $110.18** OK (already crossed $110)") == []
+
+
+def test_two_bare_currency_amounts_stay_literal(node_available):
+    """"$95 to $110" paired "95 to" into KaTeX. Currency after a number is a
+    word; math after a number is an operator."""
+    assert _math_spans("Range $95 to $110 today.") == []
+    assert _math_spans("It hit $110 and $106 today.") == []
+
+
+def test_real_inline_math_still_renders(node_available):
+    """The currency guards must not swallow genuine math — including arithmetic
+    that opens with a digit and tight algebra like $3x$."""
+    assert _math_spans("The identity $2 + 2 = 4$ holds.") == ["2 + 2 = 4"]
+    assert _math_spans("Let $x + y$ be the sum.") == ["x + y"]
+    assert _math_spans("Solve $3x$ for x.") == ["3x"]
+    assert _math_spans("Energy $E = mc^2$ is famous.") == ["E = mc^2"]

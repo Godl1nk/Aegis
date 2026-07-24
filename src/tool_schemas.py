@@ -196,11 +196,11 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "generate_image",
-            "description": "Generate a new AI image from a prompt. Use this directly for requests like generate/create/make/draw/render an image, picture, photo, art, or illustration. Do not probe servers first; model='auto' uses the configured Image Generation model.",
+            "description": "Generate a new AI image from a prompt. Use this directly for requests like generate/create/make/draw/render an image, picture, photo, art, or illustration — INCLUDING follow-ups like 'another one', 'again', or 'one more'. ALWAYS call this tool to produce an image: NEVER write an image URL, a /api/generated-image/ link, or a markdown image yourself — you cannot know a valid image URL, and the tool already displays the result to the user. Do not probe servers first; model='auto' uses the configured Image Generation model.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "prompt": {"type": "string", "description": "Image description prompt"},
+                    "prompt": {"type": "string", "description": "Prompt passed directly to the image model's own text encoder. Preserve the user's subject VERBATIM — keep proper nouns, brand names, characters, artists, and places exactly as the user wrote them (e.g. 'Ferrari', not 'red sports car with a horse logo'). The image model understands these names natively; replacing a name with a description loses information. You may append style, composition, lighting, or quality details, but never substitute names with descriptions."},
                     "model": {"type": "string", "description": "Model name, model@endpoint, or auto. Defaults to auto."},
                     "size": {"type": "string", "description": "Image size, e.g. 1024x1024. Defaults to 1024x1024."},
                     "quality": {"type": "string", "enum": ["low", "medium", "high", "auto"], "description": "Generation quality. Defaults to high for user-facing requests."},
@@ -1030,7 +1030,7 @@ FUNCTION_TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "image_id": {"type": "string", "description": "Gallery image ID or upload ID of the image to edit"},
-                    "prompt": {"type": "string", "description": "Description of the desired result. Be specific about what to change — the model cannot see the original, so describe the full image you want."},
+                    "prompt": {"type": "string", "description": "Description of the desired result, passed directly to the image model's text encoder. Be specific about what to change — the model cannot see the original, so describe the full image you want. Keep proper nouns, brand names, characters, and places VERBATIM as the user wrote them (e.g. 'Ferrari', not 'red sports car with a horse logo'); never substitute names with descriptions."},
                     "model": {"type": "string", "description": "Model name or auto. Defaults to configured image model."},
                     "size": {"type": "string", "description": "Output size, e.g. 1024x1024. Defaults to original image size."},
                     "denoising_strength": {"type": "number", "description": "Denoising strength (0.0 to 1.0) indicating how much of the original image should be rewritten. Default is 0.65. Use lower values (0.2-0.3) to keep more of the original, and higher values to make bigger changes."},
@@ -1421,6 +1421,12 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         edits = args.get("edits", [])
         if not isinstance(edits, list):
             edits = []
+        # Tolerate the flat single-edit shape weak local models emit —
+        # {"find": "...", "replace": "..."} with no `edits` wrapper. Without
+        # this, function_call_to_tool_block produced an empty block and the
+        # edit silently did nothing.
+        if not edits and ("find" in args or "replace" in args):
+            edits = [{"find": args.get("find", ""), "replace": args.get("replace", "")}]
         for edit in edits:
             if not isinstance(edit, dict):
                 continue
@@ -1433,6 +1439,13 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         suggestions = args.get("suggestions", [])
         if not isinstance(suggestions, list):
             suggestions = []
+        # Same flat single-suggestion fallback as edit_document.
+        if not suggestions and ("find" in args or "replace" in args or "suggest" in args):
+            suggestions = [{
+                "find": args.get("find", ""),
+                "replace": args.get("replace", args.get("suggest", "")),
+                "reason": args.get("reason", ""),
+            }]
         for s in suggestions:
             if not isinstance(s, dict):
                 continue

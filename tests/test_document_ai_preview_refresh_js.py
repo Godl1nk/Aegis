@@ -35,19 +35,25 @@ def test_markdown_preview_refresh_rerenders_visible_preview():
     assert "_setMarkdownPreviewActive(true, { remember: false });" in body
 
 
-def test_doc_update_refreshes_preview_instead_of_hidden_editor_animation():
+def test_doc_update_refreshes_preview_instead_of_hidden_editor_diff():
     body = _function_body("handleDocUpdate")
 
     visible = "const markdownPreviewWasVisible = _isMarkdownPreviewVisible();"
-    exit_preview = "if (markdownPreviewWasVisible) _setMarkdownPreviewActive(false, { remember: false });"
-    diff = "enterDiffMode(oldContent, newContent);"
     refresh = "markdownPreviewWasVisible && _refreshMarkdownPreviewIfVisible(docId, newContent)"
-    animate = "_animateDocEdit(textarea, newContent);"
+    # Code edits render a coalesced accept/reject diff (baseline → final).
+    diff = "enterDiffMode(base, finalContent);"
 
     assert visible in body
-    assert exit_preview in body
-    assert diff in body
-    assert body.index(exit_preview) < body.index(diff)
     assert refresh in body
-    assert body.index(refresh) < body.index(animate)
-    assert "_refreshMarkdownPreviewIfVisible(docId, newContent);" in body
+    assert diff in body
+    # Markdown preview refresh must take precedence over the code-edit diff path.
+    assert body.index(refresh) < body.index(diff)
+
+
+def test_multi_edit_turn_coalesces_diff_render():
+    # A spam-edit turn must not rebuild the diff overlay per edit — the coalesce
+    # timer collapses the burst into ONE diff (baseline captured once).
+    body = _function_body("handleDocUpdate")
+    assert "_coalesceDiffBaseline == null" in body
+    assert "_coalesceDiffTimer = setTimeout(" in body
+    assert "enterDiffMode(base, finalContent);" in body

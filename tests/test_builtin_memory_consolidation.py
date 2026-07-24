@@ -4,6 +4,11 @@ import sys
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def disable_memory_v2(monkeypatch):
+    monkeypatch.setitem(sys.modules, "src.memory_v2", None)
+
+
 def _import_consolidate_action():
     mod = sys.modules.get("src.builtin_actions")
     if mod is not None and not hasattr(mod, "action_consolidate_memory"):

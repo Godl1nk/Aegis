@@ -25,6 +25,7 @@ import galleryModule from './js/gallery.js';
 import tasksModule from './js/tasks.js?v=20260630tasksactivity';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
+import humanizeModule from './js/humanize.js';
 import adminModule from './js/admin.js';
 import settingsModule from './js/settings.js';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
@@ -529,7 +530,7 @@ function initializeEventListeners() {
       e.stopPropagation();
       exportMenu.classList.remove('open');
       const meta = sessionModule.getSessions().find(s => s.id === sessionModule.getCurrentSessionId());
-      const sessionName = meta ? meta.name : 'Odysseus Chat';
+      const sessionName = meta ? meta.name : 'Aegis Chat';
       const originalTitle = document.title;
       document.title = sessionName;
       const chatHistory = document.getElementById('chat-history');
@@ -820,9 +821,18 @@ function initializeEventListeners() {
     }
   }
 
-  // Click outside modal content → close modal
+  // Click outside modal content → close modal.
+  // Only counts when the press also STARTED outside the content: a click's
+  // target is the common ancestor of mousedown/mouseup targets, so a press
+  // that begins inside the window (tab click, drag, resize) and releases
+  // over the backdrop would otherwise retarget to `.modal` and close it.
+  let _pressBeganInModalContent = false;
+  document.addEventListener('pointerdown', (e) => {
+    _pressBeganInModalContent = !!(e.target.closest && e.target.closest('.modal-content'));
+  }, true);
   document.addEventListener('click', (e) => {
     if (uiModule.isTouchInsideModal()) return; // suppress synthetic events from touch scrolling
+    if (_pressBeganInModalContent) return;
     const modal = e.target.closest('.modal');
     if (!modal || modal.classList.contains('hidden')) return;
     if (e.target.closest('.modal-content')) return;
@@ -1057,18 +1067,19 @@ function initializeEventListeners() {
   // Tasks tool button
   const toolTasksBtn = el('tool-tasks-btn');
   if (toolTasksBtn) {
-  // Agents buttons (sidebar + rail)
-  const agentsBtns = [el("rail-agents"), el("tool-agents-btn")].filter(Boolean);
-  agentsBtns.forEach(btn => {
-    btn.addEventListener("click", () => {
-    });
-  });
     toolTasksBtn.addEventListener('click', () => {
       if (tasksModule) {
         tasksModule.isTasksOpen() ? tasksModule.closeTasks() : tasksModule.openTasks();
       }
     });
   }
+
+  // Agents buttons (sidebar + rail)
+  const agentsBtns = [el("rail-agents"), el("tool-agents-btn")].filter(Boolean);
+  agentsBtns.forEach(btn => {
+    btn.addEventListener("click", () => {
+    });
+  });
 
   // Calendar tool button
   const toolCalendarBtn = el('tool-calendar-btn');
@@ -1092,6 +1103,14 @@ function initializeEventListeners() {
       if (notesModule) {
         notesModule.togglePanel();
       }
+    });
+  }
+
+  const toolHumanizeBtn = el('tool-humanize-btn');
+  if (toolHumanizeBtn) {
+    toolHumanizeBtn.addEventListener('click', async () => {
+      const Modals = await import('./js/modalManager.js');
+      if (!Modals.toggle('humanize-modal')) humanizeModule.open();
     });
   }
   // Refresh notes due-reminder badge on load and every 5 minutes
@@ -1501,6 +1520,7 @@ function initializeEventListeners() {
         deep_research:   ['research-toggle-btn', 'tool-research-btn', 'overflow-research-btn', 'rail-research'],
         document_editor: ['overflow-doc-btn', 'rail-documents'],
         gallery:         ['tool-gallery-btn', 'rail-gallery'],
+        humanize:        ['tool-humanize-btn'],
       };
       Object.entries(map).forEach(([key, ids]) => {
         if (features[key] === false) {
@@ -1920,6 +1940,10 @@ function initializeEventListeners() {
   const docIndicatorBtn = el('doc-indicator-btn');
   if (docIndicatorBtn) {
     docIndicatorBtn.addEventListener('click', () => {
+      if (docIndicatorBtn.classList.contains('doc-writing')) {
+        documentModule?.ensurePaneMounted?.();
+        return;
+      }
       const ob = el('overflow-doc-btn');
       if (ob) ob.click();
     });
@@ -2315,7 +2339,7 @@ function initializeEventListeners() {
       // Keep a prompt inside the composer even when the picker crowds the row.
       // A blank placeholder makes the mobile/compact empty state feel broken.
       if (textarea) {
-        textarea.setAttribute('placeholder', w < PLACEHOLDER_COMPACT_WIDTH ? 'Message...' : 'Message Odysseus...');
+        textarea.setAttribute('placeholder', w < PLACEHOLDER_COMPACT_WIDTH ? 'Message...' : 'Message Aegis...');
       }
       // Hide entire bottom toolbar (tools, mode toggle) — only send button remains
       if (inputBottom) {
@@ -2619,6 +2643,7 @@ function initializeEventListeners() {
     'tool-library':        '#tool-library-btn',
     'tool-memory':         '#tool-memory-btn',
     'tool-notes':          '#tool-notes-btn',
+    'tool-humanize':       '#tool-humanize-btn',
     'tool-tasks':          '#tool-tasks-btn',
     'tool-theme':          '#tool-theme-btn',
     'user-bar':            '#user-bar-profile',
@@ -2948,10 +2973,10 @@ function initializeEventListeners() {
   // entry restores the modal. Works for hand-rolled and dynamically-created
   // modals via a MutationObserver on document.body.
   (function initModalMinimize() {
-    // custom-preset-modal (the Prompt window) is handled by the new
-    // modalManager dock (registered in _AUTO_WIRE), so the legacy dock must
-    // not also inject a `_`/chip for it.
-    const SKIP_IDS = new Set(['styled-confirm-overlay', 'custom-preset-modal']);
+    // custom-preset-modal (the Prompt window) and humanize-modal are handled
+    // by the new modalManager dock (registered in _AUTO_WIRE), so the legacy
+    // dock must not also inject a `_`/chip for it.
+    const SKIP_IDS = new Set(['styled-confirm-overlay', 'custom-preset-modal', 'humanize-modal']);
     const dockEntries = new Map(); // modal element -> dock entry element
 
     let dock = document.getElementById('modal-dock');
@@ -3693,6 +3718,10 @@ function startOdysseusApp() {
   const _railDocsBtn = el('rail-documents');
   if (_railDocsBtn) {
     _railDocsBtn.addEventListener('click', () => {
+      if (_railDocsBtn.classList.contains('doc-writing')) {
+        documentModule?.ensurePaneMounted?.();
+        return;
+      }
       const ob = el('overflow-doc-btn');
       if (ob) ob.click();
     });

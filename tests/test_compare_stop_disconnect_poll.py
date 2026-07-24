@@ -281,7 +281,10 @@ def test_compare_mode_branch_skips_agent_runs_in_source():
     src = (Path(__file__).resolve().parents[1] / "routes" / "chat_routes.py").read_text(encoding="utf-8")
 
     branch_idx = src.index("if compare_mode:")
-    direct_return_idx = src.index("return StreamingResponse(_safe_stream(), media_type=", branch_idx)
+    # The generator is wrapped in _sse_keepalive (transparent — still cancels
+    # the inner stream on client Stop via aclose), but must still be returned
+    # DIRECTLY here, not via agent_runs.start/subscribe (which would detach it).
+    direct_return_idx = src.index("return StreamingResponse(_sse_keepalive(_safe_stream()), media_type=", branch_idx)
     detach_idx = src.index("agent_runs.start(session, _safe_stream())", branch_idx)
 
     assert branch_idx < direct_return_idx < detach_idx, (

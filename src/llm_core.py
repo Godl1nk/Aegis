@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import HTTPException
 from typing import Optional, Dict, List, Tuple
 from src.model_context import get_context_length, DEFAULT_CONTEXT, is_local_endpoint
+from src.context_scrubber import StreamingContextScrubber
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,11 @@ async def _local_model_slot(target_url: str, model: str, workload: Optional[str]
         })
         yield
     finally:
-        if kind == "foreground":
+        # Only decrement here when the acquire itself failed/was cancelled —
+        # the success path already decremented right after acquiring. A second
+        # decrement steals the count of ANOTHER still-waiting foreground
+        # request (clamped at 0), letting background work barge past it.
+        if kind == "foreground" and not acquired:
             _LOCAL_MODEL_WAITING_FOREGROUND = max(0, _LOCAL_MODEL_WAITING_FOREGROUND - 1)
         if acquired and _LOCAL_MODEL_LOCK.locked():
             owner = _LOCAL_MODEL_CURRENT.get("task")
@@ -340,7 +345,17 @@ class _DegenerateStreamGuard:
             if grams:
                 top_gram = max(set(grams), key=grams.count)
                 gram_count = grams.count(top_gram)
-                if gram_count >= 10:
+                # A wedged loop repeats the phrase BACK-TO-BACK, so it occupies
+                # almost the entire window (coverage → 1.0). A legitimate
+                # repetitive STRUCTURE repeats a 4-gram too — a CSS/config/data
+                # array of `linear-gradient(135deg, …)` rows repeats
+                # "css linear gradient 135deg" every row — but each row also
+                # carries fresh content (names, hex colors) BETWEEN the repeats,
+                # so the phrase covers only a fraction of the window. Require
+                # high coverage so a valid gradient/wallpaper array (the
+                # browser-OS false positive) is not aborted mid-generation.
+                coverage = (gram_count * 4) / max(len(self.recent_tokens), 1)
+                if gram_count >= 10 and coverage >= 0.6:
                     reason = f"repeated phrase '{' '.join(top_gram)}' {gram_count} times"
 
         if not reason:
@@ -2156,6 +2171,39 @@ def _stream_target_url(url: str) -> str:
     return _normalize_openai_chat_url(url)
 
 
+def _scrub_stream_chunk(scrubber, chunk: str) -> List[str]:
+    """Route visible text deltas through the guard-block scrubber.
+
+    Returns the chunk(s) to emit — possibly none while the scrubber holds
+    back a partial fence tag, and possibly a flushed tail delta ahead of
+    [DONE]. Thinking deltas and typed events (tool_calls, usage, errors)
+    pass through untouched.
+    """
+    if chunk == "data: [DONE]\n\n":
+        tail = scrubber.flush()
+        if tail:
+            return [f'data: {json.dumps({"delta": tail})}\n\n', chunk]
+        return [chunk]
+    if chunk.startswith("data: "):
+        try:
+            data = json.loads(chunk[6:])
+        except json.JSONDecodeError:
+            return [chunk]
+        if (
+            isinstance(data, dict)
+            and isinstance(data.get("delta"), str)
+            and not data.get("thinking")
+            and "type" not in data
+        ):
+            visible = scrubber.feed(data["delta"])
+            if not visible:
+                return []
+            if visible != data["delta"]:
+                data["delta"] = visible
+                return [f'data: {json.dumps(data)}\n\n']
+    return [chunk]
+
+
 async def stream_llm(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
                      max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                      timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
@@ -2164,9 +2212,12 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                      top_p: Optional[float] = None, top_k: Optional[int] = None,
                      min_p: Optional[float] = None, repeat_penalty: Optional[float] = None,
                      presence_penalty: Optional[float] = None, frequency_penalty: Optional[float] = None):
+    import contextlib
+
     target_url = _stream_target_url(url)
     async with _local_model_slot(target_url, model, workload):
-        async for chunk in _stream_llm_inner(
+        heartbeat_s = 15.0
+        agen = _stream_llm_inner(
             url,
             model,
             messages,
@@ -2184,8 +2235,41 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             repeat_penalty=repeat_penalty,
             presence_penalty=presence_penalty,
             frequency_penalty=frequency_penalty,
-        ):
-            yield chunk
+        )
+        pending = asyncio.create_task(agen.__anext__())
+        # Guard-block scrubber: models occasionally echo the injected
+        # <<<UNTRUSTED_SOURCE_DATA>>> context fences (recalled memories, RAG
+        # snippets) back into their visible reply. Spans can split across
+        # deltas, so a stateful scrubber runs at this single chokepoint —
+        # every consumer (chat stream, agent loop, background tasks) gets a
+        # clean stream and accumulates a clean full_response.
+        scrubber = StreamingContextScrubber()
+        try:
+            while True:
+                done, _ = await asyncio.wait({pending}, timeout=heartbeat_s)
+                if not done:
+                    yield ": heartbeat\n\n"
+                    continue
+                try:
+                    chunk = pending.result()
+                except StopAsyncIteration:
+                    return
+                for out_chunk in _scrub_stream_chunk(scrubber, chunk):
+                    yield out_chunk
+                pending = asyncio.create_task(agen.__anext__())
+        except asyncio.CancelledError:
+            pending.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pending
+            try:
+                await agen.aclose()
+            finally:
+                raise
+        finally:
+            if not pending.done():
+                pending.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pending
 
 
 async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
@@ -2825,39 +2909,6 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         logger.error(f"Stream error: {e}")
         yield f'event: error\ndata: {json.dumps({"error": str(e), "status": 502})}\n\n'
 
-
-async def stream_llm(*args, **kwargs):
-    """Stream LLM SSE and keep proxy/client connection warm while upstream is silent."""
-    import contextlib
-
-    heartbeat_s = 15.0
-    agen = _stream_llm_impl(*args, **kwargs)
-    pending = asyncio.create_task(agen.__anext__())
-    try:
-        while True:
-            done, _ = await asyncio.wait({pending}, timeout=heartbeat_s)
-            if not done:
-                yield ": heartbeat\n\n"
-                continue
-            try:
-                chunk = pending.result()
-            except StopAsyncIteration:
-                return
-            yield chunk
-            pending = asyncio.create_task(agen.__anext__())
-    except asyncio.CancelledError:
-        pending.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await pending
-        try:
-            await agen.aclose()
-        finally:
-            raise
-    finally:
-        if not pending.done():
-            pending.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await pending
 
 
 def _summarize_stream_error(err_chunk: Optional[str]) -> str:

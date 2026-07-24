@@ -79,6 +79,20 @@ function _spaceWindowId(win) {
   return null;
 }
 
+// True when the last-seen pointer position is over the window's HEADER (drag
+// chrome). A modal's `.modal-header` is the natural place for a "stash this
+// window" gesture; its body is where Space must scroll. Surfaces without a
+// header (doc editor pane) keep the whole-surface gesture.
+function _pointerOverWindowChrome(win) {
+  if (_lastPointerClientX == null || _lastPointerClientY == null) return false;
+  const modal = win?.closest?.('.modal[id]');
+  const header = modal?.querySelector?.('.modal-header');
+  if (!header) return true;
+  const r = header.getBoundingClientRect();
+  return _lastPointerClientX >= r.left && _lastPointerClientX <= r.right
+      && _lastPointerClientY >= r.top && _lastPointerClientY <= r.bottom;
+}
+
 function _windowAtPointer() {
   if (_lastPointerClientX == null || _lastPointerClientY == null) return null;
   const x = _lastPointerClientX;
@@ -142,7 +156,12 @@ function _closeHoveredWindow() {
 function _spaceIsBlocked(e, surface) {
   const target = _targetEl(e.target);
   if (!target) return false;
-  if (_isTextEditingTarget(target)) return !surface || surface.contains(target);
+  // Typing ANYWHERE blocks the hover-Space toggle. The old guard only
+  // blocked typing inside the hovered surface, so typing a space in the
+  // main chat input while the pointer rested over an open window (Brain,
+  // gallery, …) minimized that window mid-sentence — it looked like the
+  // modal "closing itself".
+  if (_isTextEditingTarget(target)) return true;
   const blocked = target.closest?.(SPACE_BLOCKED_SELECTOR);
   return !!(blocked && (!surface || surface.contains(blocked)));
 }
@@ -207,6 +226,13 @@ function _initHoverCardSpaceToggle() {
     const id = _spaceWindowId(hoveredToggleWindow);
     if (!id) return;
     if (_spaceIsBlocked(e, hoveredToggleWindow)) return;
+    // Space minimizes a tool window ONLY when the pointer is over its header
+    // (title bar) — never its scrollable body. Space is the browser's
+    // page-down/scroll key; hijacking it to minimize while the user reads or
+    // scrolls a modal (the Brain memory list, etc.) is what made the window
+    // "flash and close by itself". Non-modal surfaces (doc editor) keep the
+    // whole-surface gesture.
+    if (!_pointerOverWindowChrome(hoveredToggleWindow)) return;
     e.preventDefault();
     Modals.minimize(id);
   }, true);
@@ -895,6 +921,15 @@ if ('ontouchstart' in window || window.innerWidth <= 768) {
 // Finger-following drag with velocity-based dismiss.
 // Works from grab handle, header, OR anywhere on the sheet when content is scrolled to top.
 if ('ontouchstart' in window) {
+  // The mobile CSS hides the modal close/minimize buttons because swipe-down
+  // replaces them — but that CSS keys off VIEWPORT WIDTH while this handler
+  // keys off TOUCH SUPPORT. A narrow non-touch window (desktop resized, or a
+  // touch device that doesn't expose ontouchstart) therefore hid the × while
+  // no swipe existed, leaving the modal closable only via Escape — untappable
+  // and effectively trapped. Marking the root here guarantees the two
+  // conditions can never disagree: the × is only hidden when swipe is armed.
+  document.documentElement.classList.add('has-touch');
+
   const DISMISS_THRESHOLD = 50;    // px — dismiss if dragged past this
   const VELOCITY_THRESHOLD = 0.3;  // px/ms — fast flick dismisses even below threshold
   const RUBBER_RESISTANCE = 0.35;  // drag resistance when pulling up past origin
@@ -1237,13 +1272,30 @@ if (!window._odyEscExpandGuard) {
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || e.defaultPrevented) return;
 
+    // Esc while a chat response is streaming means "stop generating" — the
+    // cancel keybind (keyboard-shortcuts kb.cancel) aborts the request on
+    // this same keypress. It must NOT also close/minimize the hovered or
+    // topmost modal: users watching a generation with the Brain (or any
+    // tool window) open saw it "flash and close by itself" every time they
+    // stopped a stream.
+    try {
+      if (window.chatModule?.isResponseStreaming?.()) return;
+    } catch {}
+
     // Find the single thing to close, in priority order. The first hit wins.
     // Important: if a thinking block is open we MUST handle it ourselves and
     // not fall through to closing a modal — even if its header is missing
     // (the live-stream chat rebuilds thinking DOM mid-stream so the header
     // can briefly be absent). Toggling the `expanded` class directly is the
     // fallback so ESC never bypasses the thinking block to hit a modal.
-    if (_closeHoveredWindow()) {
+    //
+    // Escape pressed while typing must never close the window the pointer
+    // happens to be hovering — the same trap as the hover-Space minimize:
+    // clear/blur the input, don't nuke an unrelated open modal.
+    const _escTarget = e.target;
+    const _escTyping = !!(_escTarget && (_escTarget.tagName === 'INPUT'
+      || _escTarget.tagName === 'TEXTAREA' || _escTarget.isContentEditable));
+    if (!_escTyping && _closeHoveredWindow()) {
       e.stopImmediatePropagation(); e.preventDefault();
       return;
     }

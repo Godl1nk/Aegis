@@ -240,6 +240,17 @@ export function hasUnclosedThinkTag(text) {
   return openCount > closeCount;
 }
 
+// llama-swap prepends a model-load banner to the response stream as ORDINARY
+// content, e.g.
+//   ─────────
+//   llama-swap loading model: GRM2.6-27B
+//   Compressing optimism into FP16 ......
+//   Done! (7.26s)
+//   ─────────
+// It is infrastructure noise, never part of the reply.
+const LLAMA_SWAP_BANNER_RE =
+  /^\s*(?:[-—–_─=*]{3,}[ \t]*\r?\n)?[ \t]*llama-swap\s+loading\s+model:[\s\S]*?Done!\s*\([^)]*\)(?:\s*[-—–_─=*]{3,}[ \t]*)?\s*/i;
+
 export function startsWithReasoningPrefix(text) {
   return /^\s*(?:thinking(?:\s+process)?\s*:|the user |user wants|we need |i need |i should |i will |i'll |i am going |let me (?:think|look|see|check|read|review|analyze|parse|figure|draft|write)|they are |the question |i can )/i.test(text || '');
 }
@@ -269,6 +280,27 @@ function normalizePlainThinking(text) {
   if (/<think/i.test(text)) return text;
 
   const trimmed = text.trimStart();
+
+  // The llama-swap load banner arrives BEFORE the model's own output, so
+  // `trimmed` started with the banner instead of a reasoning phrase — the
+  // prefix test below failed and untagged reasoning leaked into the chat body
+  // (visible as the loading text + "The user wants…" rendered as the reply).
+  // Split the banner off, detect reasoning on the real text, and fold the
+  // banner into the thinking block so it stays collapsed either way.
+  const bannerMatch = LLAMA_SWAP_BANNER_RE.exec(trimmed);
+  if (bannerMatch) {
+    const banner = bannerMatch[0].trim();
+    const rest = trimmed.slice(bannerMatch[0].length);
+    const normalizedRest = normalizePlainThinking(rest).trimStart();
+    const inner = /^<think>([\s\S]*?)<\/think>/i.exec(normalizedRest);
+    if (inner) {
+      const after = normalizedRest.slice(inner[0].length);
+      return `<think>${banner}\n\n${inner[1]}</think>${after}`;
+    }
+    // No reasoning followed — still collapse the banner out of the reply.
+    return `<think>${banner}</think>\n${normalizedRest}`;
+  }
+
   if (!startsWithReasoningPrefix(trimmed)) return text;
 
   const replyStarts = [
@@ -740,7 +772,29 @@ export function mdToHtml(src, opts) {
       } catch (e) { return match; }
     });
     // Inline math: $...$  (not preceded/followed by $ or digit, not spanning multiple lines)
+    // Two unrelated currency mentions on one line ("~$96.35 ... ($110...") were
+    // being paired as a $...$ math span, swallowing the whole sentence between
+    // them (markdown syntax and all) into KaTeX — which ignores markdown and
+    // collapses whitespace between plain-text tokens, so it rendered as
+    // "96.35**asofJuly13—recoveringfromtheMaycrash(**110" in italic math font.
+    // Real inline math is short and symbolic; three-plus consecutive English
+    // words inside the span means it's prose, not math — leave it as literal
+    // text (the dollar signs render as-is, which is what the user wrote).
+    const PROSE_NOT_MATH_RE = /[A-Za-z]{2,}(?:\s+[A-Za-z]{2,}){2,}/;
+    // The 3-word rule misses SHORT swallowed spans. Two more currency tells,
+    // both observed live ("$110.18** ✅ (already crossed $110)" and "$95 to $110"):
+    //   1. Markdown emphasis (**, __) can never appear in KaTeX, so its presence
+    //      means a currency $ got mis-paired and ate real prose.
+    //   2. The span opens with a money amount whose next token is a WORD, not a
+    //      math operator — "$95 to$" pairs "95 to". Genuine math after a number
+    //      carries an operator ("$2 + 2 = 4$") or no space ("$3x$"), so those are
+    //      left untouched.
+    const HAS_MD_EMPHASIS_RE = /\*\*|__/;
+    const CURRENCY_THEN_WORD_RE = /^\s*\d[\d,]*(?:\.\d+)?(?:\s+[A-Za-z(]|\s*$)/;
     s = s.replace(/(?<!\$)\$(?!\$)([^\$\n]+?)\$(?!\$)/g, (match, math) => {
+      if (PROSE_NOT_MATH_RE.test(math)) return match;
+      if (HAS_MD_EMPHASIS_RE.test(math)) return match;
+      if (CURRENCY_THEN_WORD_RE.test(math)) return match;
       try {
         const raw = math.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
         const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
@@ -854,22 +908,40 @@ export function mdToHtml(src, opts) {
        .replace(/^## (.*)$/gm, '<h2>$1</h2>')
        .replace(/^# (.*)$/gm, '<h1>$1</h1>');
 
-  // Ordered lists (1. 2. 3. etc.)
-  s = s.replace(/^(\d+)\. (.*)$/gm, '<oli>$2</oli>');
-  s = s.replace(/(?:^|\n)(<oli>[\s\S]*?)(?=\n(?!<oli>)|$)/g, m => `<ol>${m.trim().replace(/<\/?oli>/g, (t) => t === '<oli>' ? '<li>' : '</li>')}</ol>`);
+  // Ordered lists (1. 2. 3. etc.). Up to 3 leading spaces is still the same
+  // list level per CommonMark — models routinely indent continuation items.
+  // Keep the authored number: a list that gets interrupted (by a nested
+  // bullet block, a paragraph, …) resumes at the right value via `start`
+  // instead of silently restarting at 1.
+  s = s.replace(/^ {0,3}(\d+)\. (.*)$/gm, '<oli data-n="$1">$2</oli>');
+  // NB: blank-line-separated items are deliberately NOT merged into one <ol>.
+  // Merging would make a cut's safety depend on text that hasn't streamed in
+  // yet ("- a\n\n-" looks like a safe boundary and gets frozen; one character
+  // later "- " turns it into a list item that should have merged), breaking
+  // the streaming segmenter's freeze invariant. Carrying the authored number
+  // on each list instead is purely local, so it stays stream-safe.
+  s = s.replace(/(?:^|\n)(<oli\b[\s\S]*?)(?=\n(?!<oli\b)|$)/g, m => {
+    const first = (m.match(/<oli data-n="(\d+)"/) || [])[1];
+    const startAttr = first && first !== '1' ? ` start="${first}"` : '';
+    return `<ol${startAttr}>${m.trim()
+      .replace(/<oli data-n="\d+">/g, '<li>')
+      .replace(/<\/oli>/g, '</li>')}</ol>`;
+  });
 
   // GitHub-style task lists (- [ ] / - [x]) → checkbox items. Must run before
   // the generic unordered-list rule so the "- " prefix isn't consumed first.
   // Emits <uli> (with a class) so the unordered-list wrapper below treats it
   // as a list item. Used by plan mode: plan + progress render as a checklist.
-  s = s.replace(/^(?:- |\* )\[([ xX])\] (.*)$/gm, (_m, mark, text) => {
+  s = s.replace(/^ {0,3}(?:- |\* )\[([ xX])\] (.*)$/gm, (_m, mark, text) => {
     const done = mark.toLowerCase() === 'x';
     return `<uli class="task-item${done ? ' task-done' : ''}"><span class="task-check" aria-hidden="true"></span><span class="task-text">${text}</span></uli>`;
   });
 
   // Unordered lists. <uli> may carry attributes (task-item class), so the
   // wrapper preserves them when converting <uli ...> → <li ...>.
-  s = s.replace(/^(?:- |\* )(.*)$/gm, '<uli>$1</uli>');
+  // Same ≤3-space allowance: an indented "- " sub-bullet was falling through
+  // to the paragraph rule and rendering as literal "- text" (verified live).
+  s = s.replace(/^ {0,3}(?:- |\* )(.*)$/gm, '<uli>$1</uli>');
   s = s.replace(/(^|\n)((?:<uli\b[^>]*>[^\n]*<\/uli>(?:\n|$))+)/g, (_, prefix, block) =>
     `${prefix}<ul>${block.trim().replace(/<uli\b([^>]*)>/g, '<li$1>').replace(/<\/uli>/g, '</li>')}</ul>`);
 
@@ -879,7 +951,9 @@ export function mdToHtml(src, opts) {
     `<blockquote>${m.trim().replace(/<\/?bq>/g, (t) => t === '<bq>' ? '<p>' : '</p>')}</blockquote>`);
 
   // Paragraphs - but NOT for code block placeholders or allowed HTML
-  s = s.replace(/^(?!<h\d|<ul>|<ol>|<li|<oli>|<\/li>|<pre>|<blockquote>|<bq>|<hr>|___CODE_BLOCK_|___ALLOWED_HTML_|___MATH_BLOCK_|___MERMAID_BLOCK_)([^\n]+)$/gm, '<p>$1</p>');
+  // <ol/<ul (no closing bracket) so tags carrying attributes — <ol start="4">,
+  // <oli data-n="2"> — are still recognized as list markup, not paragraphs.
+  s = s.replace(/^(?!<h\d|<ul|<ol|<li|<\/li>|<pre>|<blockquote>|<bq>|<hr>|___CODE_BLOCK_|___ALLOWED_HTML_|___MATH_BLOCK_|___MERMAID_BLOCK_)([^\n]+)$/gm, '<p>$1</p>');
 
   // Line breaks within paragraphs
   s = s.replace(/<p>([\s\S]*?)<\/p>/g, (match, content) => {
@@ -957,16 +1031,21 @@ export function renderContent(content) {
  * Initialize any unprocessed Mermaid diagrams in a container (or whole document)
  */
 export function renderMermaid(container) {
-  if (!window.mermaid) return;
-  initMermaid();
   const target = container || document;
-  const pending = target.querySelectorAll('pre.mermaid:not([data-processed])');
-  if (pending.length === 0) return;
-  try {
-    window.mermaid.run({ nodes: pending });
-  } catch (e) {
-    console.warn('Mermaid render error:', e);
-  }
+  // Check for work BEFORE touching the library: mermaid is 3.5 MB and most
+  // sessions never contain a diagram, so the common path must cost nothing.
+  if (target.querySelectorAll('pre.mermaid:not([data-processed])').length === 0) return;
+  loadMermaid().then(() => {
+    initMermaid();
+    // Re-query: the load is async, so the set may have changed meanwhile.
+    const nodes = target.querySelectorAll('pre.mermaid:not([data-processed])');
+    if (nodes.length === 0) return;
+    try {
+      window.mermaid.run({ nodes });
+    } catch (e) {
+      console.warn('Mermaid render error:', e);
+    }
+  }).catch(e => console.warn('Mermaid load failed:', e));
 }
 
 const markdownModule = {
@@ -987,14 +1066,40 @@ const markdownModule = {
 
 export default markdownModule;
 
-// Mermaid is loaded async so it cannot delay the app shell.
+// Mermaid is fetched ON DEMAND (see renderMermaid). It used to ship as an
+// eager <script async> in index.html, but at 3.5 MB its parse/compile alone
+// measured 4546 ms with transferSize 0 (i.e. pure main-thread work, already
+// cached) and DOMContentLoaded landed at 4693 ms — mermaid effectively WAS
+// the startup cost, and on a phone that is far worse. Nothing renders a
+// diagram until a `pre.mermaid` block actually exists, so the vast majority
+// of sessions should never pay for it at all.
+const MERMAID_SRC = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js';
+let _mermaidLoader = null;
+
+function loadMermaid() {
+  if (window.mermaid) return Promise.resolve(window.mermaid);
+  if (_mermaidLoader) return _mermaidLoader;
+  _mermaidLoader = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = MERMAID_SRC;   // cdn.jsdelivr.net is already allowed by script-src
+    s.async = true;
+    s.addEventListener('load', () => resolve(window.mermaid), { once: true });
+    s.addEventListener('error', () => {
+      _mermaidLoader = null;  // let a later diagram retry
+      reject(new Error('mermaid failed to load'));
+    }, { once: true });
+    document.head.appendChild(s);
+  });
+  return _mermaidLoader;
+}
+
 function initMermaid() {
   if (!window.mermaid || window.__odysseusMermaidReady) return;
   window.mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
   window.__odysseusMermaidReady = true;
 }
+// Kept for any caller that still pokes it; safe no-op until the lib is loaded.
 window.odysseusInitMermaid = initMermaid;
-initMermaid();
 
 function _repairCdotTextNode(node) {
   if (!node || node.nodeType !== 3) return;

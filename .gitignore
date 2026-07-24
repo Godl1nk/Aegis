@@ -48,6 +48,12 @@ services/data/
 *.swo
 *~
 
+# AI agent tooling (Claude Code skills/plugins, local agent config) —
+# developer-machine tooling, not app source. Don't push it.
+.agents/
+agent/
+skills-lock.json
+
 # Test capture artifacts (browser session dumps may contain personal content)
 .playwright-mcp/
 
@@ -102,3 +108,4 @@ compound.config.json
 *.error.log
 _scratch/
 /odysseus/
+_refs/

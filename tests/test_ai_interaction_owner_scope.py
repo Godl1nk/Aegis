@@ -28,7 +28,12 @@ def test_model_listing_and_image_fallback_are_owner_scoped():
     # _resolve_model is offloaded to a worker thread (#4589) but stays owner-scoped.
     assert "asyncio.to_thread(_resolve_model, candidate, owner=owner)" in image_body
     assert "owner_filter(_img_q, ModelEndpoint, owner)" in image_body
-    assert "asyncio.to_thread(_resolve_model, model_spec, owner=owner)" in image_body
+    # Final resolution goes through the hallucinated-name fallback wrapper,
+    # still threaded and owner-scoped (the wrapper forwards owner= through).
+    assert "asyncio.to_thread(\n            _resolve_image_model_with_fallback, model_spec, owner\n        )" in image_body
+    fallback_body = _source(ai_interaction._resolve_image_model_with_fallback)
+    assert "_resolve_model(model_spec, owner=owner)" in fallback_body
+    assert "_resolve_model(fb, owner=owner)" in fallback_body
 
 
 # chat_with_model, list_models and ask_teacher moved to the registry (#3629)

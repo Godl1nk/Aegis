@@ -1,4 +1,5 @@
 import asyncio
+import re
 import sys
 import time
 import collections
@@ -7,6 +8,95 @@ from src.constants import MAX_OUTPUT_CHARS
 
 DEFAULT_BASH_TIMEOUT = 60 * 60     # 1 hour
 DEFAULT_PYTHON_TIMEOUT = 60 * 60
+
+
+# ── Foreground/background guidance (ported from Hermes terminal_tool) ──────
+# Long-lived server/watch commands should run as managed background jobs
+# (`#!bg` marker → bg_jobs), not foreground shell hacks that hold the chat
+# stream open until timeout.
+
+_SHELL_LEVEL_BACKGROUND_RE = re.compile(
+    r"(?:^|[;&|]\s*|&&\s*|\|\|\s*|\$\(\s*)(?:nohup|disown|setsid)\b", re.IGNORECASE | re.MULTILINE
+)
+_INLINE_BACKGROUND_AMP_RE = re.compile(r"\s&\s")
+_TRAILING_BACKGROUND_AMP_RE = re.compile(r"\s&\s*(?:#.*)?$")
+
+
+def _strip_quotes(command: str) -> str:
+    """Remove single- and double-quoted content so regex checks don't match inside strings.
+
+    This prevents false positives when keywords like 'nohup' or 'setsid' appear
+    in commit messages, Python -c code, echo arguments, or PR body text.
+    """
+    # Remove single-quoted strings (no escaping inside single quotes in shell)
+    result = re.sub(r"'[^']*'", "''", command)
+    # Remove double-quoted strings (handle escaped quotes)
+    result = re.sub(r'"(?:[^"\\]|\\.)*"', '""', result)
+    # Remove backtick-quoted strings
+    result = re.sub(r"`[^`]*`", "``", result)
+    return result
+
+
+_LONG_LIVED_FOREGROUND_PATTERNS = (
+    re.compile(r"\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|watch)\b", re.IGNORECASE),
+    re.compile(r"\bdocker\s+compose\s+up\b", re.IGNORECASE),
+    re.compile(r"\bnext\s+dev\b", re.IGNORECASE),
+    re.compile(r"\bvite(?:\s|$)", re.IGNORECASE),
+    re.compile(r"\bnodemon\b", re.IGNORECASE),
+    re.compile(r"\buvicorn\b", re.IGNORECASE),
+    re.compile(r"\bgunicorn\b", re.IGNORECASE),
+    re.compile(r"\bpython(?:3)?\s+-m\s+http\.server\b", re.IGNORECASE),
+)
+
+
+def _looks_like_help_or_version_command(command: str) -> bool:
+    """Return True for informational invocations that should never be blocked."""
+    normalized = " ".join(command.lower().split())
+    return (
+        " --help" in normalized
+        or normalized.endswith(" -h")
+        or " --version" in normalized
+        or normalized.endswith(" -v")
+    )
+
+
+def foreground_background_guidance(command: str) -> Optional[str]:
+    """Suggest background mode when a foreground command looks long-lived.
+
+    Prevents workflows that start a server/watch process and then stall before
+    follow-up checks or test commands run.
+    """
+    if _looks_like_help_or_version_command(command):
+        return None
+
+    # Strip quoted content so keywords inside strings/arguments don't trigger
+    # false positives (e.g., git commit -m "... setsid ...", python3 -c "os.setsid").
+    unquoted = _strip_quotes(command)
+
+    if _SHELL_LEVEL_BACKGROUND_RE.search(unquoted):
+        return (
+            "Foreground command uses shell-level background wrappers (nohup/disown/setsid). "
+            "Run it as a managed background job instead: put `#!bg` on the first line of "
+            "the bash block so Aegis can track the process, then run readiness checks "
+            "and tests in separate commands."
+        )
+
+    if _INLINE_BACKGROUND_AMP_RE.search(unquoted) or _TRAILING_BACKGROUND_AMP_RE.search(unquoted):
+        return (
+            "Foreground command uses '&' backgrounding. Put `#!bg` on the first line of "
+            "the bash block for long-lived processes, then run health checks and tests "
+            "in follow-up commands."
+        )
+
+    for pattern in _LONG_LIVED_FOREGROUND_PATTERNS:
+        if pattern.search(unquoted):
+            return (
+                "This foreground command appears to start a long-lived server/watch process. "
+                "Run it with `#!bg` on the first line of the bash block, verify readiness "
+                "(health endpoint/log signal), then execute tests in a separate command."
+            )
+
+    return None
 
 PROGRESS_INTERVAL_S = 2.0
 PROGRESS_TAIL_LINES = 12
@@ -105,6 +195,38 @@ class BashTool:
         from src.tool_execution import agent_cwd, _truncate
         progress_cb = ctx.get("progress_cb")
         _subproc_env = ctx.get("subproc_env")
+
+        # Guardrail (Hermes port): long-lived server/watch commands should run
+        # as managed background jobs, not foreground shell hacks that hold the
+        # chat stream open until timeout.
+        guidance = foreground_background_guidance(content)
+        if guidance:
+            return {"error": guidance, "exit_code": 1}
+
+        # Docker backend (Hermes port): terminal_env=docker runs the command
+        # in a security-hardened persistent per-session container instead of
+        # the host shell.
+        from src.docker_env import get_docker_settings, execute_in_docker
+        if get_docker_settings()["env_type"] == "docker":
+            res = await execute_in_docker(
+                content,
+                ctx.get("session_id") or "default",
+                timeout=DEFAULT_BASH_TIMEOUT,
+                workspace=agent_cwd(),
+            )
+            if isinstance(res, dict):
+                return res
+            stdout, stderr, rc, timed_out = res
+            if timed_out:
+                return {"error": f"bash (docker): timed out after {DEFAULT_BASH_TIMEOUT}s", "exit_code": 124,
+                        "stdout": _truncate(stdout, MAX_OUTPUT_CHARS), "stderr": _truncate(stderr, MAX_OUTPUT_CHARS)}
+            output = stdout.rstrip()
+            err = stderr.rstrip()
+            if err:
+                output = (output + "\nSTDERR: " + err).strip() if output else "STDERR: " + err
+            output = _truncate(output, MAX_OUTPUT_CHARS)
+            return {"output": output or "(no output)", "exit_code": rc or 0}
+
         proc = await asyncio.create_subprocess_shell(
             content,
             stdout=asyncio.subprocess.PIPE,

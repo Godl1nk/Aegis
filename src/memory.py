@@ -348,42 +348,6 @@ class MemoryManager:
         text_lower = text.strip().lower()
         return [entry for entry in entries if entry["text"].lower() == text_lower]
             
-    def categorize_memory_by_relevance(self, message: str, memories: list):
-        """Categorize memories by type and relevance"""
-        categories = {
-            "contacts": [],
-            "preferences": [],
-            "facts": [],
-            "tasks": []
-        }
-        
-        msg_lower = message.lower()
-        
-        for mem in memories:
-            text_lower = mem["text"].lower()
-            
-            # Contact info
-            if any(word in text_lower for word in ["phone", "email", "address", "lives", "works"]):
-                if any(word in msg_lower for word in ["contact", "phone", "address", "email"]):
-                    categories["contacts"].append(mem)
-            
-            # Personal preferences
-            elif any(word in text_lower for word in ["likes", "dislikes", "prefers", "favorite"]):
-                if any(word in msg_lower for word in ["like", "prefer", "favorite", "want"]):
-                    categories["preferences"].append(mem)
-            
-            # Tasks and todos
-            elif any(word in text_lower for word in ["todo", "task", "remind", "meeting"]):
-                if any(word in msg_lower for word in ["todo", "task", "schedule", "remind"]):
-                    categories["tasks"].append(mem)
-            
-            # General facts - only if very relevant
-            else:
-                if get_text_similarity(message, mem["text"]) > 0.4:
-                    categories["facts"].append(mem)
-        
-        return categories
-
     def get_relevant_memories(self, query: str, memories: list, threshold: float = 0.05, max_items: int = 8):
         """Get memories that are relevant to the query based on text similarity and semantic keyword matching."""
         if not memories or not query.strip():
@@ -397,43 +361,44 @@ class MemoryManager:
         fact_words = ["what", "when", "where", "how", "why", "explain", "describe", "information", "know"]
         
         query_lower = query.lower()
-        
-        # Determine query type based on keywords
+        query_word_set = set(tokenize(query_lower))
+
+        # Determine query type based on keywords. Match whole tokens, not
+        # substrings — `"i" in query_lower` is true for nearly any sentence,
+        # which classified almost every query as "identity" and flooded the
+        # results with identity memories at a fixed 0.9 score.
         query_type = None
-        if any(word in query_lower for word in identity_words):
+        if query_word_set & set(identity_words):
             query_type = "identity"
-        elif any(word in query_lower for word in contact_words):
+        elif query_word_set & set(contact_words):
             query_type = "contact"
-        elif any(word in query_lower for word in preference_words):
+        elif query_word_set & set(preference_words):
             query_type = "preference"
-        elif any(word in query_lower for word in task_words):
+        elif query_word_set & set(task_words):
             query_type = "task"
-        elif any(word in query_lower for word in fact_words):
+        elif query_word_set & set(fact_words):
             query_type = "fact"
         
         relevant = []
-        identity_memories = []
-        other_memories = []
-        
-        # Separate identity memories from others
-        for memory in memories:
-            memory_text = memory["text"].lower()
-            # Check if this is an identity memory (contains name patterns or identity indicators)
-            is_identity = any([
-                re.search(r'\b[A-Z][a-z]+ [A-Z][a-z]+\b', memory["text"]),
-                any(word in memory_text for word in ["name is", "i'm", "i am", "called", "my name", "named", "call me"])
-            ])
-            if is_identity:
-                identity_memories.append(memory)
-            else:
-                other_memories.append(memory)
-        
-        # For identity queries, include all identity memories regardless of similarity
-        if query_type == "identity" and identity_memories:
-            # Give them high scores to ensure they're included first
-            for memory in identity_memories:
-                relevant.append((0.9, memory))  # High score for identity memories in identity queries
-        
+        other_memories = memories
+
+        # For identity queries, include all identity memories regardless of
+        # similarity; every other memory (and every memory on non-identity
+        # queries) goes through normal similarity scoring. Identity phrases
+        # use word boundaries — a bare substring check flagged "codename is"
+        # as "name is". The old TwoCapitalizedWords regex was dropped too: it
+        # flagged any memory mentioning "New York" or "Machine Learning".
+        if query_type == "identity":
+            _identity_re = re.compile(
+                r"\b(?:name is|i'm|i am|my name|call me|user's name|user is called)\b"
+            )
+            other_memories = []
+            for memory in memories:
+                if _identity_re.search(memory["text"].lower()):
+                    relevant.append((0.9, memory))
+                else:
+                    other_memories.append(memory)
+
         # Process other memories with similarity scoring
         for memory in other_memories:
             memory_text = memory["text"].lower()

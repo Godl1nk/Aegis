@@ -724,6 +724,7 @@ def test_color_auto_requires_terminal_and_support(monkeypatch):
     audit = load_module()
     args = audit.argparse.Namespace(format="terminal", color="auto", output=None)
 
+    monkeypatch.setattr(audit, "enable_windows_vt_mode", lambda: True)
     monkeypatch.setattr(audit.sys.stdout, "isatty", lambda: True)
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setitem(audit.os.environ, "TERM", "xterm-256color")
