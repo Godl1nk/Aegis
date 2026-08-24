@@ -882,12 +882,6 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 if is_fresh_empty:
                     continue
 
-                # Strip markdown noise to get a "real" character count
-                stripped = _re.sub(r"^#{1,6}\s+", "", content, flags=_re.MULTILINE)
-                stripped = _re.sub(r"[*_`>\-=]+", "", stripped)
-                stripped = _re.sub(r"\s+", " ", stripped).strip()
-                real_len = len(stripped)
-
                 # Detect email-scaffold stubs: "To: \nSubject: \n---\n" style
                 # bodies with nothing typed in. Stub = every meaningful line
                 # is a header label (To:/From:/Subject:/...) with no real

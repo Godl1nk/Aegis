@@ -76,7 +76,7 @@ def test_standalone_code_request_uses_direct_chat_without_document_tools():
     assert "Output the complete implementation directly now" in AGENT_LOOP
     assert 'messages[0]["content"] = _code_chat_directive' in AGENT_LOOP
     assert "if _code_chat_direct:\n            all_tool_schemas = []" in AGENT_LOOP
-    assert "not _code_chat_direct\n            and not has_doc_tool" in AGENT_LOOP
+    assert "not _code_chat_direct\n            and not _code_project_enabled\n            and not has_doc_tool" in AGENT_LOOP
     assert "if _code_chat_direct and tool_blocks:" in AGENT_LOOP
     assert "_document_block_as_chat_code" in AGENT_LOOP
     assert '"type": "doc_stream_prepare"' not in AGENT_LOOP
@@ -117,3 +117,15 @@ def test_plain_language_fence_streams_live_on_code_artifact_turns():
     assert "_plain_code_fence_streamed = True" in AGENT_LOOP
     # Fallback double-render guard.
     assert "if not _plain_code_fence_streamed:" in AGENT_LOOP
+
+
+def test_multi_file_project_uses_workspace_tools_not_document_stream():
+    assert "_code_project_enabled = bool(" in AGENT_LOOP
+    assert "MULTI-FILE CODE PROJECT" in AGENT_LOOP
+    assert '"write_file", "edit_file", "bash", "python"' in AGENT_LOOP
+    assert "and not _code_project_enabled\n            and not has_doc_tool" in AGENT_LOOP
+
+
+def test_dead_parallel_live_preview_panel_is_removed():
+    assert "live-preview-panel" not in INDEX_HTML
+    assert ".live-preview-panel" not in STYLE_CSS

@@ -4040,6 +4040,10 @@ function startOdysseusApp() {
       const hidePicker = (messageInput.value || '').replace(/\s/g, '').length >= _MODEL_PICKER_HIDE_CHARS;
       if (modelPickerWrap) {
         modelPickerWrap.classList.toggle('model-picker-autohide', hidePicker);
+        // The chips share one positioned container now — hide them together, or
+        // the effort chip stays behind after the model chip fades out.
+        const chips = modelPickerWrap.closest('.composer-chips');
+        if (chips) chips.classList.toggle('model-picker-autohide', hidePicker);
       }
     };
     window._syncModelPickerAutohide = _syncModelPickerAutohide;

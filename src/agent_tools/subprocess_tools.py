@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import re
 import sys
 import time
@@ -190,6 +191,38 @@ async def _run_subprocess_streaming(
         timed_out,
     )
 
+async def _try_docker_backend(command: str, ctx: dict, *, label: str, timeout: float):
+    """Run *command* in the session's sandbox container when terminal_env=docker.
+
+    Returns a result dict, or ``None`` when the docker backend is not selected —
+    the caller then falls through to its local runner. Shared by BashTool and
+    PythonTool so the isolation setting can't cover one tool and miss the other.
+    """
+    from src.docker_env import get_docker_settings, execute_in_docker
+    if str(get_docker_settings()["env_type"]) != "docker":
+        return None
+
+    from src.tool_execution import agent_cwd, _truncate
+    res = await execute_in_docker(
+        command,
+        ctx.get("session_id") or "default",
+        timeout=timeout,
+        workspace=agent_cwd(),
+    )
+    if isinstance(res, dict):
+        return res
+    stdout, stderr, rc, timed_out = res
+    if timed_out:
+        return {"error": f"{label} (docker): timed out after {timeout}s", "exit_code": 124,
+                "stdout": _truncate(stdout, MAX_OUTPUT_CHARS), "stderr": _truncate(stderr, MAX_OUTPUT_CHARS)}
+    output = stdout.rstrip()
+    err = stderr.rstrip()
+    if err:
+        output = (output + "\nSTDERR: " + err).strip() if output else "STDERR: " + err
+    output = _truncate(output, MAX_OUTPUT_CHARS)
+    return {"output": output or "(no output)", "exit_code": rc or 0}
+
+
 class BashTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import agent_cwd, _truncate
@@ -206,26 +239,11 @@ class BashTool:
         # Docker backend (Hermes port): terminal_env=docker runs the command
         # in a security-hardened persistent per-session container instead of
         # the host shell.
-        from src.docker_env import get_docker_settings, execute_in_docker
-        if get_docker_settings()["env_type"] == "docker":
-            res = await execute_in_docker(
-                content,
-                ctx.get("session_id") or "default",
-                timeout=DEFAULT_BASH_TIMEOUT,
-                workspace=agent_cwd(),
-            )
-            if isinstance(res, dict):
-                return res
-            stdout, stderr, rc, timed_out = res
-            if timed_out:
-                return {"error": f"bash (docker): timed out after {DEFAULT_BASH_TIMEOUT}s", "exit_code": 124,
-                        "stdout": _truncate(stdout, MAX_OUTPUT_CHARS), "stderr": _truncate(stderr, MAX_OUTPUT_CHARS)}
-            output = stdout.rstrip()
-            err = stderr.rstrip()
-            if err:
-                output = (output + "\nSTDERR: " + err).strip() if output else "STDERR: " + err
-            output = _truncate(output, MAX_OUTPUT_CHARS)
-            return {"output": output or "(no output)", "exit_code": rc or 0}
+        docker_result = await _try_docker_backend(
+            content, ctx, label="bash", timeout=DEFAULT_BASH_TIMEOUT,
+        )
+        if docker_result is not None:
+            return docker_result
 
         proc = await asyncio.create_subprocess_shell(
             content,
@@ -253,6 +271,23 @@ class PythonTool:
         from src.tool_execution import agent_cwd, _truncate
         progress_cb = ctx.get("progress_cb")
         _subproc_env = ctx.get("subproc_env")
+
+        # Same sandbox as bash under terminal_env=docker. Without this the
+        # setting isolated the shell while `python` kept running on the host —
+        # and since the approval guard is skipped for the isolated backend,
+        # `import os; os.system(...)` walked out through the gap.
+        # The source goes in base64 over stdin so no quoting/newline in the
+        # model's code can break out of the `bash -lc` wrapper.
+        docker_result = await _try_docker_backend(
+            "echo " + base64.b64encode(content.encode("utf-8")).decode("ascii")
+            + " | base64 -d | python3 -I -",
+            ctx,
+            label="python",
+            timeout=DEFAULT_PYTHON_TIMEOUT,
+        )
+        if docker_result is not None:
+            return docker_result
+
         proc = await asyncio.create_subprocess_exec(
             (sys.executable or "python"), "-I", "-c", content,
             stdout=asyncio.subprocess.PIPE,

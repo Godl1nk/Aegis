@@ -1500,13 +1500,9 @@ def setup_calendar_routes() -> APIRouter:
         text = (body.get("text") or "").strip()
         if not text:
             raise HTTPException(400, "text is required")
-        from src.user_time import (
-            clear_user_time_context,
-            current_datetime_prompt,
-            now_user_local,
-            set_user_tz_name,
-            set_user_tz_offset,
-        )
+        # set_user_tz_name / set_user_tz_offset / now_user_local already come
+        # from the module-level src.user_time import above.
+        from src.user_time import clear_user_time_context, current_datetime_prompt
 
         clear_user_time_context()
         tz_hint = (body.get("tz") or "").strip()

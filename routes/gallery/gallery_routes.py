@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from core.database import SessionLocal, GalleryImage, GalleryAlbum, ModelEndpoint
 from core.database import Session as DbSession
-from src.auth_helpers import get_current_user, owner_filter, require_privilege
+from src.auth_helpers import get_current_user, require_privilege
 from src.upload_limits import (
     read_upload_limited,
     GALLERY_UPLOAD_MAX_BYTES,
@@ -327,7 +327,6 @@ def setup_gallery_routes() -> APIRouter:
     async def gallery_rotate(request: Request, image_id: str):
         """Rotate an image by ±90° or 180°. Updates the file on disk and the
         width/height in the DB. Body: {angle: 90 | -90 | 180}."""
-        from pathlib import Path
         from PIL import Image
         from io import BytesIO
 
@@ -1460,6 +1459,13 @@ def setup_gallery_routes() -> APIRouter:
                     raise HTTPException(502, "Can't reach diffusion server")
                 except httpx.TimeoutException:
                     raise HTTPException(504, "Harmonize timed out (240s) — restart the diffusion server or lower Color match / disable Seam fix")
+        # The per-route failure detail stays SERVER-SIDE: it can carry the
+        # upstream base URL and raw response body, which
+        # test_harmonize_final_502_omits_base_and_last_err forbids returning to
+        # the client. Logging it keeps the diagnostic that was previously
+        # collected and then silently dropped.
+        if last_err:
+            logger.warning("harmonize: no img2img route succeeded (last: %s)", last_err)
         raise HTTPException(502,
             "No supported img2img route responded. "
             "Your diffusion server needs to expose one of: "
@@ -1859,7 +1865,6 @@ def setup_gallery_routes() -> APIRouter:
     async def ai_tag_image(request: Request, image_id: str):
         """Send image to vision model for auto-tagging."""
         import base64, httpx
-        from pathlib import Path
 
         user = get_current_user(request)
         db = SessionLocal()

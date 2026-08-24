@@ -39,3 +39,38 @@ def test_http_transport_routes_to_start_http_connect():
         result = asyncio.run(mgr.connect_server("id1", "n", "http", url="https://x/mcp"))
     assert result == "ROUTED"
     m.assert_called_once()
+
+
+def test_mcp_tool_call_times_out_instead_of_hanging():
+    mgr = McpManager()
+
+    class HangingSession:
+        async def call_tool(self, name, arguments):
+            await asyncio.Event().wait()
+
+    mgr._sessions["slow"] = HangingSession()
+    with patch("src.mcp_manager._MCP_TOOL_CALL_TIMEOUT_S", 0.01):
+        result = asyncio.run(mgr.call_tool("mcp__slow__wait_forever", {}))
+
+    assert result["exit_code"] == 1
+    assert "timed out" in result["error"]
+
+
+def test_builtin_mcp_reconnect_times_out_instead_of_hanging():
+    mgr = McpManager()
+    mgr._sessions["builtin_slow"] = object()
+
+    async def fail_call(*args, **kwargs):
+        raise RuntimeError("transport died")
+
+    async def hang_reconnect(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    with patch.object(mgr, "_do_call", side_effect=fail_call), \
+         patch.object(mgr, "is_builtin", return_value=True), \
+         patch.object(mgr, "_reconnect_builtin", side_effect=hang_reconnect), \
+         patch("src.mcp_manager._MCP_RECONNECT_TIMEOUT_S", 0.01):
+        result = asyncio.run(mgr.call_tool("mcp__builtin_slow__demo", {}))
+
+    assert result["exit_code"] == 1
+    assert "reconnect timed out" in result["error"]

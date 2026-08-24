@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from core.atomic_io import atomic_write_json
 from core.platform_compat import safe_chmod
 from src.secret_storage import decrypt, encrypt, is_encrypted
-from src.constants import DATA_DIR, INTEGRATIONS_FILE, SETTINGS_FILE
+from src.constants import INTEGRATIONS_FILE, SETTINGS_FILE
 
 log = logging.getLogger(__name__)
 

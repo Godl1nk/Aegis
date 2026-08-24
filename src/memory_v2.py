@@ -16,7 +16,7 @@ import os
 import time
 import uuid
 from contextlib import contextmanager
-from typing import Any, Iterable, Optional
+from typing import Iterable, Optional
 
 
 def _json_loads(value: str | None, fallback):

@@ -1128,6 +1128,31 @@ def _format_chatgpt_subscription_error(status_code: int, text: str) -> str:
     return _format_upstream_error(status_code, text, "https://chatgpt.com/backend-api/codex")
 
 
+def _note_reasoning_rejection(status: int, body: str, url: str, model: str = "") -> None:
+    """Remember an endpoint that 400s on our reasoning parameter.
+
+    `reasoning_effort` is accepted by most OpenAI-compatible gateways, so we
+    offer graded effort optimistically — but a strict OpenAI-shaped API answers
+    400 to parameters it doesn't know. Recording the rejection makes the
+    resolver fall back to the soft /no_think directive for that endpoint+model,
+    so a wrong guess costs one failed message instead of every message.
+    """
+    if status != 400 or not body:
+        return
+    low = body.lower()
+    if "reasoning_effort" not in low and "reasoning" not in low:
+        return
+    if not any(w in low for w in ("unsupported", "unrecognized", "unknown", "invalid", "not supported")):
+        return
+    try:
+        from src.reasoning_control import note_reasoning_param_rejected
+        note_reasoning_param_rejected(url, model)
+        logger.info("Endpoint %s rejected reasoning_effort for %s — falling back to the soft directive",
+                    url, model or "?")
+    except Exception:
+        pass
+
+
 def _format_upstream_error(status: int, body: bytes | str, url: str) -> str:
     """Turn an upstream HTTP error into a user-readable sentence.
 
@@ -1139,6 +1164,7 @@ def _format_upstream_error(status: int, body: bytes | str, url: str) -> str:
             body = body.decode("utf-8", errors="replace")
         except Exception:
             body = str(body)
+    _note_reasoning_rejection(status, body, url)
     provider = _provider_label(url)
     # Try to pull a message out of the body
     detail = ""
@@ -1252,6 +1278,30 @@ _THINKING_MODEL_PATTERNS = (
     "m2-reap", "gemma", "stepfun", "step-3", "step3",
     "magistral", "mistral-small", "mistral-medium",
 )
+
+def _apply_reasoning_preference(payload: dict, provider: str, model: str, url: str,
+                                messages: Optional[List[Dict]] = None) -> None:
+    """Apply the user's reasoning-effort choice for this model.
+
+    Replaces the per-provider `if` ladder that used to live at each payload
+    builder. Under the default preference ("auto") this writes exactly what
+    those branches wrote, so behaviour is unchanged until a level is picked.
+    Never let a settings/resolution fault break a chat request.
+    """
+    try:
+        from src.reasoning_control import apply_reasoning_control
+        from src.model_context import _configured_endpoint_kind
+        apply_reasoning_control(
+            payload,
+            provider=provider,
+            model=model,
+            url=url,
+            endpoint_kind=_configured_endpoint_kind(url) or "auto",
+            messages=messages,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Reasoning control skipped for %s: %s", model, exc)
+
 
 def _supports_thinking(model: str) -> bool:
     """Check if model supports structured thinking output."""
@@ -1826,6 +1876,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         target_url = _normalize_anthropic_url(url)
         h = _build_anthropic_headers(headers)
         payload = _build_anthropic_payload(model, messages_copy, temperature, max_tokens)
+        _apply_reasoning_preference(payload, provider, model, url, messages_copy)
     elif provider == "ollama":
         target_url = _normalize_ollama_url(url)
         payload = _build_ollama_payload(
@@ -1834,6 +1885,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
             top_p=top_p, top_k=top_k, min_p=min_p, repeat_penalty=repeat_penalty,
             presence_penalty=presence_penalty, frequency_penalty=frequency_penalty,
         )
+        _apply_reasoning_preference(payload, provider, model, url, messages_copy)
     else:
         target_url = _normalize_openai_chat_url(url)
         if provider == "copilot":
@@ -1862,8 +1914,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = max_tokens
         _apply_local_generation_stability(payload, target_url, model)
-        if provider == "mistral" and _supports_thinking(model):
-            payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
+        _apply_reasoning_preference(payload, provider, model, url, messages_copy)
     try:
         note_model_activity(target_url, model)
         r = httpx_post_kimi_aware(target_url, h, json=payload, timeout=timeout)
@@ -2057,6 +2108,7 @@ async def llm_call_async(
         target_url = _normalize_anthropic_url(url)
         h = _build_anthropic_headers(headers)
         payload = _build_anthropic_payload(model, messages_copy, effective_temperature, effective_max_tokens)
+        _apply_reasoning_preference(payload, provider, model, url, messages_copy)
     elif provider == "ollama":
         target_url = _normalize_ollama_url(url)
         h = {"Content-Type": "application/json"}
@@ -2068,6 +2120,7 @@ async def llm_call_async(
             top_p=top_p, top_k=top_k, min_p=min_p, repeat_penalty=repeat_penalty,
             presence_penalty=presence_penalty, frequency_penalty=frequency_penalty,
         )
+        _apply_reasoning_preference(payload, provider, model, url, messages_copy)
     else:
         target_url = _normalize_openai_chat_url(url)
         h = _provider_headers(provider, headers)
@@ -2097,11 +2150,7 @@ async def llm_call_async(
         if effective_max_tokens and effective_max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = effective_max_tokens
-        # Suppress thinking for qwen3/gemma4 on Ollama /v1 — same as stream_llm.
-        if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
-            payload["think"] = False
-        if provider == "mistral" and _supports_thinking(model):
-            payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
+        _apply_reasoning_preference(payload, provider, model, url, messages_copy)
         _apply_local_cache_affinity(payload, url, session_id)
         _apply_local_generation_stability(payload, target_url, model)
 
@@ -2309,6 +2358,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         target_url = _normalize_anthropic_url(url)
         h = _build_anthropic_headers(headers)
         payload = _build_anthropic_payload(model, messages_copy, temperature, max_tokens, stream=True, tools=tools)
+        _apply_reasoning_preference(payload, provider, model, url, messages_copy)
     elif provider == "ollama":
         target_url = _normalize_ollama_url(url)
         h = {"Content-Type": "application/json"}
@@ -2320,6 +2370,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             top_p=top_p, top_k=top_k, min_p=min_p, repeat_penalty=repeat_penalty,
             presence_penalty=presence_penalty, frequency_penalty=frequency_penalty,
         )
+        _apply_reasoning_preference(payload, provider, model, url, messages_copy)
     elif provider == "chatgpt-subscription":
         target_url = _normalize_chatgpt_subscription_url(url)
         h = _provider_headers(provider, headers)
@@ -2355,17 +2406,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             payload["tools"] = tools
         elif tool_choice_none:
             payload["tool_choice"] = "none"
-        # Mistral thinking-capable models — send reasoning_effort so Mistral
-        # activates thinking mode and returns structured reasoning_content.
-        # Effort level is configurable via ODYSSEUS_MISTRAL_REASONING_EFFORT
-        # (high / medium / low / none); default "high".
-        if provider == "mistral" and _supports_thinking(model):
-            payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
-        # For Ollama's OpenAI-compat /v1 endpoint with thinking models (qwen3,
-        # gemma4, etc.), suppress thinking so tool calls aren't swallowed inside
-        # <think> blocks. Ollama /v1 accepts "think": false as a top-level param.
-        if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
-            payload["think"] = False
+        _apply_reasoning_preference(payload, provider, model, url, messages_copy)
         _apply_local_cache_affinity(payload, url, session_id)
         _apply_local_generation_stability(payload, target_url, model)
         h = _provider_headers(provider, headers)

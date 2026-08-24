@@ -13,6 +13,11 @@ let _loading = false;
 let _startedAt = 0;
 let _elapsedTimer = null;
 let _hideProgressTimer = null;
+// Session log. Module-level, so it survives closing/reopening the window and
+// every subsequent rewrite — it is only lost on a page reload. The progress
+// banner shows the CURRENT phase and then hides; this keeps the history.
+let _log = [];
+let _loggedRunKeys = new Set();
 
 
 const ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
@@ -126,6 +131,41 @@ function _formatElapsed(ms) {
   return min ? `${min}:${String(sec).padStart(2, '0')}` : `${sec}s`;
 }
 
+function _logAppend(step, detail, state = 'info') {
+  const stamp = new Date().toLocaleTimeString([], { hour12: false });
+  _log.push({ stamp, step, detail, state });
+  _renderLog();
+}
+
+function _renderLog() {
+  const list = _modal?.querySelector('#humanize-log-list');
+  if (!list) return;
+  list.innerHTML = _log.map(e => (
+    `<div class="humanize-log-row is-${_esc(e.state)}">`
+    + `<span class="humanize-log-time">${_esc(e.stamp)}</span>`
+    + `<span class="humanize-log-step">${_esc(e.step)}</span>`
+    + `<span class="humanize-log-detail">${_esc(e.detail)}</span>`
+    + '</div>'
+  )).join('');
+  const empty = _modal?.querySelector('#humanize-log-empty');
+  if (empty) empty.hidden = _log.length > 0;
+  list.scrollTop = list.scrollHeight;
+}
+
+// Fold the server's per-job phase log into the session log. Polling re-sends
+// the whole list every 2s, so entries are keyed to stay idempotent.
+function _mergeServerLog(jobId, entries) {
+  if (!Array.isArray(entries)) return;
+  for (const e of entries) {
+    const key = `${jobId}:${e.t}:${e.step}:${e.detail}`;
+    if (_loggedRunKeys.has(key)) continue;
+    _loggedRunKeys.add(key);
+    const state = e.step === 'Error' ? 'error' : e.step === 'Complete' ? 'done' : 'info';
+    _log.push({ stamp: `+${Number(e.t).toFixed(1)}s`, step: e.step, detail: e.detail, state });
+  }
+  _renderLog();
+}
+
 function _setProgress({ visible = true, step = 'Preparing', detail = '', progress = null, state = 'running' } = {}) {
   const panel = _modal?.querySelector('#humanize-progress');
   if (!panel) return;
@@ -209,6 +249,7 @@ async function _run() {
     _resetTextareaView(output);
   }
   _startProgress('Preparing', 'Validating input and selected model');
+  _logAppend('Rewrite', `${chosen.model} · ${text.length} chars`);
   _setBusy(true);
   try { 
     _setProgress({ step: 'Submitting', detail: 'Sending rewrite job to the server', progress: 0.08 });
@@ -232,6 +273,7 @@ async function _run() {
         const statusRes = await fetch(`${API_BASE}/api/humanize/status/${data.job_id}`);
         if (!statusRes.ok) throw new Error(`HTTP ${statusRes.status}`);
         const statusData = await statusRes.json();
+        _mergeServerLog(data.job_id, statusData.log);
         _setProgress({
           step: statusData.step || 'Rewriting',
           detail: statusData.detail || 'Model is working through the rewrite',
@@ -261,6 +303,7 @@ async function _run() {
     }
   } catch (e) {
     _finishProgress('Error', e.message || 'Rewrite failed', 'error');
+    _logAppend('Failed', e.message || 'Rewrite failed', 'error');
     uiModule.showError(`Rewrite failed: ${e.message || e}`);
   } finally {
     _setBusy(false);
@@ -347,6 +390,11 @@ function _buildModal() {
         </div>
         <div class="humanize-progress-detail" id="humanize-progress-detail">Starting rewrite</div>
       </div>
+      <details class="humanize-log" id="humanize-log">
+        <summary>Log <span class="humanize-log-hint">— kept until you reload the page</span></summary>
+        <div class="humanize-log-list" id="humanize-log-list"></div>
+        <div class="humanize-log-empty" id="humanize-log-empty">Nothing logged yet.</div>
+      </details>
       <div class="humanize-body">
         <label class="humanize-pane">
           <span>Paste text</span>
@@ -393,6 +441,9 @@ function _buildModal() {
     }
   }, true);
   _syncFieldsFromState();
+  // The window is rebuilt on reopen; repaint the accumulated log into it so
+  // closing and reopening doesn't look like the history was lost.
+  _renderLog();
   _loadModels(_modal.querySelector('#humanize-model-select'));
   return _modal;
 }
@@ -403,6 +454,7 @@ export function open() {
   _modal.style.display = 'flex';
   document.getElementById('tool-humanize-btn')?.classList.add('active');
   _syncFieldsFromState();
+  _renderLog();
   setTimeout(() => _modal?.querySelector('#humanize-input')?.focus(), 50);
 }
 

@@ -335,6 +335,89 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       lower.includes('image_gen');
   }
 
+  function _renderApprovalCard(json, host) {
+    const approvalId = String((json && json.approval_id) || '');
+    if (!approvalId || !host) return null;
+
+    const existing = Array.from(document.querySelectorAll('.approval-card'))
+      .find(card => card.dataset.approvalId === approvalId);
+    if (existing) {
+      if (existing.parentNode !== host) host.appendChild(existing);
+      return existing;
+    }
+
+    const card = document.createElement('div');
+    card.className = 'approval-card';
+    card.dataset.approvalId = approvalId;
+
+    const title = document.createElement('div');
+    title.className = 'approval-title';
+    title.textContent = 'Dangerous command - approval required';
+    card.appendChild(title);
+
+    const description = document.createElement('div');
+    description.className = 'approval-desc';
+    description.textContent = json.description || '';
+    card.appendChild(description);
+
+    const command = document.createElement('pre');
+    command.className = 'approval-cmd';
+    command.textContent = json.command || '';
+    card.appendChild(command);
+
+    const actions = document.createElement('div');
+    actions.className = 'approval-actions';
+    const choices = [
+      ['once', 'Allow once', ''],
+      ['session', 'Allow this chat', ''],
+      ['always', 'Always allow', ''],
+      ['deny', 'Deny', 'danger'],
+    ];
+    for (const [choice, label, className] of choices) {
+      const button = document.createElement('button');
+      button.className = `approval-btn${className ? ' ' + className : ''}`;
+      button.dataset.choice = choice;
+      button.textContent = label;
+      actions.appendChild(button);
+    }
+    card.appendChild(actions);
+
+    const error = document.createElement('div');
+    error.className = 'approval-error';
+    card.appendChild(error);
+
+    actions.querySelectorAll('.approval-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        actions.querySelectorAll('.approval-btn').forEach(b => { b.disabled = true; });
+        error.textContent = '';
+        const choice = btn.dataset.choice;
+        try {
+          const res = await fetch(`/api/approvals/${encodeURIComponent(approvalId)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ choice }),
+          });
+          if (!res.ok) {
+            let detail = '';
+            try { detail = (await res.json()).detail || ''; } catch (_) {}
+            throw new Error(detail || `HTTP ${res.status}`);
+          }
+          card.classList.add('resolved');
+          title.textContent = choice === 'deny'
+            ? 'Denied'
+            : 'Approved' + (choice === 'always' ? ' (always)' : choice === 'session' ? ' (this chat)' : '');
+        } catch (e) {
+          error.textContent = e && e.message ? e.message : 'Could not submit approval.';
+          actions.querySelectorAll('.approval-btn').forEach(b => { b.disabled = false; });
+        }
+      });
+    });
+
+    host.appendChild(card);
+    uiModule.scrollHistory();
+    return card;
+  }
+
   function _imagePayloadFromToolOutput(json) {
     if (!json) return null;
     const out = String(json.output || '');
@@ -2677,7 +2760,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (currentHolder && json.id) currentHolder.dataset.dbId = json.id;
 
               } else if (json.type === 'tool_start') {
-                if (_isBg) continue;
+                if (_isBg || _backgroundStreams.has(streamSessionId)) continue;
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
                 // Force-close thinking if still open — tools are real content, not thinking
@@ -2777,6 +2860,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 const toolIcon = _toolIcons[json.tool.toLowerCase()] || '\u25B6';
                 const node = document.createElement('div')
                 node.className = 'agent-thread-node running';
+                node.dataset.tool = String(json.tool || '');
                 const cmdHtml = cmd ? `<pre class="agent-thread-cmd">${esc(cmd)}</pre>` : '';
                 node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${toolIcon}</span><span class="agent-thread-tool">${esc(toolLabel)}</span><span class="agent-thread-wave">▁▂▃</span></div><div class="agent-thread-content">${cmdHtml}</div>`;
                 // Expand/collapse via delegated click handler (init at module bottom).
@@ -2843,48 +2927,30 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // bash guard is blocked server-side waiting for a decision.
                 // Render an inline approve/deny card on the running tool
                 // bubble; the choice POSTs to /api/approvals/<id>.
-                if (_isBg) continue;
+                const bgApproval = _backgroundStreams.get(streamSessionId);
+                if (bgApproval) {
+                  // Once a stream has detached, its original DOM references are
+                  // stale even if the user has already switched back. Save the
+                  // request for checkBackgroundStream() to render in the live chat.
+                  bgApproval.pendingApproval = json;
+                  continue;
+                }
+                if (_isBg || _backgroundStreams.has(streamSessionId)) continue;
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
                 const host = (currentToolBubble && currentToolBubble.querySelector('.agent-thread-content')) || currentToolBubble || document.getElementById('chat-history');
-                if (host) {
-                  const card = document.createElement('div');
-                  card.className = 'approval-card';
-                  card.innerHTML =
-                    `<div class="approval-title">⚠️ Dangerous command — approval required</div>` +
-                    `<div class="approval-desc">${esc(json.description || '')}</div>` +
-                    `<pre class="approval-cmd">${esc(json.command || '')}</pre>` +
-                    `<div class="approval-actions">` +
-                    `<button class="approval-btn" data-choice="once">Allow once</button>` +
-                    `<button class="approval-btn" data-choice="session">Allow this chat</button>` +
-                    `<button class="approval-btn" data-choice="always">Always allow</button>` +
-                    `<button class="approval-btn danger" data-choice="deny">Deny</button>` +
-                    `</div>`;
-                  card.querySelectorAll('.approval-btn').forEach(btn => {
-                    btn.addEventListener('click', async () => {
-                      card.querySelectorAll('.approval-btn').forEach(b => { b.disabled = true; });
-                      const choice = btn.dataset.choice;
-                      try {
-                        const res = await fetch(`/api/approvals/${encodeURIComponent(json.approval_id)}`, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ choice }),
-                        });
-                        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                        card.classList.add('resolved');
-                        card.querySelector('.approval-title').textContent =
-                          choice === 'deny' ? '✖ Denied' : '✔ Approved' + (choice === 'always' ? ' (always)' : choice === 'session' ? ' (this chat)' : '');
-                      } catch (e) {
-                        card.querySelectorAll('.approval-btn').forEach(b => { b.disabled = false; });
-                      }
-                    });
-                  });
-                  host.appendChild(card);
-                  uiModule.scrollHistory();
-                }
+                _renderApprovalCard(json, host);
 
               } else if (json.type === 'tool_output') {
+                const bgToolOutput = _backgroundStreams.get(streamSessionId);
+                if (bgToolOutput) {
+                  bgToolOutput.pendingApproval = null;
+                  continue;
+                }
                 if (_isBg) continue;
+                if (currentToolBubble && currentToolBubble.dataset.tool !== String(json.tool || '')) {
+                  currentToolBubble = null;
+                }
                 // --- Update the current thread node ---
                 if (currentToolBubble) {
                   // Stop wave animation + the per-second cooking ticker
@@ -3085,16 +3151,27 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // reload renderer builds the same button from the persisted
                 // tool_event, so it also survives a full page reload.
                 if (json.doc_id && !_docBtnAddedThisTurn.has(json.doc_id)) {
-                  const _nodes = document.querySelectorAll('.agent-thread-node');
-                  const _lastNode = _nodes[_nodes.length - 1];
-                  if (_lastNode) {
+                  // Scope to THIS message: a document-wide query attaches the
+                  // button to whatever thread node happens to be last in the
+                  // whole history, which can belong to an earlier turn.
+                  const _scope = roundHolder || holder;
+                  const _nodes = _scope ? _scope.querySelectorAll('.agent-thread-node') : [];
+                  // Fall back to the bubble body when the turn rendered no tool
+                  // thread at all (e.g. the whole reply went into the document,
+                  // leaving the bubble with just a thinking box). Without this
+                  // the button was silently dropped and a closed document had
+                  // no way back short of the Library.
+                  const _target = _nodes[_nodes.length - 1]
+                    || (_scope && _scope.querySelector('.body'))
+                    || _scope;
+                  if (_target) {
                     _docBtnAddedThisTurn.add(json.doc_id);
                     const _a = document.createElement('a');
                     _a.className = 'agent-doc-open-btn';
                     _a.href = `#document-${json.doc_id}`;
                     _a.title = 'Open in the document editor';
                     _a.textContent = `Open ${json.title || 'document'}`;
-                    _lastNode.appendChild(_a);
+                    _target.appendChild(_a);
                   }
                 }
 
@@ -3125,6 +3202,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // survives the turn-end thread re-render (see ev.image_choice).
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
+                // No generic tool_start node is emitted while waiting for this
+                // choice. Do not let the following bookkeeping tool_output
+                // overwrite the previous tool's completed card.
+                currentToolBubble = null;
                 chatRenderer.renderImageChoiceCard(json, { sessionId: streamSessionId });
 
               } else if (json.type === 'plan_update') {
@@ -3135,7 +3216,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (_pu) _setStoredPlan(_pu);
 
               } else if (json.type === 'agent_step') {
-                if (_isBg) continue;
+                if (_isBg || _backgroundStreams.has(streamSessionId)) continue;
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
                 _renderStream();
@@ -3289,9 +3370,12 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         // Continue that resumes exactly where it left off — reuses the same
         // resume mechanism as the user-stop "[Message interrupted]" button.
         try {
-          const _usedTools = holder.querySelector('.agent-thread-node');
+          const _usedTools = !!(lastToolThread && lastToolThread.isConnected);
+          const _stallHost = _usedTools
+            ? lastToolThread
+            : ((roundHolder && roundHolder.querySelector('.body')) || holder.querySelector('.body') || holder);
           const _proseLen = (accumulated || '').replace(/<[^>]*>/g, '').trim().length;
-          if (_usedTools && _proseLen < 24 && !holder.querySelector('.agent-continue-btn')) {
+          if (_usedTools && _proseLen < 24 && !_stallHost.querySelector('.agent-continue-btn')) {
             const _stall = document.createElement('div');
             _stall.className = 'stopped-indicator';
             const _lbl = document.createElement('span');
@@ -3312,7 +3396,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               }
             });
             _stall.appendChild(_cont);
-            (holder.querySelector('.body') || holder).appendChild(_stall);
+            _stallHost.appendChild(_stall);
           }
         } catch (_) {}
 
@@ -4203,7 +4287,17 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (docFenceOpened && !dt.trim()) {
         _showDocumentWritingStatus(contentDiv);
       } else {
-        contentDiv.innerHTML = markdownModule.mdToHtml(markdownModule.squashOutsideCode(dt));
+        // Incremental render, same as the primary send path. This used to assign
+        // contentDiv.innerHTML with a fresh full-document markdown parse on EVERY
+        // token: O(N) work per token, so O(N^2) over a reply, plus a full DOM
+        // teardown and re-highlight each time. On a long answer the tab locked up.
+        // The renderer freezes finalized blocks and re-renders only the live tail.
+        const renderer = contentDiv._streamRenderer ||
+          (contentDiv._streamRenderer = createStreamRenderer(contentDiv, {
+            render: (t) => markdownModule.mdToHtml(markdownModule.squashOutsideCode(t)),
+            hljs: window.hljs,
+          }));
+        renderer.update(dt);
       }
       uiModule.scrollHistory();
     };
@@ -4243,10 +4337,25 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             renderDelta();
           } else if (json.type === 'doc_stream_open') {
             rich = true;
-            if (documentModule) documentModule.streamDocOpen(json.title || '', json.lang || '');
+            if (documentModule) documentModule.streamDocOpen(json.title || '', json.language || json.lang || '');
           } else if (json.type === 'doc_stream_delta') {
             rich = true;
             if (documentModule) documentModule.streamDocDelta(json.content || json.delta || '');
+          } else if (json.type === 'doc_stream_phase') {
+            rich = true;
+            if (documentModule?.streamDocPhase) documentModule.streamDocPhase(json.phase);
+          } else if (json.type === 'doc_stream_cancel') {
+            rich = true;
+            if (documentModule?.streamDocCancel) documentModule.streamDocCancel(json.reason);
+          } else if (json.type === 'doc_update') {
+            rich = true;
+            if (documentModule?.handleDocUpdate) documentModule.handleDocUpdate(json);
+          } else if (json.type === 'approval_request') {
+            // A resumed run can be paused inside the command guard. Rendering
+            // this control is required to unblock the server-side tool call.
+            rich = true;
+            try { spinner.destroy(); } catch (_) {}
+            _renderApprovalCard(json, holder.querySelector('.body') || holder);
           } else if (json.type === 'metrics') {
             metricsData = json.data || metricsData;
           } else if (json.type === 'tool_start' || json.type === 'tool_output' ||
@@ -4346,6 +4455,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       box.appendChild(holder);
       uiModule.scrollHistory();
 
+      var shownApprovalId = '';
+      var initialApproval = entry.pendingApproval;
+      if (initialApproval) {
+        shownApprovalId = String(initialApproval.approval_id || '');
+        spinner.destroy();
+        _renderApprovalCard(initialApproval, bodyDiv);
+      }
+
       // Poll map until stream finishes, then reload history
       var pollId = setInterval(function() {
         if (sessionModule.getCurrentSessionId() !== sessionId) {
@@ -4356,6 +4473,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         }
         // Update doc content while polling
         var curPoll = _backgroundStreams.get(sessionId);
+        if (curPoll && curPoll.pendingApproval) {
+          var nextApprovalId = String(curPoll.pendingApproval.approval_id || '');
+          if (nextApprovalId && nextApprovalId !== shownApprovalId) {
+            shownApprovalId = nextApprovalId;
+            spinner.destroy();
+            _renderApprovalCard(curPoll.pendingApproval, bodyDiv);
+          }
+        }
         if (curPoll && curPoll._docContent && documentModule) {
           documentModule.streamDocDelta(curPoll._docContent);
         }

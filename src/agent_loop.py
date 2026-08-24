@@ -16,7 +16,6 @@ from typing import AsyncGenerator, List, Dict, Optional, Set
 from urllib.parse import urlparse
 
 from src.llm_core import (
-    stream_llm,
     stream_llm_with_fallback,
     _is_ollama_native_url,
 )
@@ -75,15 +74,6 @@ def _remember_sticky_tool(session_id: Optional[str], tool_name: str) -> None:
         _SESSION_STICKY_TOOLS.move_to_end(session_id)
     bucket.add(tool_name)
 
-
-
-def _looks_like_notes_list_request(text: str) -> bool:
-    """Whether the user is asking to see existing notes, not create one."""
-    t = (text or "").lower()
-    return bool(
-        re.search(r"\b(what|show|list|see|current|existing|all|my)\b.{0,60}\bnotes?\b", t)
-        or re.search(r"\bnotes?\b.{0,60}\b(what|show|list|see|current|existing|all|my)\b", t)
-    )
 
 
 def _note_list_summary_from_tool_output(raw: str, max_items: int = 20) -> str:
@@ -626,30 +616,6 @@ def _section_text(name: str, default: str) -> str:
     return val if isinstance(val, str) and val.strip() else default
 
 
-def _compact_tool_line(name: str, section: str) -> str:
-    """One-line fenced-tool usage hint for compact/local prompts."""
-    text = (section or "").strip()
-    if not text:
-        return f"- `{name}`"
-    if text.startswith("- "):
-        return text
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    usage = []
-    in_fence = False
-    for ln in lines:
-        if ln.startswith("```"):
-            usage.append(ln)
-            in_fence = not in_fence
-            if len(usage) >= 3:
-                break
-            continue
-        if in_fence and len(usage) < 3:
-            usage.append(ln)
-    if usage:
-        return f"- `{name}` — " + " ".join(usage)
-    return f"- `{name}` — " + lines[0][:160]
-
-
 def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool = False) -> str:
     """Build the system prompt with only the specified tools included."""
     disabled = disabled_tools or set()
@@ -746,28 +712,6 @@ def _is_ollama_openai_compat_url(endpoint_url: str) -> bool:
         return False
     path = (parsed.path or "").rstrip("/")
     return parsed.port == 11434 and (path == "/v1" or path.startswith("/v1/"))
-
-
-def _is_local_openai_compat_url(endpoint_url: str) -> bool:
-    try:
-        parsed = urlparse(endpoint_url or "")
-    except Exception:
-        return False
-    host = (parsed.hostname or "").lower()
-    path = (parsed.path or "").rstrip("/")
-    if not (path == "/v1" or path.startswith("/v1/")):
-        return False
-    if host in {"localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal"}:
-        return True
-    if host.startswith("192.168.") or host.startswith("10."):
-        return True
-    if host.startswith("172."):
-        try:
-            second = int(host.split(".")[1])
-            return 16 <= second <= 31
-        except Exception:
-            return False
-    return False
 
 
 def _endpoint_lookup_keys(endpoint_url: str) -> List[str]:
@@ -1105,17 +1049,25 @@ def _assistant_requested_followup(messages: List[Dict]) -> bool:
 
 
 _CODE_ARTIFACT_ACTION_RE = re.compile(
-    r"\b(?:build|create|generate|write|make|implement|develop|scaffold|code)\b",
+    r"\b(?:build|create|generate|write|make|implement|develop|scaffold|set\s*up|code)\b",
     re.IGNORECASE,
 )
 _CODE_ARTIFACT_NOUN_RE = re.compile(
     r"\b(?:code|script|program|app|application|website|web\s*page|component|"
-    r"game|demo|prototype|single[- ]file|html|css|javascript|typescript|"
+    r"game|demo|prototype|single[- ]file|multi[- ]file|repo(?:sitory)?|codebase|"
+    r"html|css|javascript|typescript|"
     r"python|java|rust|golang|react|vue|svelte)\b",
     re.IGNORECASE,
 )
 _CODE_ARTIFACT_CONCEPT_RE = re.compile(
     r"^\s*(?:how|why|what|when|where|explain|describe|compare|review)\b",
+    re.IGNORECASE,
+)
+_CODE_PROJECT_RE = re.compile(
+    r"\b(?:multi[- ]file|multiple files?|separate files?|repo(?:sitory)?|codebase|workspace)\b|"
+    r"\b(?:scaffold|set up)\b[^.\n]{0,40}\b(?:project|app|repo(?:sitory)?)\b|"
+    r"\b(?:react|vue|svelte|next(?:\.js)?|node|python|rust|go|java)\s+project\b|"
+    r"\bproject\s+(?:folder|structure|layout)\b",
     re.IGNORECASE,
 )
 
@@ -1263,6 +1215,7 @@ def _classify_code_artifact_request(text: str) -> Dict[str, object]:
             or re.search(r"\bdirectly\s+(?:here|in\s+(?:the\s+)?(?:chat|response|reply))\b", lower)
         )
     )
+    multi_file = bool(requested and not standalone and _CODE_PROJECT_RE.search(value))
     language = ""
     if requested:
         if any(token in lower for token in ("html", "web page", "website", "browser")):
@@ -1283,6 +1236,7 @@ def _classify_code_artifact_request(text: str) -> Dict[str, object]:
     return {
         "requested": requested,
         "standalone": standalone,
+        "multi_file": multi_file,
         "language": language,
         "title": f"Generating {label}",
     }
@@ -1409,9 +1363,15 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     )
     if has(r"\b(documents?|docs?|draft|compose|poem|story|essay|outline|letter|edit|rewrite|proofread|suggest|feedback|review this|make a file)\b"):
         domains.add("documents")
-    if code_artifact["requested"]:
+    if code_artifact["requested"] and code_artifact["multi_file"]:
+        domains.add("files")
+    elif code_artifact["requested"]:
         domains.add("documents")
-    if "notes_calendar_tasks" not in domains and has(r"\bwrite\b"):
+    if (
+        not code_artifact["multi_file"]
+        and "notes_calendar_tasks" not in domains
+        and has(r"\bwrite\b")
+    ):
         domains.add("documents")
     if has(r"\b(search|web|google|look up|latest|news|current|weather|forecast|stock price|price of|website|url|https?://|www\.)\b"):
         domains.add("web")
@@ -2997,6 +2957,10 @@ async def stream_agent_loop(
     _needs_admin = _detect_admin_intent(messages)
     _last_user = _extract_last_user_message(messages)
     _code_artifact = _classify_code_artifact_request(_last_user)
+    if _code_artifact["multi_file"]:
+        disabled_tools.update({
+            "create_document", "update_document", "edit_document", "suggest_document",
+        })
     _ody_qwen_finetune_model = (model or "").lower().startswith("odysseus-qwen3")
     _ody_memory_identity_turn = _looks_like_memory_identity_turn(_last_user)
     _intent = _classify_agent_request(messages, _last_user)
@@ -3315,6 +3279,17 @@ async def stream_agent_loop(
                 "create_document", "update_document", "edit_document",
                 "suggest_document", "write_file", "edit_file", "bash", "python",
             })
+        elif _code_artifact["multi_file"]:
+            # A project/repository belongs on disk as separate files. Reusing
+            # the document-artifact path here collapses every project into one
+            # editor document and makes imports/assets impossible to preserve.
+            _relevant_tools.difference_update({
+                "create_document", "update_document", "edit_document", "suggest_document",
+            })
+            _relevant_tools.update({
+                "get_workspace", "ls", "glob", "grep", "read_file",
+                "write_file", "edit_file", "bash", "python",
+            })
         elif "create_document" not in disabled_tools:
             # Keep create_document available even when a document is open: the
             # user may want a genuinely NEW artifact. edit_document/update_document
@@ -3523,22 +3498,29 @@ async def stream_agent_loop(
         and not guide_only
         and not plan_mode
     )
+    _code_project_enabled = bool(
+        _code_artifact["requested"]
+        and _code_artifact["multi_file"]
+        and not guide_only
+        and not plan_mode
+    )
     _code_stream_enabled = bool(
         _code_artifact["requested"]
         and not _code_artifact["standalone"]
+        and not _code_artifact["multi_file"]
         and not guide_only
         and not plan_mode
         and "create_document" not in disabled_tools
     )
     messages, mcp_schemas = _build_system_prompt(
-        messages, model, None if _code_chat_direct else _prompt_active_document, mcp_mgr, disabled_tools,
+        messages, model, None if (_code_chat_direct or _code_project_enabled) else _prompt_active_document, mcp_mgr, disabled_tools,
         needs_admin=_needs_admin, relevant_tools=_relevant_tools,
         mcp_disabled_map=_mcp_disabled_map,
         compact=_compact_agent_prompt,
         owner=owner,
         suppress_local_context=guide_only,
         suppress_skills=_low_signal_turn,
-        active_email=None if _code_chat_direct else active_email,
+        active_email=None if (_code_chat_direct or _code_project_enabled) else active_email,
     )
     if _code_chat_direct:
         _tool_language = str(_code_artifact["language"] or "text")
@@ -3555,6 +3537,29 @@ async def stream_agent_loop(
             messages[0]["content"] = _code_chat_directive
         else:
             messages.insert(0, {"role": "system", "content": _code_chat_directive})
+    elif _code_project_enabled:
+        _workspace_instruction = (
+            "An active workspace is set. Use relative paths inside it."
+            if workspace
+            else (
+                "No workspace is set. Call `ls` with no path to learn the default "
+                "writable root, then use that absolute root in every file path and "
+                "create one project subfolder there."
+            )
+        )
+        _code_project_directive = (
+            "## MULTI-FILE CODE PROJECT\n"
+            "Build the requested project on disk as separate files. Do not call "
+            "create_document and do not collapse the project into one chat code block. "
+            "Use `write_file` for new files, `edit_file` for focused changes, and "
+            "the navigation tools to inspect what exists. "
+            f"{_workspace_instruction} Start with the first concrete tool call; "
+            "after writing, run only the smallest relevant verification."
+        )
+        if messages and messages[0].get("role") == "system":
+            messages[0]["content"] += "\n\n" + _code_project_directive
+        else:
+            messages.insert(0, {"role": "system", "content": _code_project_directive})
     elif _code_stream_enabled:
         _tool_language = str(_code_artifact["language"] or "text")
         _code_tool_directive = (
@@ -4392,6 +4397,7 @@ async def stream_agent_loop(
             yield f'data: {json.dumps({"type": "doc_stream_phase", "phase": "generating"})}\n\n'
         if (
             not _code_chat_direct
+            and not _code_project_enabled
             and not has_doc_tool
             and not _auto_doc_from_chat
             and session_id
@@ -4625,11 +4631,16 @@ async def stream_agent_loop(
                     f"```{_tool_language} fenced code block."
                     if _code_chat_direct
                     else (
+                        " For this multi-file project, call write_file now for the "
+                        "first real project file; do not call create_document."
+                        if _code_project_enabled
+                        else (
                         " For this code artifact, emit a create_document tool call now. "
                         "If fenced tools are required, use exactly: "
                         f"```create_document\\nTitle\\n{_tool_language}\\n<complete code>\\n```."
                         if _code_artifact["requested"]
                         else ""
+                        )
                     )
                 )
                 messages.append({
@@ -4888,36 +4899,47 @@ async def stream_agent_loop(
                         await _progress_q.put(None)
 
                 _tool_task = asyncio.create_task(_run_tool())
-                # Drain progress events as they arrive — block until the
-                # next event OR the tool finishes (sentinel = None).
-                # Send periodic heartbeats to prevent connection timeouts.
-                while True:
-                    try:
-                        evt = await asyncio.wait_for(_progress_q.get(), timeout=_TOOL_PROGRESS_TIMEOUT)
-                    except asyncio.TimeoutError:
-                        yield ": heartbeat\n\n"
-                        continue
-                    if evt is None:
-                        break
-                    if "approval_request" in evt:
-                        # Dangerous-command approval gate (src.command_approval):
-                        # surface as its own SSE event so the UI renders the
-                        # approve/deny dialog instead of a progress tail.
-                        yield (
-                            f'data: {json.dumps({"type": "approval_request", "tool": block.tool_type, "round": round_num, **evt["approval_request"]})}\n\n'
-                        )
-                        continue
-                    yield (
-                        f'data: {json.dumps({"type": "tool_progress", "tool": block.tool_type, "round": round_num, **evt})}\n\n'
-                    )
                 try:
-                    desc, result = await _tool_task
-                except Exception as _tool_exc:
-                    # A tool crash must degrade to an error result the model can
-                    # see and react to — not kill the SSE generator mid-turn.
-                    logger.exception("Tool %s raised unexpectedly", block.tool_type)
-                    desc = f"{block.tool_type}: ERROR"
-                    result = {"error": f"{block.tool_type}: {_tool_exc}", "exit_code": 1}
+                    # Drain progress events as they arrive — block until the
+                    # next event OR the tool finishes (sentinel = None).
+                    # Send periodic heartbeats to prevent connection timeouts.
+                    while True:
+                        try:
+                            evt = await asyncio.wait_for(_progress_q.get(), timeout=_TOOL_PROGRESS_TIMEOUT)
+                        except asyncio.TimeoutError:
+                            yield ": heartbeat\n\n"
+                            continue
+                        if evt is None:
+                            break
+                        if "approval_request" in evt:
+                            # Dangerous-command approval gate (src.command_approval):
+                            # surface as its own SSE event so the UI renders the
+                            # approve/deny dialog instead of a progress tail.
+                            yield (
+                                f'data: {json.dumps({"type": "approval_request", "tool": block.tool_type, "round": round_num, **evt["approval_request"]})}\n\n'
+                            )
+                            continue
+                        yield (
+                            f'data: {json.dumps({"type": "tool_progress", "tool": block.tool_type, "round": round_num, **evt})}\n\n'
+                        )
+                    try:
+                        desc, result = await _tool_task
+                    except Exception as _tool_exc:
+                        # A tool crash must degrade to an error result the model can
+                        # see and react to — not kill the SSE generator mid-turn.
+                        logger.exception("Tool %s raised unexpectedly", block.tool_type)
+                        desc = f"{block.tool_type}: ERROR"
+                        result = {"error": f"{block.tool_type}: {_tool_exc}", "exit_code": 1}
+                finally:
+                    # execute_tool_block runs in a child task so progress can be
+                    # streamed. Closing/stopping the parent generator must not
+                    # orphan that task (or its subprocess / approval wait).
+                    if not _tool_task.done():
+                        _tool_task.cancel()
+                    try:
+                        await _tool_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
 
             # A skill the model just loaded can prescribe tools that weren't
             # RAG-selected this turn (declared via requires_toolsets in its

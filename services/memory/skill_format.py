@@ -221,12 +221,14 @@ _HEADING_TO_KEY = {
     "steps": "procedure",
     "pitfalls": "pitfalls",
     "verification": "verification",
+    "notes": "body_extra",
 }
 _KEY_TO_HEADING = {
     "when_to_use": "When to Use",
     "procedure": "Procedure",
     "pitfalls": "Pitfalls",
     "verification": "Verification",
+    "body_extra": "Notes",
 }
 
 
@@ -259,7 +261,7 @@ def parse_body(body: str) -> Dict[str, Any]:
 
     for key, lines in sections:
         text = "\n".join(lines).strip("\n")
-        if key is None:
+        if key is None or key == "body_extra":
             extras = text.strip()
             if extras:
                 out["body_extra"] = (out["body_extra"] + "\n\n" + extras).strip()
@@ -307,7 +309,13 @@ def emit_body(sections: Dict[str, Any]) -> str:
         parts.append(f"## {heading}\n\n{body}")
     extra = (sections.get("body_extra") or "").strip()
     if extra:
-        parts.append(extra)
+        # Under its own heading, not as bare trailing prose. parse_body only
+        # splits on `##`, so unheaded text after a section was re-read as part
+        # of THAT section — `_parse_list_lines` glued it onto the last bullet
+        # and body_extra came back empty. Every save round-trips (read → edit →
+        # write), so the prose was destroyed on the first edit of any skill
+        # that had both a Verification/Pitfalls list and extra notes.
+        parts.append(f"## {_KEY_TO_HEADING['body_extra']}\n\n{extra}")
     return "\n\n".join(parts) + ("\n" if parts else "")
 
 

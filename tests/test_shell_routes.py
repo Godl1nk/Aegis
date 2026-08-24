@@ -29,6 +29,8 @@ from routes.shell_routes import (
     DOCKER_IN_CONTAINER_HINT,
 )
 
+_WINDOWS = os.name == "nt"
+
 
 def test_shell_routes_import_without_posix_pty_modules(monkeypatch):
     """Native Windows has no fcntl/termios; importing routes must still work."""
@@ -174,6 +176,9 @@ class TestRunningInContainer:
 class TestAppleSiliconDetection:
     """APFEL should only surface as available on native Apple Silicon Macs."""
 
+    @pytest.mark.skipif(
+        _WINDOWS, reason="IS_APPLE_SILICON is gated on IS_POSIX, always false here"
+    )
     def test_reports_true_on_macos_arm64(self, monkeypatch):
         import core.platform_compat as platform_compat
 
@@ -290,6 +295,7 @@ class TestHostDockerAccess:
 
         assert _host_docker_access_enabled(str(socket_path)) is False
 
+    @pytest.mark.skipif(_WINDOWS, reason="socket.AF_UNIX is POSIX-only")
     @pytest.mark.parametrize("flag", [None, "false"])
     def test_socket_without_explicit_opt_in_is_disabled(
         self,
@@ -307,6 +313,7 @@ class TestHostDockerAccess:
 
             assert _host_docker_access_enabled(str(socket_path)) is False
 
+    @pytest.mark.skipif(_WINDOWS, reason="socket.AF_UNIX is POSIX-only")
     def test_explicit_opt_in_with_unix_socket_is_enabled(
         self,
         monkeypatch,
@@ -418,13 +425,24 @@ class TestPackageProbeStatus:
         user_base = tmp_path / "user-base"
         monkeypatch.setattr("site.USER_BASE", str(user_base))
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        # ntpath.expanduser("~") reads USERPROFILE, not HOME.
+        monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
         monkeypatch.setenv("PATH", "/usr/bin")
 
         _prepend_user_install_bins_to_path()
 
-        parts = os.environ["PATH"].split(os.pathsep)
-        assert str(user_base / "bin") in parts
-        assert str(tmp_path / "home" / ".local" / "bin") in parts
+        # normcase/normpath: expanduser splices the "~/.local/bin" separators
+        # through verbatim, so the raw string differs from a Path join on Windows.
+        parts = [
+            os.path.normcase(os.path.normpath(p))
+            for p in os.environ["PATH"].split(os.pathsep)
+        ]
+
+        def _norm(path):
+            return os.path.normcase(os.path.normpath(str(path)))
+
+        assert _norm(user_base / "bin") in parts
+        assert _norm(tmp_path / "home" / ".local" / "bin") in parts
 
     def test_remote_package_probe_checks_user_install_bin(self):
         script = _package_probe_script(["vllm"])

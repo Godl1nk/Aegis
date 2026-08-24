@@ -1779,6 +1779,76 @@ def setup_model_routes(model_discovery):
         require_admin(request)
         return model_discovery.discover_models()
 
+    @router.get("/models/reasoning-control")
+    def reasoning_control(
+        request: Request,
+        model: str = "",
+        base_url: str = "",
+        endpoint_id: str = "",
+    ):
+        """What reasoning control this model accepts, plus the current choice.
+
+        The UI needs this to avoid offering levels a model cannot honour: a
+        model whose only control is a boolean (`think: false`) has no low /
+        medium / high, and showing them would be a lie.
+        """
+        from src.llm_core import _detect_provider
+        from src.reasoning_control import (
+            PREFERENCES, normalize_preference, resolve_reasoning_control,
+        )
+        from src.settings import get_user_setting
+
+        owner = effective_user(request) or ""
+        endpoint_kind = "auto"
+        endpoint_id = (endpoint_id or "").strip()
+        if endpoint_id:
+            db = SessionLocal()
+            try:
+                q = db.query(ModelEndpoint).filter(
+                    ModelEndpoint.id == endpoint_id,
+                    ModelEndpoint.is_enabled == True,
+                )
+                q = owner_filter(q, ModelEndpoint, owner)
+                ep = q.first()
+                if ep is None:
+                    raise HTTPException(404, "Endpoint not found")
+                base_url = ep.base_url or base_url
+                endpoint_kind = _effective_endpoint_kind(ep, base_url)
+                provider = _detect_provider(base_url) if base_url else ""
+                if ep.provider_auth_id:
+                    from core.database import ProviderAuthSession
+                    auth = db.query(ProviderAuthSession).filter(
+                        ProviderAuthSession.id == ep.provider_auth_id,
+                    ).first()
+                    if auth and auth.provider:
+                        provider = auth.provider
+            finally:
+                db.close()
+        else:
+            provider = _detect_provider(base_url) if base_url else ""
+        control = resolve_reasoning_control(provider, model, base_url, endpoint_kind)
+        per_model = get_user_setting("reasoning_effort_by_model", owner, {}) or {}
+        chosen = None
+        if isinstance(per_model, dict):
+            chosen = next(
+                (v for k, v in per_model.items() if str(k).lower() == str(model).lower()),
+                None,
+            )
+        if chosen is None:
+            chosen = get_user_setting("reasoning_effort_default", owner, "auto")
+        preference = normalize_preference(chosen)
+        if preference not in control.supported:
+            preference = "auto"
+        return {
+            "model": model,
+            "provider": provider,
+            "endpoint_id": endpoint_id,
+            "endpoint_kind": endpoint_kind,
+            **control.to_dict(),
+            "preference": preference,
+            "choices": list(PREFERENCES),
+        }
+
     # ---- Admin: model endpoints CRUD ----
 
     @router.get("/model-endpoints")

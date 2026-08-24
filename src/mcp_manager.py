@@ -5,6 +5,7 @@ Manages connections to MCP (Model Context Protocol) tool servers.
 Each server exposes tools that are made available to the agent loop.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -14,6 +15,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from src.runtime_paths import get_app_root
 
 logger = logging.getLogger(__name__)
+
+_MCP_TOOL_CALL_TIMEOUT_S = 60.0
+_MCP_RECONNECT_TIMEOUT_S = 30.0
 
 def _format_mcp_connection_error(name: str, command: str = "", args: Optional[List[str]] = None, error: Exception = None) -> str:
     """Return a user-actionable MCP connection error message."""
@@ -448,17 +452,52 @@ class McpManager:
             return {"error": f"MCP server not connected: {server_id}", "exit_code": 1}
 
         try:
-            result = await self._do_call(session, tool_name, arguments)
+            result = await asyncio.wait_for(
+                self._do_call(session, tool_name, arguments),
+                timeout=_MCP_TOOL_CALL_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "MCP tool call timed out after %.0fs: %s",
+                _MCP_TOOL_CALL_TIMEOUT_S,
+                qualified_name,
+            )
+            return {
+                "error": f"MCP tool timed out after {_MCP_TOOL_CALL_TIMEOUT_S:.0f}s: {qualified_name}",
+                "exit_code": 1,
+            }
         except Exception as e:
             # Auto-reconnect for builtin servers whose subprocess may have died
             if self.is_builtin(server_id):
                 logger.warning(f"MCP call failed for {qualified_name}, attempting reconnect: {e}")
-                reconnected = await self._reconnect_builtin(server_id)
+                try:
+                    reconnected = await asyncio.wait_for(
+                        self._reconnect_builtin(server_id),
+                        timeout=_MCP_RECONNECT_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error("MCP reconnect timed out for %s", server_id)
+                    return {
+                        "error": f"MCP server reconnect timed out after {_MCP_RECONNECT_TIMEOUT_S:.0f}s: {server_id}",
+                        "exit_code": 1,
+                    }
                 if reconnected:
                     session = self._sessions.get(server_id)
                     if session:
                         try:
-                            result = await self._do_call(session, tool_name, arguments)
+                            result = await asyncio.wait_for(
+                                self._do_call(session, tool_name, arguments),
+                                timeout=_MCP_TOOL_CALL_TIMEOUT_S,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.error(
+                                "MCP tool call timed out after reconnect: %s",
+                                qualified_name,
+                            )
+                            return {
+                                "error": f"MCP tool timed out after {_MCP_TOOL_CALL_TIMEOUT_S:.0f}s: {qualified_name}",
+                                "exit_code": 1,
+                            }
                         except Exception as e2:
                             logger.error(f"MCP tool call failed after reconnect: {qualified_name}: {e2}")
                             return {"error": str(e2), "exit_code": 1}

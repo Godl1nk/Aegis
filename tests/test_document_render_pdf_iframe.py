@@ -204,7 +204,9 @@ async def test_render_pdf_returns_503_when_pymupdf_missing(monkeypatch, test_db)
 
     assert excinfo.value.status_code == 503
     detail = str(excinfo.value.detail)
-    assert "requirements-optional.txt" in detail
+    # PyMuPDF ships in the core requirements here (see src/pdf_forms.py), so the
+    # install hint points at requirements.txt, not requirements-optional.txt.
+    assert "requirements.txt" in detail
     assert "PyMuPDF" in detail
 
 

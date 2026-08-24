@@ -1,4 +1,4 @@
-"""Docker execution backend for the agent's bash tool.
+"""Docker execution backend for the agent's bash and python tools.
 
 Ported from Hermes (tools/environments/docker.py), scoped to the Docker-only
 backend: security-hardened persistent per-session containers (cap-drop ALL,
@@ -16,6 +16,13 @@ Settings (settings.json):
       (mirrors Hermes ``has_host_access``). When False the container is fully
       isolated and the approval layer is skipped (nothing it runs can touch
       the host).
+
+Because the approval layer is skipped for the isolated backend, every tool
+that can reach a shell must route through here when terminal_env=docker —
+otherwise it runs on the host with the guard switched off. `bash` and
+`python` both do (see agent_tools/subprocess_tools.py). `#!bg` background
+jobs have no containerized backend, so the dispatcher refuses them under
+terminal_env=docker rather than silently running them on the host.
 """
 
 from __future__ import annotations

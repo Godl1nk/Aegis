@@ -57,3 +57,28 @@ def test_multi_edit_turn_coalesces_diff_render():
     assert "_coalesceDiffBaseline == null" in body
     assert "_coalesceDiffTimer = setTimeout(" in body
     assert "enterDiffMode(base, finalContent);" in body
+
+
+def test_stream_open_resets_stale_views_before_live_writing():
+    body = _function_body("streamDocOpen")
+
+    assert "saveCurrentToMap();" in body
+    assert "_resetTransientDocViews();" in body
+    assert body.index("_resetTransientDocViews();") < body.index("_ensureDocPaneMounted();")
+
+
+def test_transient_view_reset_hides_old_preview_and_run_output():
+    body = _function_body("_resetTransientDocViews")
+
+    assert "exitHtmlPreview();" in body
+    assert "_setMarkdownPreviewActive(false, { remember: false });" in body
+    for element_id in ("doc-csv-preview", "doc-run-output", "doc-pdf-view"):
+        assert element_id in body
+
+
+def test_html_preview_refreshes_after_ai_update():
+    refresh_body = _function_body("_refreshHtmlPreviewIfVisible")
+    update_body = _function_body("handleDocUpdate")
+
+    assert "preview.srcdoc = content;" in refresh_body
+    assert "htmlPreviewWasVisible && _refreshHtmlPreviewIfVisible(docId, newContent)" in update_body

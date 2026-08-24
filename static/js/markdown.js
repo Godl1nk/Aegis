@@ -9,6 +9,14 @@ import { splitTableRow } from './markdown/tableRow.js';
 import { replaceEmojiShortcodes, hasEmojiShortcode } from './emojiShortcodes.js';
 
 var escapeHtml = uiModule.esc;
+
+// Sentinel standing in for a literal <br> between extraction and restore.
+// Not the ___ALLOWED_HTML_n___ shape on purpose — the table converter refuses
+// any block containing that prefix, and <br> has to survive inside a cell.
+// Control characters: no markdown meaning (emphasis/heading passes ignore
+// them), nothing for the HTML escape to touch, and unlike a word sentinel
+// they cannot collide with real prose.
+const LINE_BREAK_TOKEN = 'BRTOKEN';
 const CDOT_COMMAND_RE = /\\(?:cdot|cdotp)\b/g;
 const CDOT_COMMAND_ONLY_RE = /^\\(?:cdot|cdotp)\b$/;
 
@@ -734,6 +742,22 @@ export function mdToHtml(src, opts) {
     return placeholder;
   });
 
+  // <br> — a line break inside a table cell. GFM tables can't hold block-level
+  // markdown, so <br> is the ONLY way to break a line in a cell, and models use
+  // it constantly for multi-item cells. Escaping it printed a literal "<br>"
+  // through the middle of the text.
+  //
+  // It gets its OWN token rather than joining allowedHtmlBlocks: the table
+  // converter bails on any block containing ___ALLOWED_HTML_ (block-level
+  // markup like <details> would wreck row splitting), so reusing that prefix
+  // stopped the surrounding table from rendering at all — worse than the
+  // literal tag. This token is inline and safe inside a cell.
+  //
+  // Deliberately matched with no attributes: `<br onload=x>` does not match and
+  // still gets escaped, and the emitted tag is a fresh literal rather than the
+  // model's text, so nothing from the model reaches the DOM.
+  s = s.replace(/<br\s*\/?>/gi, () => LINE_BREAK_TOKEN);
+
   // Now escape everything else
   s = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -969,6 +993,11 @@ export function mdToHtml(src, opts) {
   allowedHtmlBlocks.forEach((block, index) => {
     s = s.replace(`___ALLOWED_HTML_${index}___`, block);
   });
+
+  // Restore <br>. All occurrences are identical, so one global pass.
+  if (s.includes(LINE_BREAK_TOKEN)) {
+    s = s.split(LINE_BREAK_TOKEN).join('<br>');
+  }
 
   // Restore math blocks
   mathBlocks.forEach((block, index) => {

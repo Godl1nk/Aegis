@@ -828,4 +828,9 @@ export function updateModelPicker() {
   } else {
     label.textContent = displayName;
   }
+  // The effort chip is per-model: which levels exist, and which is selected,
+  // both change with the model. Refresh it whenever this label does.
+  try {
+    if (window.effortPickerModule) window.effortPickerModule.refreshEffortPicker();
+  } catch (_) { /* never let a chip break the model picker */ }
 }

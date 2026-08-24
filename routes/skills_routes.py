@@ -668,7 +668,7 @@ def _audit_finalize_status(skills_manager, name: str, owner, verdict: str,
 def _apply_skill_md(skills_manager, name: str, md: str, owner) -> bool:
     """Parse + persist an edited SKILL.md. Returns True on success."""
     try:
-        from services.memory.skill_format import Skill, slugify
+        from services.memory.skill_format import Skill
         sk = Skill.from_markdown(md)
         # Pin the identity: the audit's fixer is now allowed to edit frontmatter
         # (tags/category/when_to_use/description), but it must NEVER rename the
@@ -1229,7 +1229,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         text = (body or {}).get("text", "")
         if not isinstance(text, str) or not text.strip():
             raise HTTPException(400, "text is required")
-        from src.settings import get_setting, save_settings, load_settings
+        from src.settings import save_settings, load_settings
         settings = load_settings()
         ov = settings.get("builtin_tool_overrides")
         if not isinstance(ov, dict):
@@ -1627,13 +1627,37 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
 
         updates = body.dict(exclude_none=True)
         if not updates:
-            return {"ok": True}
-        ok = skills_manager.update_skill(match.get("name"), updates, owner=user)
+            return {"ok": True, "name": match.get("name")}
+
+        # A changed `name` renames the skill directory on disk. Slugify here so
+        # the caller learns the real resulting id (the UI has to re-target the
+        # card, the markdown cache and every later PUT/DELETE at it), and
+        # pre-check the collision that update_skill would otherwise report as a
+        # bare False — indistinguishable from "not found" at this layer.
+        from services.memory.skill_format import slugify
+        old_name = match.get("name")
+        new_name = slugify(updates["name"] or old_name) if "name" in updates else old_name
+        if new_name != old_name:
+            clash = next(
+                (s for s in skills
+                 if (s.get("name") == new_name or s.get("id") == new_name)
+                 and s.get("name") != old_name),
+                None,
+            )
+            if clash:
+                raise HTTPException(409, f"A skill named '{new_name}' already exists")
+
+        ok = skills_manager.update_skill(old_name, updates, owner=user)
         if not ok:
+            # update_skill also returns False when the rename target directory
+            # exists on disk without a loadable SKILL.md, which the check above
+            # cannot see.
+            if new_name != old_name:
+                raise HTTPException(409, f"Could not rename to '{new_name}' — the target already exists")
             raise HTTPException(404, "Skill not found")
         if not match.get("audit_verdict"):
             _fire_skill_added(user)
-        return {"ok": True}
+        return {"ok": True, "name": new_name}
 
     @router.delete("/{skill_id}")
     async def delete_skill(request: Request, skill_id: str):

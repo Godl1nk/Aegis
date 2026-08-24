@@ -6,6 +6,7 @@ import uiModule, { autoResize, styledPrompt } from './ui.js';
 import chatRenderer from './chatRenderer.js';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js';
+import effortPickerModule, { initEffortPicker } from './effortPicker.js';
 import themeModule from './theme.js';
 import spinnerModule from './spinner.js';
 
@@ -2594,6 +2595,10 @@ function _initAllDropdowns() {
     setPendingChat: (v) => { _pendingChat = v; },
     createDirectChat,
   });
+  // Exposed on window so modelPicker can refresh the chip without importing
+  // this module back (modelPicker <- effortPicker would be a cycle).
+  window.effortPickerModule = effortPickerModule;
+  initEffortPicker();
   _initDropdownDismiss();
   _initBulkSelect();
 }

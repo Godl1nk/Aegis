@@ -4,7 +4,6 @@
 
 import logging
 import os
-import re
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException, Request
@@ -13,7 +12,6 @@ from pydantic import BaseModel
 from core.database import Document, DocumentVersion
 from core.database import Session as DbSession
 from src.auth_helpers import _auth_disabled
-from src.upload_handler import UploadHandler
 
 logger = logging.getLogger(__name__)
 

@@ -55,6 +55,8 @@ def test_npx_cache_check_detects_scoped_package_in_npx_cache(monkeypatch, tmp_pa
         raise AssertionError("cache hit should not shell out to npx")
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    # ntpath.expanduser("~") reads USERPROFILE, not HOME.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.delenv("npm_config_cache", raising=False)
     monkeypatch.setattr(builtin_mcp.asyncio, "create_subprocess_exec", unexpected_exec)
 

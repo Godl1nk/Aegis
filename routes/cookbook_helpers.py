@@ -13,7 +13,6 @@ from pathlib import Path
 from fastapi import HTTPException
 from pydantic import BaseModel
 
-from routes._validators import validate_remote_host, validate_ssh_port
 from core.platform_compat import _ssh_exec_argv
 
 logger = logging.getLogger(__name__)
@@ -238,7 +237,6 @@ def _pip_install_fallback_chain(package: str, *, python_cmd: str = "python3 -m p
     exit code is preserved (no ``| tail`` masking) and the last 5 lines of
     pip output appear in the Cookbook log on failure.
     """
-    from core.platform_compat import IS_WINDOWS
     upgrade_flag = " -U" if upgrade else ""
     # Shell-quote the package spec: an extras spec like ``llama-cpp-python[server]``
     # contains brackets that bash would treat as a glob, so it must be quoted
@@ -1136,12 +1134,6 @@ def _parse_serve_phase(snapshot: str, task_type: str = "serve") -> dict:
     return {}
 
 
-def _ssh(host, cmd, port=None):
-    """Build SSH command string with optional port."""
-    pf = f"-p {port} " if port and port != "22" else ""
-    return f"ssh {pf}{host} '{cmd}'"
-
-
 def _safe_env_prefix(ep: str | None) -> str | None:
     """Rewrite a `source <path>` env_prefix so it no-ops if the path is missing.
     Prevents `line N: <path>: No such file or directory` errors when a serve
@@ -1193,12 +1185,6 @@ def _safe_env_prefix(ep: str | None) -> str | None:
         path = "$HOME"
     path = path.replace('"', '\\"')
     return f'[ -f "{path}" ] && source "{path}" || true'
-
-
-def _ssh_ps(host, script_path, port=None):
-    """Build SSH command to run a PowerShell script on a Windows remote."""
-    pf = f"-p {port} " if port and port != "22" else ""
-    return f'ssh {pf}{host} "powershell -ExecutionPolicy Bypass -File {script_path}"'
 
 
 # Windows session dir — stored in user's temp on the remote

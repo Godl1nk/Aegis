@@ -224,7 +224,7 @@ def test_rename_research_json_case_insensitive(rename_endpoint):
 
     asyncio.run(endpoint("alice", SimpleNamespace(username="bob"), _request(tmp_path)))
 
-    assert json.loads(p.read_text())["owner"] == "bob"
+    assert json.loads(p.read_text(encoding="utf-8"))["owner"] == "bob"
 
 
 def test_rename_leaves_other_research_untouched(rename_endpoint):
@@ -239,8 +239,8 @@ def test_rename_leaves_other_research_untouched(rename_endpoint):
 
     asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path)))
 
-    assert json.loads(p_alice.read_text())["owner"] == "alice2"
-    assert json.loads(p_carol.read_text())["owner"] == "carol"
+    assert json.loads(p_alice.read_text(encoding="utf-8"))["owner"] == "alice2"
+    assert json.loads(p_carol.read_text(encoding="utf-8"))["owner"] == "carol"
 
 
 def test_rename_no_deep_research_dir_does_not_crash(rename_endpoint):
@@ -416,7 +416,7 @@ def test_rename_memory_json_case_insensitive(rename_endpoint):
 
     asyncio.run(endpoint("alice", SimpleNamespace(username="bob"), _request(tmp_path)))
 
-    assert json.loads((tmp_path / "memory.json").read_text())[0]["owner"] == "bob"
+    assert json.loads((tmp_path / "memory.json").read_text(encoding="utf-8"))[0]["owner"] == "bob"
 
 
 def test_rename_no_memory_json_does_not_crash(rename_endpoint):
@@ -566,8 +566,8 @@ def test_rename_leaves_other_skill_owners_untouched(rename_endpoint):
 
     asyncio.run(endpoint("alice", SimpleNamespace(username="alice2"), _request(tmp_path)))
 
-    assert "owner: alice2" in (tmp_path / "skills" / "general" / "alice-skill" / "SKILL.md").read_text()
-    assert "owner: carol" in (tmp_path / "skills" / "general" / "carol-skill" / "SKILL.md").read_text()
+    assert "owner: alice2" in (tmp_path / "skills" / "general" / "alice-skill" / "SKILL.md").read_text(encoding="utf-8")
+    assert "owner: carol" in (tmp_path / "skills" / "general" / "carol-skill" / "SKILL.md").read_text(encoding="utf-8")
 
 
 def test_rename_updates_usage_sidecar_keys(rename_endpoint):
@@ -735,6 +735,6 @@ def test_rejected_rename_does_not_mutate_files(monkeypatch, tmp_path):
     with pytest.raises(Exception):
         asyncio.run(endpoint("alice", SimpleNamespace(username="api"), _request(tmp_path)))
 
-    assert json.loads(rp.read_text())["owner"] == "alice", "research owner mutated after rejected rename"
-    assert json.loads(mem.read_text())[0]["owner"] == "alice", "memory owner mutated after rejected rename"
-    assert "owner: alice" in (skill_dir / "SKILL.md").read_text(), "skill owner mutated after rejected rename"
+    assert json.loads(rp.read_text(encoding="utf-8"))["owner"] == "alice", "research owner mutated after rejected rename"
+    assert json.loads(mem.read_text(encoding="utf-8"))[0]["owner"] == "alice", "memory owner mutated after rejected rename"
+    assert "owner: alice" in (skill_dir / "SKILL.md").read_text(encoding="utf-8"), "skill owner mutated after rejected rename"

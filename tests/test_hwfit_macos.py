@@ -186,6 +186,9 @@ def test_detect_system_propagates_unified_memory(monkeypatch):
     monkeypatch.setattr(hardware, "_get_available_ram_gb", lambda: 11.0)
     monkeypatch.setattr(hardware, "_get_cpu_count", lambda: 10)
     monkeypatch.setattr(hardware, "_get_cpu_name", lambda: "Apple M4")
+    # A Windows host would take the PowerShell/WMI branch instead of the
+    # generic path this test covers.
+    monkeypatch.setattr(hardware, "_detect_windows", lambda: None)
 
     s = hardware.detect_system(fresh=True)
     assert s["backend"] == "metal"

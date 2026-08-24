@@ -1208,26 +1208,41 @@ def _deny_block_result(description: str, *, timed_out: bool) -> dict:
 _pending_approvals: dict = {}
 
 
-def resolve_approval(approval_id: str, choice: str) -> bool:
+def resolve_approval(
+    approval_id: str,
+    choice: str,
+    *,
+    owner: Optional[str] = None,
+) -> bool:
     """Resolve a pending approval from the API route.
 
     choice: 'once' | 'session' | 'always' | 'deny'
-    Returns False when the approval id is unknown/expired.
+    When ``owner`` is provided, the approval must belong to that user.
+    Returns False when the approval id is unknown, expired, already resolved,
+    or owned by someone else.
     """
     if choice not in ("once", "session", "always", "deny"):
         return False
     entry = _pending_approvals.get(approval_id)
-    if entry is None:
+    if entry is None or entry.get("choice") is not None:
+        return False
+    if owner is not None and entry.get("owner") != owner:
         return False
     entry["choice"] = choice
     entry["event"].set()
     return True
 
 
-def list_pending_approvals(session_id: Optional[str] = None) -> list:
+def list_pending_approvals(
+    session_id: Optional[str] = None,
+    *,
+    owner: Optional[str] = None,
+) -> list:
     """Pending approval requests (for reconnecting clients)."""
     out = []
     for approval_id, entry in _pending_approvals.items():
+        if owner is not None and entry.get("owner") != owner:
+            continue
         data = entry.get("data") or {}
         if session_id and data.get("session_id") != session_id:
             continue
@@ -1239,6 +1254,7 @@ async def check_command_guard(
     command: str,
     *,
     session_id: str = "",
+    owner: Optional[str] = None,
     env_type: str = "local",
     has_host_access: bool = False,
     emit_event=None,
@@ -1319,6 +1335,9 @@ async def check_command_guard(
     entry = {
         "event": asyncio.Event(),
         "choice": None,
+        # Canonicalize single-user/auth-disabled requests to the same empty
+        # owner returned by require_user(), so their approval route can match.
+        "owner": owner or "",
         "data": {
             "command": command,
             "pattern_key": pattern_key,

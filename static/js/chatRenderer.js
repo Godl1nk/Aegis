@@ -2677,6 +2677,34 @@ export function addMessage(role, content, modelName, metadata) {
         }
       }
 
+      // A turn whose whole output went into a document renders no tool-thread
+      // node, so the per-node button above never gets attached and a closed
+      // document had no way back. Fall back to a bubble-level button for any
+      // doc this message created that didn't already get one.
+      {
+        const _missed = [];
+        for (const ev of toolEvents) {
+          if (!ev || !ev.doc_id) continue;
+          if (ev.status === 'error' || ev.ok === false) continue;
+          if (!/document/i.test(ev.tool || '')) continue;
+          if (_docBtnSeen.has(ev.doc_id)) continue;
+          _docBtnSeen.add(ev.doc_id);
+          _missed.push(ev);
+        }
+        const _host = lastMsgAi || lastWrap;
+        if (_missed.length && _host) {
+          const _body = _host.querySelector('.body') || _host;
+          for (const ev of _missed) {
+            const a = document.createElement('a');
+            a.className = 'agent-doc-open-btn';
+            a.href = `#document-${ev.doc_id}`;
+            a.title = 'Open in the document editor';
+            a.textContent = `Open ${ev.doc_title || 'document'}`;
+            _body.appendChild(a);
+          }
+        }
+      }
+
       const firstWrap = lastMsgAi || lastWrap;
       if (firstWrap && firstWrap.classList.contains('msg-ai')) {
         if (metadata?.memories_used?.length) firstWrap._memoriesUsed = metadata.memories_used;

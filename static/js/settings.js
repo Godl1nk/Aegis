@@ -949,6 +949,178 @@ async function initImageSettings() {
   });
 }
 
+/* ── Thinking effort ──
+   Reasoning control is per-model: the same preference means a different wire
+   format per provider (reasoning_effort / think / chat_template_kwargs /
+   thinking object / budget). The backend resolves the mechanism; this UI only
+   has to avoid offering levels a model cannot honour — a model whose control
+   is a boolean has no low/medium/high, and showing them would be a lie. */
+async function initReasoningEffortSettings() {
+  const defSel = el('set-reasoningEffortDefault');
+  const rowsWrap = el('set-reasoningPerModel');
+  const addBtn = el('set-reasoningAddModel');
+  const msg = el('set-reasoningEffortMsg');
+  if (!defSel || !rowsWrap) return;
+
+  let overrides = {};          // { model: preference }
+  let allModels = [];
+  const modelMeta = new Map(); // model -> {endpointId, baseUrl}
+  const controlCache = new Map();
+
+  const LEVELS = [
+    { value: 'auto', label: 'Auto (provider default)' },
+    { value: 'off', label: 'Off — no thinking' },
+    { value: 'low', label: 'Low' },
+    { value: 'medium', label: 'Medium' },
+    { value: 'high', label: 'High' },
+  ];
+
+  async function controlFor(model) {
+    if (!model) return null;
+    const meta = modelMeta.get(model) || {};
+    const cacheKey = `${model}\n${meta.endpointId || ''}\n${meta.baseUrl || ''}`;
+    if (controlCache.has(cacheKey)) return controlCache.get(cacheKey);
+    let data = null;
+    try {
+      const res = await fetch(
+        `/api/models/reasoning-control?model=${encodeURIComponent(model)}`
+        + `&base_url=${encodeURIComponent(meta.baseUrl || '')}`
+        + `&endpoint_id=${encodeURIComponent(meta.endpointId || '')}`,
+        { credentials: 'same-origin' },
+      );
+      if (res.ok) data = await res.json();
+    } catch (e) { /* offline: fall back to offering everything */ }
+    controlCache.set(cacheKey, data);
+    return data;
+  }
+
+  async function save() {
+    try {
+      const res = await fetch('/api/auth/settings', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reasoning_effort_default: defSel.value || 'auto',
+          reasoning_effort_by_model: overrides,
+        }),
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
+      setTimeout(() => { msg.textContent = ''; }, 1500);
+    } catch (e) {
+      msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)';
+    }
+  }
+
+  async function renderRows() {
+    rowsWrap.innerHTML = '';
+    for (const [model, pref] of Object.entries(overrides)) {
+      const row = document.createElement('div');
+      row.className = 'settings-fallback-row';
+
+      const modelSel = document.createElement('select');
+      modelSel.className = 'settings-select';
+      const opts = allModels.includes(model) ? allModels : [model].concat(allModels);
+      opts.forEach(m => {
+        const o = document.createElement('option');
+        o.value = m; o.textContent = m; if (m === model) o.selected = true;
+        modelSel.appendChild(o);
+      });
+
+      const levelSel = document.createElement('select');
+      levelSel.className = 'settings-select';
+      const control = await controlFor(model);
+      const supported = control && Array.isArray(control.supported) && control.supported.length
+        ? control.supported
+        : LEVELS.map(l => l.value);
+      LEVELS.forEach(l => {
+        if (!supported.includes(l.value)) return;
+        const o = document.createElement('option');
+        o.value = l.value; o.textContent = l.label;
+        if (l.value === pref) o.selected = true;
+        levelSel.appendChild(o);
+      });
+
+      const note = document.createElement('span');
+      note.className = 'settings-hint';
+      if (control && control.mechanism && !control.supports_effort) {
+        note.textContent = 'on/off only';
+        note.title = `This model's control is ${control.mechanism} — it has no graded levels.`;
+      } else if (control && !control.mechanism) {
+        note.textContent = 'no known control';
+        note.title = 'No reasoning control is known for this model; the setting will be ignored.';
+      }
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'settings-fallback-del';
+      del.textContent = '✕';
+      del.title = 'Remove override';
+
+      modelSel.addEventListener('change', async () => {
+        delete overrides[model];
+        overrides[modelSel.value] = levelSel.value || 'auto';
+        await save(); await renderRows();
+      });
+      levelSel.addEventListener('change', async () => {
+        overrides[model] = levelSel.value || 'auto';
+        await save();
+      });
+      del.addEventListener('click', async () => {
+        delete overrides[model];
+        await save(); await renderRows();
+      });
+
+      row.appendChild(modelSel);
+      row.appendChild(levelSel);
+      if (note.textContent) row.appendChild(note);
+      row.appendChild(del);
+      rowsWrap.appendChild(row);
+    }
+  }
+
+  try {
+    const modelsRes = await fetch('/api/models', { credentials: 'same-origin' });
+    const modelsData = await modelsRes.json();
+    const seen = new Set();
+    (modelsData.items || []).forEach(item => {
+      if (item.offline) return;
+      (item.models || []).forEach(mid => {
+        if (!modelMeta.has(mid)) {
+          modelMeta.set(mid, {
+            endpointId: item.endpoint_id || '',
+            baseUrl: item.url || item.base_url || '',
+          });
+        }
+        if (!seen.has(mid)) { seen.add(mid); allModels.push(mid); }
+      });
+    });
+    allModels = sortModelIds(allModels);
+  } catch (e) { console.warn('Failed to load models for thinking effort', e); }
+
+  try {
+    const res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    const settings = await res.json();
+    defSel.value = settings.reasoning_effort_default || 'auto';
+    const stored = settings.reasoning_effort_by_model;
+    overrides = (stored && typeof stored === 'object' && !Array.isArray(stored)) ? { ...stored } : {};
+    await renderRows();
+  } catch (e) { console.warn('Failed to load thinking effort settings', e); }
+
+  defSel.addEventListener('change', save);
+  if (addBtn) addBtn.addEventListener('click', async () => {
+    const next = allModels.find(m => !(m in overrides)) || '';
+    if (!next) {
+      msg.textContent = 'Every model already has an override';
+      setTimeout(() => { msg.textContent = ''; }, 2000);
+      return;
+    }
+    overrides[next] = 'auto';
+    await save();
+    await renderRows();
+  });
+}
+
 /* ── Vision ── */
 async function initVisionSettings() {
   const vlSel = el('set-vlModelSelect');
@@ -2528,6 +2700,7 @@ function initAll() {
   initUtilityModel();
   initImageSettings();
   initVisionSettings();
+  initReasoningEffortSettings();
   initTtsSettings();
   initSttSettings();
   initSearchSettings();

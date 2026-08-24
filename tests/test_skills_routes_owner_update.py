@@ -86,7 +86,8 @@ async def test_update_skill_route_passes_owner_to_manager(tmp_path):
         SkillUpdateRequest(status="published", description="alice updated"),
     )
 
-    assert result == {"ok": True}
+    # `name` echoes the resulting slug so a renaming caller can re-target.
+    assert result == {"ok": True, "name": "caveman-mode"}
     alice_after = alice_path.read_text(encoding="utf-8")
     bob_after = bob_path.read_text(encoding="utf-8")
     assert "status: published" in alice_after

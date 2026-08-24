@@ -14,7 +14,7 @@ from typing import Tuple
 from src.auth_helpers import owner_filter
 from core.platform_compat import IS_WINDOWS, find_bash
 from core.constants import internal_api_base
-from src.constants import DATA_DIR, DEEP_RESEARCH_DIR, TIDY_CALENDAR_STATE_FILE, EMAIL_URGENCY_CACHE_DIR, COOKBOOK_STATE_FILE
+from src.constants import DATA_DIR, DEEP_RESEARCH_DIR, EMAIL_URGENCY_CACHE_DIR, COOKBOOK_STATE_FILE
 from src.interactive_gate import wait_for_interactive_quiet
 
 logger = logging.getLogger(__name__)
@@ -375,110 +375,6 @@ async def action_tidy_research(owner: str, **kwargs) -> Tuple[str, bool]:
         return f"Removed {len(removed)} broken research file(s) of {len(files)}", True
     except Exception as e:
         logger.error(f"tidy_research action failed: {e}")
-        return str(e), False
-
-
-async def action_tidy_calendar(owner: str, **kwargs) -> Tuple[str, bool]:
-    """Find duplicate calendar events (same title + start time) and DELETE the dups,
-    keeping the oldest (first-seen) instance.
-
-    Incremental: remembers the newest `created_at` already scanned in
-    data/tidy_calendar_state.json. If no events have been added since then,
-    short-circuits. Otherwise only events newer than the watermark are candidates
-    for deletion, but they're checked against the FULL existing set so a new
-    duplicate of an old event still gets caught.
-    """
-    try:
-        import json
-        from pathlib import Path
-        from core.database import SessionLocal, CalendarEvent
-        from sqlalchemy import func
-
-        STATE_FILE = Path(TIDY_CALENDAR_STATE_FILE)
-        last_watermark = None
-        try:
-            if STATE_FILE.exists():
-                saved = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-                if saved.get("last_created_at"):
-                    last_watermark = datetime.fromisoformat(saved["last_created_at"])
-        except Exception:
-            last_watermark = None
-
-        db = SessionLocal()
-        try:
-            newest = db.query(func.max(CalendarEvent.created_at)).scalar()
-            db.query(CalendarEvent).count()
-
-            # Short-circuit: nothing new since last run
-            if last_watermark is not None and newest is not None and newest <= last_watermark:
-                raise TaskNoop(f"no new events since watermark {last_watermark.strftime('%Y-%m-%d %H:%M')}")
-
-            events = db.query(CalendarEvent).order_by(CalendarEvent.dtstart).all()
-            # Build full seen-set from events at or before the watermark (known-clean).
-            # Events after the watermark are candidates for deletion.
-            seen = {}
-            candidates = []
-            no_title = 0
-            for e in events:
-                title = (e.summary or "").strip()
-                if not title:
-                    no_title += 1
-                    continue
-                if last_watermark is None or (e.created_at and e.created_at <= last_watermark):
-                    # Known-clean region: first occurrence wins
-                    key = (title.lower(), e.dtstart)
-                    if key not in seen:
-                        seen[key] = e
-                    # If a dup exists in the known-clean region (first run, or imported later
-                    # with the same created_at), still remove it — fall through to candidate check.
-                    else:
-                        candidates.append(e)
-                else:
-                    candidates.append(e)
-
-            removed = []
-            for e in candidates:
-                title = (e.summary or "").strip()
-                key = (title.lower(), e.dtstart)
-                if key in seen:
-                    when = e.dtstart.strftime('%Y-%m-%d %H:%M') if e.dtstart else '?'
-                    removed.append(f"{title} @ {when}")
-                    db.delete(e)
-                else:
-                    seen[key] = e
-
-            if removed:
-                db.commit()
-
-            # Persist the new watermark (newest created_at among events that survive)
-            try:
-                STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-                if newest is not None:
-                    STATE_FILE.write_text(json.dumps({
-                        "last_created_at": newest.isoformat(),
-                        "last_run_at": datetime.utcnow().isoformat(),
-                        "scanned": len(events),
-                        "removed": len(removed),
-                    }, indent=2), encoding="utf-8")
-            except Exception as se:
-                logger.warning(f"tidy_calendar watermark save failed: {se}")
-
-            new_since = len(candidates)
-            parts = [f"Scanned {len(events)} event(s), {new_since} new since last run"]
-            if removed:
-                preview = "; ".join(removed[:5])
-                if len(removed) > 5:
-                    preview += f" (+{len(removed) - 5} more)"
-                parts.append(f"removed {len(removed)} duplicate(s): {preview}")
-            if no_title:
-                parts.append(f"{no_title} untitled (kept)")
-            if not removed and not no_title:
-                parts.append("no duplicates")
-            return " · ".join(parts), True
-        finally:
-            db.close()
-    except Exception as e:
-        logger.error(f"tidy_calendar action failed: {e}")
         return str(e), False
 
 
@@ -1638,7 +1534,6 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
     """
     try:
         import json as _json
-        import time as _time
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
         from pathlib import Path as _P
         from core.database import SessionLocal as _SL, Note as _N
@@ -1794,10 +1689,8 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
         import json as _json
         import email as _email_mod
         import asyncio as _aio
-        import os as _os
         import re as _re
         import time as _time
-        import httpx
         from datetime import datetime as _dt, timedelta as _td
         from pathlib import Path as _P
         from core.database import SessionLocal as _SL, EmailAccount as _EA

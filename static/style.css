@@ -2398,6 +2398,27 @@ body.bg-pattern-sparkles {
       width: 100%;
       position: relative;
     }
+    /* The model + thinking-effort chips share the top-right corner. The
+       positioning moved from .model-picker-wrap to this container when the
+       effort chip was added; the wrap keeps position:relative so its menu
+       still anchors to it. */
+    .chat-input-top > .composer-chips {
+      position: absolute;
+      top: 0;
+      right: 0;
+      z-index: 250;
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      transform-origin: top right;
+      transition: opacity 0.22s ease, transform 0.22s ease;
+      will-change: opacity, transform;
+    }
+    .chat-input-top > .composer-chips.model-picker-autohide {
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(-4px) scale(0.96);
+    }
     .chat-input-top > .model-picker-wrap {
       position: absolute;
       top: 0;
@@ -2940,6 +2961,64 @@ body.bg-pattern-sparkles {
       max-width: 120px;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+    /* Thinking-effort chip — same shape/weight as the model chip so the two
+       read as one control group. */
+    .effort-picker-wrap { position: relative; flex-shrink: 0; }
+    .effort-picker-wrap.hidden { display: none; }
+    .effort-picker-btn svg:first-child { opacity: 0.75; }
+    /* A non-default level is the interesting state — tint it so it's readable
+       at a glance without opening the menu. */
+    .effort-picker-btn.is-set {
+      color: var(--accent, var(--red));
+      border-color: color-mix(in srgb, var(--accent, var(--red)) 35%, transparent);
+    }
+    .effort-picker-btn.is-set:hover { color: var(--accent, var(--red)); }
+    .effort-picker-menu {
+      position: absolute;
+      bottom: calc(100% + 16px);
+      right: 0;
+      z-index: 250;
+      min-width: 190px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 -4px 20px rgba(0,0,0,0.4);
+      padding: 6px;
+      animation: picker-roll-up 0.2s ease-out;
+      transform-origin: bottom right;
+    }
+    .effort-picker-menu.hidden { display: none; }
+    .effort-picker-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      padding: 6px 8px;
+      border: none;
+      border-radius: 5px;
+      background: none;
+      color: var(--fg);
+      font-family: inherit;
+      font-size: 12px;
+      text-align: left;
+      cursor: pointer;
+    }
+    .effort-picker-item:hover { background: color-mix(in srgb, var(--fg) 9%, transparent); }
+    .effort-picker-item .effort-check { width: 12px; flex-shrink: 0; opacity: 0; }
+    .effort-picker-item.is-active .effort-check { opacity: 1; color: var(--accent, var(--red)); }
+    .effort-picker-item .effort-sub {
+      margin-left: auto;
+      font-size: 10px;
+      color: color-mix(in srgb, var(--fg) 40%, transparent);
+    }
+    .effort-picker-note {
+      padding: 5px 8px 3px;
+      font-size: 10px;
+      line-height: 1.4;
+      color: color-mix(in srgb, var(--fg) 42%, transparent);
+      border-top: 1px solid color-mix(in srgb, var(--fg) 10%, transparent);
+      margin-top: 4px;
     }
     .image-mode-chip {
       display: inline-flex;
@@ -4178,112 +4257,6 @@ body.bg-pattern-sparkles {
     .code-runner-copy-inline:hover {
       border-color: var(--accent-primary, var(--red));
       color: var(--accent-primary, var(--red));
-    }
-
-    /* ── Live Code Preview Panel ──────────────────────────────────────────── */
-    .live-preview-panel {
-      position: fixed;
-      top: 0; right: 0; bottom: 0;
-      width: 42vw;
-      min-width: 320px;
-      max-width: 900px;
-      background: var(--bg);
-      border-left: 1px solid var(--border);
-      display: flex;
-      flex-direction: column;
-      z-index: 1100;
-      box-shadow: -4px 0 24px rgba(0,0,0,.18);
-      transform: translateX(100%);
-      transition: transform .28s cubic-bezier(0.22, 1, 0.36, 1),
-                  box-shadow .28s ease;
-      will-change: transform;
-    }
-    .live-preview-panel.visible {
-      transform: translateX(0);
-    }
-    .live-preview-resize-handle {
-      position: absolute;
-      left: -4px; top: 0; bottom: 0;
-      width: 8px;
-      cursor: col-resize;
-      z-index: 2;
-      background: transparent;
-      transition: background .15s;
-    }
-    .live-preview-resize-handle:hover,
-    .live-preview-panel.resizing .live-preview-resize-handle {
-      background: color-mix(in srgb, var(--accent, var(--red)) 40%, transparent);
-    }
-    .live-preview-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 10px 0 14px;
-      height: 40px;
-      min-height: 40px;
-      border-bottom: 1px solid var(--border);
-      background: var(--panel);
-      flex-shrink: 0;
-    }
-    .live-preview-title {
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      font-size: 12px;
-      font-weight: 600;
-      letter-spacing: .03em;
-      color: var(--fg);
-      opacity: 0.8;
-      user-select: none;
-    }
-    .live-preview-dot {
-      width: 7px; height: 7px;
-      border-radius: 50%;
-      background: var(--accent, var(--red));
-      display: inline-block;
-      flex-shrink: 0;
-      animation: live-preview-pulse 2.2s ease-in-out infinite;
-    }
-    @keyframes live-preview-pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.4; transform: scale(0.7); }
-    }
-    .live-preview-panel:not(.streaming) .live-preview-dot {
-      animation: none;
-      opacity: 0.4;
-    }
-    .live-preview-header-actions {
-      display: flex;
-      align-items: center;
-      gap: 2px;
-    }
-    .live-preview-btn {
-      background: none;
-      border: none;
-      color: var(--fg);
-      cursor: pointer;
-      opacity: 0.5;
-      padding: 5px 6px;
-      border-radius: 5px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: opacity .15s, background .15s;
-      line-height: 1;
-    }
-    .live-preview-btn:hover { opacity: 1; background: var(--hover); }
-    .live-preview-close-btn:hover { color: var(--red); opacity: 1; }
-    .live-preview-iframe {
-      flex: 1 1 0;
-      width: 100%;
-      border: none;
-      background: #fff;
-      display: block;
-    }
-    /* Nudge chat container to not overlap panel when preview is open */
-    body.live-preview-open .chat-container,
-    body.live-preview-open nav {
-      transition: padding-right .28s cubic-bezier(0.22, 1, 0.36, 1);
     }
 
     /* Reserve room on the right so the output text doesn't slide under
@@ -14580,9 +14553,43 @@ mark.doc-find-mark.current {
 #chat-history a[href^="#document-"]:active { transform: translateY(1px); }
 /* Open-document button rendered inside a tool node (live + on reload). Sits on
    its own row below the node header so it reads as an action, not inline text. */
-#chat-history .agent-thread-node .agent-doc-open-btn {
+/* "Open document" chip. Base style applies wherever it lands: inside a tool
+   thread node, or directly on the bubble body when a turn produced no thread
+   (the whole reply went into the document). Previously only the nested rule
+   existed, so a bubble-level button rendered as a bare link. */
+#chat-history .agent-doc-open-btn {
   display: inline-flex;
-  margin: 8px 0 2px 24px;
+  align-items: center;
+  gap: 5px;
+  margin: 8px 0 2px;
+  padding: 4px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 40%, var(--border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent);
+  color: var(--accent, var(--red));
+  font-size: 11.5px;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+#chat-history .agent-doc-open-btn::before {
+  content: '';
+  width: 11px;
+  height: 11px;
+  flex: none;
+  background: currentColor;
+  /* document glyph */
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'/%3E%3Cpolyline points='14 2 14 8 20 8'/%3E%3C/svg%3E") center/contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'/%3E%3Cpolyline points='14 2 14 8 20 8'/%3E%3C/svg%3E") center/contain no-repeat;
+}
+#chat-history .agent-doc-open-btn:hover {
+  background: color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
+  border-color: var(--accent, var(--red));
+}
+/* Indented when it hangs off a tool-thread node, flush when on the bubble. */
+#chat-history .agent-thread-node .agent-doc-open-btn {
+  margin-left: 24px;
 }
 
 /* Live-writing caret shown at the end of streamed doc content. */
@@ -18451,6 +18458,110 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
 .skill-rich-ph .k { color: var(--accent, var(--red)); }
 /* Hide the overlay once the field has real content. */
 .skill-hint-input:not(:placeholder-shown) ~ .skill-rich-ph { display: none; }
+/* Structured skill editor inside the expanded card. Scrolls internally so the
+   mobile fill-height pass (which pins an explicit px height on this element)
+   can never clip the last field. */
+.skill-form {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px 1px;
+}
+.skill-form-field {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 0;
+}
+.skill-form-label {
+  flex: none;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--fg) 50%, transparent);
+}
+.skill-form-input {
+  width: 100%;
+  box-sizing: border-box;
+  /* Fields are column flex items: without this they shrink below the 28px
+     .memory-add-input height as soon as the form runs out of room, and the
+     single-line inputs collapse to a sliver. */
+  flex: none;
+}
+.skill-form textarea.skill-form-input {
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 62px;
+}
+/* The steps field absorbs the card's spare height instead of staying at its
+   row count — it holds the bulk of most skills. Declared after the generic
+   textarea rule above: same specificity, so source order decides the
+   min-height.
+   The textarea GROWS into the wrapper (flex), it does not take height:100% of
+   it: the wrapper is a column that also holds the label, so a 100% child
+   overflows by exactly the label's height and paints over the next field's
+   label ("TAGS" sitting on top of the How box). */
+.skill-form .skill-form-field-grow {
+  flex: 1 1 auto;
+  /* NOT min-height:0 (the default for the other fields): as a flex item this
+     wrapper would otherwise shrink to zero when the form is short on room,
+     while its textarea keeps its 150px floor and spills out over the next
+     field's label. `auto` keeps the wrapper at least as tall as its content,
+     and the form scrolls instead. */
+  min-height: auto;
+}
+.skill-form .skill-form-field-grow textarea.skill-form-input {
+  flex: 1 1 auto;
+  min-height: 150px;
+  /* The global `textarea { max-height: 30lh }` capped this at 540px, so on a
+     tall card it stopped growing and left a dead gap between How and Tags.
+     Safe to lift here: the field scrolls internally and the form above it
+     caps at the card height. */
+  max-height: none;
+}
+/* While an editor is open the card takes the full modal height (the collapsed
+   rule sizes it to content, which is right for reading a short SKILL.md and
+   wrong for editing one). skills.js toggles the class. */
+.skill-card.doclib-card-expanded.skill-card-editing {
+  flex: 1 1 auto !important;
+  height: 100% !important;
+}
+/* The preview wrapper is deliberately flex:0 1 auto when READING (it sizes to
+   the SKILL.md so a short skill doesn't leave a void above the footer). While
+   editing that's backwards — it left the editor at its floor with the rest of
+   the card empty below. Let it grow, and drop the % max-height that capped it. */
+.skill-card.doclib-card-expanded.skill-card-editing .doclib-card-preview {
+  flex: 1 1 auto !important;
+  max-height: none !important;
+}
+/* Raw SKILL.md editing needs a usable floor too — flex:1 alone collapsed it to
+   a ~90px slit under the header. Desktop only: the mobile layout pins an
+   explicit px height on this element, and a min-height would override it and
+   overflow small screens. */
+@media (min-width: 769px) {
+  .skill-card.skill-card-editing .skill-md-editor {
+    min-height: 320px;
+    max-height: none;
+  }
+}
+.skill-form-raw-btn {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--fg) 45%, transparent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.skill-form-raw-btn:hover { color: var(--fg); }
 .skill-md-editor {
   flex: 1 1 auto;
   min-height: 0;
@@ -24581,6 +24692,62 @@ body:not(.welcome-ready) #welcome-screen {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Session log. The progress banner shows only the live phase and then hides;
+   this keeps the history of every run until the page is reloaded. */
+.humanize-log {
+  flex: none;
+  margin: 0 12px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
+  font-size: 11px;
+}
+.humanize-log > summary {
+  padding: 5px 9px;
+  cursor: pointer;
+  user-select: none;
+  color: color-mix(in srgb, var(--fg) 70%, transparent);
+}
+.humanize-log-hint {
+  color: color-mix(in srgb, var(--fg) 40%, transparent);
+  font-size: 10px;
+}
+.humanize-log-list {
+  max-height: 160px;
+  overflow-y: auto;
+  padding: 0 9px 7px;
+  font-family: ui-monospace, 'SF Mono', 'Fira Code', monospace;
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+.humanize-log-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.humanize-log-time {
+  flex: none;
+  color: color-mix(in srgb, var(--fg) 38%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+.humanize-log-step {
+  flex: none;
+  min-width: 68px;
+  color: color-mix(in srgb, var(--fg) 75%, transparent);
+}
+.humanize-log-detail {
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  word-break: break-word;
+}
+.humanize-log-row.is-error .humanize-log-step,
+.humanize-log-row.is-error .humanize-log-detail { color: var(--color-error, var(--red)); }
+.humanize-log-row.is-done .humanize-log-step { color: #22c55e; }
+.humanize-log-empty {
+  padding: 0 9px 7px;
+  color: color-mix(in srgb, var(--fg) 35%, transparent);
+  font-size: 10.5px;
+  font-style: italic;
+}
 .humanize-progress.is-done .humanize-progress-dot { animation: none; background: #22c55e; }
 .humanize-progress.is-error { border-color: color-mix(in srgb, var(--color-error, var(--red)) 55%, var(--border)); }
 .humanize-progress.is-error .humanize-progress-dot,
@@ -25504,6 +25671,15 @@ input.settings-select::placeholder { color: color-mix(in srgb, var(--fg) 35%, tr
   opacity: 0.4;
   min-width: 14px;
   text-align: right;
+}
+/* Inline note beside a settings row — e.g. "on/off only" when a model's
+   reasoning control is boolean and the graded levels don't apply to it. */
+.settings-hint {
+  flex: none;
+  font-size: 10px;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--fg) 42%, transparent);
+  cursor: help;
 }
 .settings-fallback-row .settings-select {
   width: 0;
@@ -41305,7 +41481,7 @@ body.theme-frosted .modal {
 .ask-user-other-send { flex-shrink: 0; white-space: nowrap; min-height: 39px; }
 .ask-user-other-send:disabled { opacity: 0.5; cursor: default; }
 
-/* ── Workspace picker ───────────────────────────────────────────── */
+/* ── Workspace picker + file explorer ──────────────────────────── */
 /* Layout (width/flex column/max-height) inherited from base .modal-content. */
 /* Editable path/address bar: reuses .styled-prompt-input for border/bg/radius/
    focus ring (set in the element's class list). Overrides only the deltas:
@@ -41349,6 +41525,230 @@ body.theme-frosted .modal {
   border-top: 1px solid var(--border);
 }
 .workspace-note { margin: 0 0 8px; font-size: 11px; line-height: 1.4; }
+
+.workspace-picker {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
+#workspace-modal.workspace-explorer-open .workspace-modal-content {
+  width: min(1000px, 92vw);
+  height: min(760px, 86vh);
+  max-height: 86vh;
+}
+@media (min-width: 769px) {
+  :root.ui-scale-125 #workspace-modal.workspace-explorer-open .workspace-modal-content {
+    width: min(1000px, calc(92vw / 1.25));
+    height: min(760px, calc(86dvh / 1.25));
+    max-height: calc(86dvh / 1.25);
+  }
+}
+.workspace-explorer {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
+.workspace-picker.hidden,
+.workspace-explorer.hidden,
+.workspace-file-selected.hidden { display: none; }
+.workspace-explorer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.workspace-toolbar-btn {
+  flex: none;
+  min-height: 28px;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--fg) 4%, var(--bg));
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.workspace-toolbar-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--fg) 35%, var(--border));
+  background: color-mix(in srgb, var(--fg) 8%, var(--bg));
+}
+.workspace-toolbar-btn:disabled { opacity: 0.35; cursor: default; }
+.workspace-explorer-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  color: color-mix(in srgb, var(--fg) 70%, transparent);
+}
+.workspace-change-btn { margin-left: 2px; }
+.workspace-explorer-main {
+  display: grid;
+  grid-template-columns: minmax(210px, 30%) minmax(0, 1fr);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.workspace-entry-pane {
+  min-width: 0;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  padding: 5px 0;
+}
+.workspace-entry-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 6px 8px 6px 12px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.workspace-entry-row:hover,
+.workspace-entry-row:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--border) 20%, transparent);
+}
+.workspace-entry-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-entry-size {
+  flex: none;
+  color: color-mix(in srgb, var(--fg) 42%, transparent);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.workspace-entry-delete {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: color-mix(in srgb, var(--fg) 42%, transparent);
+  cursor: pointer;
+  opacity: 0;
+}
+.workspace-entry-row:hover .workspace-entry-delete,
+.workspace-entry-row:focus-within .workspace-entry-delete,
+.workspace-file-delete { opacity: 1; }
+.workspace-entry-delete:hover {
+  background: color-mix(in srgb, var(--color-error, #e05a5a) 15%, transparent);
+  color: var(--color-error, #e05a5a);
+}
+.workspace-file-pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+.workspace-file-empty {
+  margin: auto;
+  padding: 24px;
+  color: color-mix(in srgb, var(--fg) 42%, transparent);
+  font-size: 12px;
+  text-align: center;
+}
+.workspace-file-selected {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+.workspace-file-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.workspace-file-heading {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.workspace-file-heading strong,
+.workspace-file-heading span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-file-heading strong { font-size: 12px; }
+.workspace-file-heading span {
+  font-family: var(--mono, monospace);
+  font-size: 10px;
+  color: color-mix(in srgb, var(--fg) 45%, transparent);
+}
+.workspace-file-editor {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  max-height: none;
+  resize: none;
+  padding: 12px;
+  border: none;
+  border-radius: 0;
+  outline: none;
+  background: color-mix(in srgb, var(--fg) 2%, var(--bg));
+  color: var(--fg);
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
+  overflow: auto;
+  tab-size: 2;
+}
+.workspace-file-editor:focus {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent, var(--red)) 45%, transparent);
+}
+.workspace-file-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-height: 46px;
+  padding: 7px 10px;
+  border-top: 1px solid var(--border);
+}
+.workspace-file-status {
+  margin-right: auto;
+  color: color-mix(in srgb, var(--fg) 48%, transparent);
+  font-size: 11px;
+}
+
+@media (max-width: 768px) {
+  #workspace-modal.workspace-explorer-open .workspace-modal-content {
+    width: calc(100vw - 16px);
+    height: calc(100dvh - 24px);
+    max-height: calc(100dvh - 24px);
+  }
+  .workspace-explorer-main {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(120px, 34%) minmax(0, 1fr);
+  }
+  .workspace-entry-pane {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+  .workspace-entry-delete { opacity: 1; }
+  .workspace-explorer-toolbar { gap: 5px; }
+  .workspace-change-btn { padding-inline: 7px; }
+}
 
 /* Real-time Diagnostics Log Terminal UI Styles */
 .settings-system-logs-svg {
@@ -41541,6 +41941,7 @@ body.theme-frosted .modal {
   font-size: 11px;
 }
 .approval-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.approval-error:not(:empty) { margin-top: 6px; color: var(--color-error, #e05a5a); }
 .approval-btn {
   padding: 4px 10px;
   border-radius: 6px;

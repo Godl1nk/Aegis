@@ -1008,6 +1008,14 @@
           </svg>
           <span class="grow">Theme</span>
         </div>
+        <div class="list-item" id="tool-workspace-btn" role="button" tabindex="0">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+          </svg>
+          <span class="grow">Workspace</span>
+        </div>
       </div>
     </div>
     <div class="sidebar-user-bar" id="sidebar-user-bar">
@@ -1090,6 +1098,8 @@
       <div class="chat-input-top">
         <div id="message-ghost" class="ghost-text-overlay" aria-hidden="true"></div>
         <textarea id="message" placeholder="Message Aegis..." required autocomplete="off" aria-label="Message input" rows="1" autofocus></textarea>
+        <!-- Composer chips (inside chatbox, top-right): model + thinking effort -->
+        <div class="composer-chips" id="composer-chips">
         <!-- Model picker (inside chatbox, top-right) -->
         <div class="model-picker-wrap" id="model-picker-wrap">
           <button type="button" class="model-picker-btn" id="model-picker-btn" title="Switch model"><span id="model-picker-label">Select model</span> <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></button>
@@ -1107,6 +1117,16 @@
             </div>
             <div class="model-picker-list" id="model-picker-list"></div>
           </div>
+        </div>
+        <!-- Thinking effort — sits beside the model picker. Hidden entirely for
+             models with no known reasoning control, and only ever offers the
+             levels the current model can actually honour. -->
+        <div class="effort-picker-wrap hidden" id="effort-picker-wrap">
+          <button type="button" class="model-picker-btn effort-picker-btn" id="effort-picker-btn" title="Thinking effort" aria-haspopup="true" aria-expanded="false">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3 3 3 0 0 0-2 5.2A3 3 0 0 0 9 17v1a3 3 0 0 0 6 0v-1a3 3 0 0 0 2-5.8A3 3 0 0 0 15 6a3 3 0 0 0-3-3z"/><path d="M12 8v9"/></svg>
+          <span id="effort-picker-label">Auto</span> <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 15 12 9 18 15"/></svg></button>
+          <div class="effort-picker-menu hidden" id="effort-picker-menu" role="menu"></div>
+        </div>
         </div>
       </div>
       <div id="pinned-tools-bar"></div>
@@ -1323,30 +1343,6 @@
 
 
   </main>
-
-  <!-- Live Code Preview Panel -->
-  <div id="live-preview-panel" class="live-preview-panel" aria-label="Live code preview" style="display:none;">
-    <div class="live-preview-resize-handle" id="live-preview-resize-handle" title="Drag to resize"></div>
-    <div class="live-preview-header">
-      <span class="live-preview-title">
-        <span class="live-preview-dot"></span>
-        Live Preview
-      </span>
-      <div class="live-preview-header-actions">
-        <button type="button" class="live-preview-btn" id="live-preview-refresh-btn" title="Refresh preview">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-        </button>
-        <button type="button" class="live-preview-btn" id="live-preview-popout-btn" title="Open in new window">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-        </button>
-        <button type="button" class="live-preview-btn live-preview-close-btn" id="live-preview-close-btn" title="Close preview">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </button>
-      </div>
-    </div>
-    <iframe id="live-preview-iframe" class="live-preview-iframe" sandbox="allow-scripts allow-forms" title="Live code preview"></iframe>
-  </div>
-
   <button id="scroll-bottom-btn" class="scroll-nav-btn" title="Scroll to bottom">▼</button>
   <script nonce="{{CSP_NONCE}}">
   (function(){
@@ -1593,6 +1589,30 @@
                 </div>
               </div>
               <div id="set-visionSettingsMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
+            </div>
+          </div>
+          <div class="admin-card">
+            <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:1px;opacity:0.6;flex-shrink:0"><path d="M12 2a7 7 0 0 0-4 12.7V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.3A7 7 0 0 0 12 2z"/><line x1="9" y1="22" x2="15" y2="22"/></svg>Thinking Effort</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">How hard reasoning models think before answering. <b>Auto</b> keeps each provider's own default. Lower effort is faster and cheaper; models that only support on/off ignore the graded levels.</div>
+            <div style="display:flex;flex-direction:column;gap:0.5rem;">
+              <div style="display:flex;align-items:center;gap:0.75rem;">
+                <label class="settings-label">Default</label>
+                <select id="set-reasoningEffortDefault" class="settings-select">
+                  <option value="auto">Auto (provider default)</option>
+                  <option value="off">Off — no thinking</option>
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                </select>
+              </div>
+              <div class="settings-row" style="align-items:flex-start;">
+                <label class="settings-label" style="margin-top:6px;">Per model</label>
+                <div style="flex:1;display:flex;flex-direction:column;gap:6px;">
+                  <div id="set-reasoningPerModel" class="settings-fallbacks"></div>
+                  <button type="button" class="settings-fallback-add" id="set-reasoningAddModel" title="Override the default for one model">+ Add model override</button>
+                </div>
+              </div>
+              <div id="set-reasoningEffortMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
             </div>
           </div>
           <div class="admin-card">

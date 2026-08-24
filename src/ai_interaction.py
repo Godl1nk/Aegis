@@ -1789,7 +1789,7 @@ async def do_generate_image(
         size = "1024x1024"
 
     # Format prompt if the model uses JSON prompt format (e.g. Ideogram-4)
-    from src.settings import get_user_setting, get_setting
+    from src.settings import get_user_setting
     prompt_format_setting = get_user_setting("image_prompt_format", owner or "", default="auto")
 
     if prompt_format_setting == "json":

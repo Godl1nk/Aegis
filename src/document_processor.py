@@ -22,6 +22,22 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+# Ceiling on the image description.
+#
+# This call was previously left uncapped on purpose ("detail > speed") — but
+# llm_call omits max_tokens entirely when it is 0, so an unbounded llama.cpp /
+# vLLM server generates until it hits the context window. An observed run
+# produced 5096 tokens over 2m05s and was still going when the proxy killed it.
+# The chat request AWAITS this description before it can stream, so the whole
+# turn sat behind it and came back as a proxy timeout ("Error 524").
+#
+# The ceiling is set well above a genuinely detailed description (~1150 words,
+# enough to transcribe a dense figure) so it bounds runaway loops without
+# trimming real output. Set VISION_MAX_TOKENS=0 to restore fully uncapped
+# generation.
+VISION_MAX_OUTPUT_TOKENS = _env_int("VISION_MAX_TOKENS", 1536)
+
+
 PDF_VISION_MAX_IMAGES = max(0, _env_int("ODYSSEUS_PDF_VISION_MAX_IMAGES", 0))
 
 MAX_INLINE_ATTACHMENT_CHARS = 24000
@@ -412,6 +428,7 @@ def analyze_image_with_vl_result(image_path: str, owner: str | None = None) -> d
                     vl_messages,
                     headers=_headers,
                     timeout=VISION_ANALYSIS_TIMEOUT_SECONDS,
+                    max_tokens=VISION_MAX_OUTPUT_TOKENS,
                 )
                 logger.info("VL analysis complete with model %s", _model)
                 return {"text": description, "model": _model}

@@ -7,16 +7,11 @@ Routes tool blocks to MCP servers or native implementations.
 Extracted from agent_tools.py.
 """
 
-import asyncio
-import collections
 import contextvars
 import json
 import logging
 import os
-import pathlib
 import re
-import sys
-import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 
@@ -27,9 +22,14 @@ from src.tool_security import (
     is_public_blocked_tool,
     owner_is_admin_or_single_user,
 )
-from src.tool_policy import ToolPolicy
-from src.constants import MAX_OUTPUT_CHARS, MAX_READ_CHARS, MAX_DIFF_LINES, DATA_DIR
-from src.tool_utils import _truncate, get_mcp_manager
+from src.constants import DATA_DIR
+# Re-export: agent_tools/filesystem_tools.py does `from src.tool_execution
+# import _truncate`, so this is a public name here even though nothing in this
+# module calls it. The redundant alias marks that for linters, which otherwise
+# strip it as an unused import and break that import at runtime.
+# (get_mcp_manager is deliberately NOT imported from tool_utils — this module
+# defines its own below, routing through agent_tools.)
+from src.tool_utils import _truncate as _truncate
 
 # Persistent working directory for agent subprocesses.
 # Resolves to <repo_root>/data, which is the bind-mounted volume in Docker
@@ -388,27 +388,6 @@ def _strip_generate_image_references(content: str) -> str:
     return json.dumps(args)
 
 
-def _parse_manage_memory(content: str) -> Dict:
-    lines = content.strip().split("\n")
-    action = lines[0].strip().lower() if lines else ""
-    args = {"action": action}
-    if action == "add":
-        args["text"] = lines[1].strip() if len(lines) > 1 else ""
-        if len(lines) > 2 and lines[2].strip():
-            args["category"] = lines[2].strip().lower()
-    elif action == "edit":
-        args["memory_id"] = lines[1].strip() if len(lines) > 1 else ""
-        args["text"] = lines[2].strip() if len(lines) > 2 else ""
-    elif action == "delete":
-        args["memory_id"] = lines[1].strip() if len(lines) > 1 else ""
-    elif action == "search":
-        args["text"] = lines[1].strip() if len(lines) > 1 else ""
-    elif action == "list":
-        if len(lines) > 1 and lines[1].strip():
-            args["category"] = lines[1].strip().lower()
-    return args
-
-
 def _parse_write_file(content: str) -> Dict:
     lines = content.split("\n", 1)
     return {"path": lines[0].strip(), "content": lines[1] if len(lines) > 1 else ""}
@@ -422,7 +401,6 @@ _MCP_ARG_PARSERS: Dict[str, Callable[[str], Dict[str, str]]] = {
     "read_file":      lambda c: {"path": c.split("\n")[0].strip()},
     "write_file":     _parse_write_file,
     "generate_image": _parse_generate_image,
-    "manage_memory":  _parse_manage_memory,
 }
 
 
@@ -632,7 +610,7 @@ async def execute_tool_block(
     """
     token = _active_workspace.set(workspace or None)
     try:
-        output = await _execute_tool_block_impl(
+        desc, result = await _execute_tool_block_impl(
             block,
             session_id=session_id,
             disabled_tools=disabled_tools,
@@ -641,7 +619,14 @@ async def execute_tool_block(
             image_context=image_context,
             tool_policy=tool_policy,
         )
-        return output
+        if not isinstance(result, dict):
+            result = {
+                "error": f"Tool '{getattr(block, 'tool_type', 'unknown')}' returned an invalid result.",
+                "exit_code": 1,
+            }
+        elif result.get("exit_code") is None:
+            result["exit_code"] = 1 if result.get("error") else 0
+        return desc, result
     finally:
         _active_workspace.reset(token)
 
@@ -737,7 +722,7 @@ async def _execute_tool_block_impl(
     if tool_policy and any(tool_policy.blocks(name) for name in policy_names):
         desc = f"{tool}: BLOCKED"
         result = {
-            "error": f"Execution of tool '{tool}' is forbade by the active guide-only policy.",
+            "error": f"Execution of tool '{tool}' is forbidden by the active guide-only policy.",
             "exit_code": 1,
         }
         logger.warning("Tool policy blocked tool=%s", tool)
@@ -774,10 +759,22 @@ async def _execute_tool_block_impl(
     # The approval request rides the progress callback; agent_loop forwards
     # it as an `approval_request` SSE event and the user's decision comes
     # back via POST /api/approvals.
-    if tool == "bash":
+    #
+    # `python` is gated here too. It runs with the full stdlib (-I only drops
+    # env/user site-packages), so `os.system("rm -rf ~")` reaches the same
+    # shell `bash` does — leaving it ungated meant every deny rule and the
+    # hardline floor were one import away from being bypassed. The detection
+    # patterns are shell-shaped, so this catches shelled-out commands embedded
+    # in Python source, NOT destructive pure-Python calls (shutil.rmtree, …);
+    # it closes the bypass, it is not a Python analyzer.
+    if tool in ("bash", "python"):
         from src.command_approval import check_command_guard
         from src.docker_env import get_docker_settings
-        _is_bg_probe, _guard_cmd, _ = _split_bg_marker(content)
+        # The `#!bg` marker is a bash-only affordance.
+        if tool == "bash":
+            _is_bg_probe, _guard_cmd, _ = _split_bg_marker(content)
+        else:
+            _is_bg_probe, _guard_cmd = False, content
         # Isolated docker backend skips the guard (nothing it runs can touch
         # the host); a workspace bind mount restores host access, so the
         # guard stays active (Hermes has_host_access). Background jobs always
@@ -787,13 +784,14 @@ async def _execute_tool_block_impl(
         _guard = await check_command_guard(
             _guard_cmd if _is_bg_probe else content,
             session_id=session_id or "",
+            owner=owner,
             env_type=_env_type,
             has_host_access=bool(_denv["mount_workspace"]),
             emit_event=progress_cb,
         )
         if not _guard.get("approved"):
-            logger.warning("bash command blocked by approval guard")
-            return "bash: BLOCKED", {
+            logger.warning("%s command blocked by approval guard", tool)
+            return f"{tool}: BLOCKED", {
                 "error": _guard.get("message") or "Command blocked.",
                 "exit_code": 126,
                 "blocked": True,
@@ -803,6 +801,23 @@ async def _execute_tool_block_impl(
         _is_bg, _bg_cmd, _bg_watch = _split_bg_marker(content)
         if _is_bg and _bg_cmd:
             from src import bg_jobs
+            from src.docker_env import get_docker_settings
+            # bg_jobs.launch always spawns a HOST process — there is no
+            # containerized background backend. Under terminal_env=docker that
+            # would let a model-controlled `#!bg` line step straight out of the
+            # sandbox, so refuse it and send the model back to the foreground
+            # path (which does run in the container).
+            if str(get_docker_settings()["env_type"]) == "docker":
+                logger.warning("bash: refused #!bg background job under terminal_env=docker")
+                return "bash: BLOCKED", {
+                    "error": (
+                        "Background jobs (`#!bg`) are unavailable while the terminal "
+                        "backend is set to Docker: they would run on the host, outside "
+                        "the sandbox. Run the command in the foreground instead."
+                    ),
+                    "exit_code": 126,
+                    "blocked": True,
+                }
             rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=agent_cwd(),
                                  watch_patterns=_bg_watch)
             short = _bg_cmd.strip().split(chr(10))[0][:80]

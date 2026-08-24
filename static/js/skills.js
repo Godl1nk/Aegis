@@ -690,6 +690,10 @@ function renderSkillsList() {
     card.className = 'doclib-card skill-card';
     card.dataset.skillName = name;
     card.dataset.skillStatus = sk.status || 'draft';
+    // The list payload already carries every editable field (to_dict ships
+    // when_to_use/procedure/tags/…), so the structured editor opens from this
+    // without a second fetch.
+    card._sk = sk;
 
     const checked = _selectedNames.has(name) ? 'checked' : '';
     const cbHtml = _selectMode
@@ -808,10 +812,10 @@ function renderSkillsList() {
     card.addEventListener('click', (e) => {
       if (card._suppressNextClick) { card._suppressNextClick = false; return; }
       if (e.target.closest('button, input, textarea')) return;
-      // While editing, a click on the card body (outside the textarea) must
+      // While editing, a click on the card body (outside the editor) must
       // NOT collapse the card — that silently discards unsaved edits. Only
-      // Save/Cancel exit edit mode.
-      if (card.querySelector('.skill-md-editor')) return;
+      // Save/Cancel exit edit mode. Covers the structured form too.
+      if (card.querySelector('.skill-md-editor, .skill-form')) return;
       if (_selectMode) {
         const cb = card.querySelector('.skill-select-cb');
         if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); }
@@ -924,6 +928,11 @@ function renderSkillsList() {
 
 // ---- Card expand / edit / actions ----
 
+// Whichever element is currently the card's scrollable body: the read-only
+// <pre>, the raw markdown textarea, or the structured form. The mobile
+// fill-height pass pins its height, so all three must be findable here.
+const _SKILL_BODY_SEL = '.skill-md-pre, .skill-md-editor, .skill-form';
+
 // Collapse an expanded skill card: drop the class AND clear the inline
 // heights skills.js pinned on the card/preview/<pre> (otherwise a collapsed
 // card keeps its full expanded height) and detach its resize listener.
@@ -931,7 +940,7 @@ function _collapseSkillCardEl(c) {
   c.classList.remove('doclib-card-expanded', 'skill-expand-instant');
   c.style.removeProperty('height');
   const pv = c.querySelector('.doclib-card-preview');
-  const pr = c.querySelector('.skill-md-pre') || c.querySelector('.skill-md-editor');
+  const pr = c.querySelector(_SKILL_BODY_SEL);
   if (pv) { pv.style.removeProperty('height'); pv.style.removeProperty('flex'); pv.style.removeProperty('max-height'); }
   if (pr) { pr.style.removeProperty('height'); pr.style.removeProperty('flex'); }
   if (c._fillH) window.removeEventListener('resize', c._fillH);
@@ -969,7 +978,7 @@ async function _expandSkillCard(card, name) {
     card.style.removeProperty('height');
     const preview = card.querySelector('.doclib-card-preview');
     const header = card.querySelector('.skill-card-header');
-    const pre = card.querySelector('.skill-md-pre') || card.querySelector('.skill-md-editor');
+    const pre = card.querySelector(_SKILL_BODY_SEL);
     if (preview) { preview.style.removeProperty('height'); preview.style.removeProperty('flex'); preview.style.removeProperty('max-height'); }
     if (pre) { pre.style.removeProperty('height'); pre.style.removeProperty('flex'); }
 
@@ -1036,17 +1045,130 @@ async function _expandSkillCard(card, name) {
   }
 }
 
-// Swap the read-only <pre> for an editable <textarea> (and back). The
-// Edit button toggles; a Save button commits via the markdown endpoint.
-function _toggleSkillEdit(card, name) {
+const _SAVE_ICON = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>';
+
+const _EDIT_ICON = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+const _CANCEL_ICON = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:3px;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+
+function _editBtnOf(preview) {
+  return [...preview.querySelectorAll('.doclib-card-action-btn')].find(b => /Edit|Save/.test(b.textContent));
+}
+
+// Entering edit mode: Edit becomes Save, and a Cancel appears beside it. Until
+// now the only way out of the editor was to save — a click anywhere else is
+// deliberately swallowed so edits aren't lost, which left no way to back out.
+function _enterEditMode(card) {
   const preview = card.querySelector('.skill-card-preview');
   if (!preview) return;
-  const existing = preview.querySelector('.skill-md-editor');
-  if (existing) {
-    // Already editing — treat Edit as Save.
-    _saveSkillEdit(card, name);
-    return;
+  // Editing wants the room: the card normally sizes to its content, which left
+  // the fields in a letterbox with empty modal below. An explicit class (not
+  // :has()) so engines without :has support get it too — same reason
+  // .skills-has-expanded exists.
+  card.classList.add('skill-card-editing');
+  const editBtn = _editBtnOf(preview);
+  if (editBtn) editBtn.innerHTML = _SAVE_ICON + 'Save';
+  if (preview.querySelector('.skill-cancel-btn')) return;
+  const cancel = document.createElement('button');
+  cancel.className = 'doclib-card-text-btn doclib-card-action-btn skill-cancel-btn';
+  cancel.innerHTML = _CANCEL_ICON + 'Cancel';
+  cancel.title = 'Discard changes';
+  cancel.addEventListener('click', (e) => { e.stopPropagation(); _exitEditMode(card); });
+  if (editBtn) editBtn.parentElement.insertBefore(cancel, editBtn);
+}
+
+// Leave the editor without saving: drop whichever editor is open, show the
+// SKILL.md preview again, restore the Edit button and remove Cancel.
+function _exitEditMode(card) {
+  const preview = card.querySelector('.skill-card-preview');
+  if (!preview) return;
+  preview.querySelector('.skill-form')?.remove();
+  preview.querySelector('.skill-md-editor')?.remove();
+  const pre = preview.querySelector('.skill-md-pre');
+  if (pre) pre.style.removeProperty('display');
+  preview.querySelector('.skill-cancel-btn')?.remove();
+  card.classList.remove('skill-card-editing');
+  const editBtn = _editBtnOf(preview);
+  if (editBtn) editBtn.innerHTML = _EDIT_ICON + 'Edit';
+  if (card._fillH) card._fillH();
+}
+
+// One labelled field. The label is a real <label> ABOVE the control, not the
+// Add Skill form's overlay placeholder: that placeholder disappears as soon as
+// the field has content, and every field here is pre-filled — which left a
+// stack of unlabelled boxes where Name and Title looked like the same field
+// twice. The hint stays as the placeholder for when a field IS empty.
+function _skillField(key, label, hint, value, { multiline = false, rows = 3, grow = false } = {}) {
+  const wrap = document.createElement('div');
+  wrap.className = 'skill-form-field' + (grow ? ' skill-form-field-grow' : '');
+  const id = `skill-f-${key}-${Math.random().toString(36).slice(2, 8)}`;
+  const lab = document.createElement('label');
+  lab.className = 'skill-form-label';
+  lab.htmlFor = id;
+  lab.textContent = label;
+  const input = document.createElement(multiline ? 'textarea' : 'input');
+  input.className = 'memory-add-input skill-form-input';
+  input.id = id;
+  input.dataset.field = key;
+  input.placeholder = hint;
+  if (multiline) {
+    input.rows = rows;
+  } else {
+    input.type = 'text';
   }
+  input.value = value || '';
+  input.addEventListener('click', (e) => e.stopPropagation());
+  wrap.appendChild(lab);
+  wrap.appendChild(input);
+  return wrap;
+}
+
+// The expanded card's editor: structured fields (name / title / when to use /
+// how / tags) rather than raw SKILL.md. Pitfalls, Verification and any extra
+// body prose aren't surfaced here — they round-trip untouched because the PUT
+// only sends the keys the form owns. "Markdown" swaps to the raw editor for
+// those.
+function _openSkillForm(card, name) {
+  const preview = card.querySelector('.skill-card-preview');
+  if (!preview) return;
+  const sk = card._sk || {};
+  const pre = preview.querySelector('.skill-md-pre');
+  if (pre) pre.style.display = 'none';
+
+  const form = document.createElement('div');
+  form.className = 'skill-form';
+  form.addEventListener('click', (e) => e.stopPropagation());
+  form.appendChild(_skillField('name', 'Name', 'the skill’s id — lowercase, dashes, e.g. “check-temp”', sk.name || name));
+  form.appendChild(_skillField('description', 'Title', 'one line the model sees when picking a skill', sk.description || ''));
+  form.appendChild(_skillField('when_to_use', 'When to use', 'what problem does this skill solve?', sk.when_to_use || '',
+    { multiline: true, rows: 4 }));
+  // The steps are the bulk of most skills, so this one takes the slack height
+  // in the card rather than sitting in a 5-row porthole.
+  form.appendChild(_skillField('procedure', 'How', 'the steps, commands, or rules — one per line',
+    (sk.procedure || []).join('\n'), { multiline: true, rows: 10, grow: true }));
+  form.appendChild(_skillField('tags', 'Tags', 'comma-separated, e.g. python, build, vllm', (sk.tags || []).join(', ')));
+
+  const raw = document.createElement('button');
+  raw.type = 'button';
+  raw.className = 'skill-form-raw-btn';
+  raw.textContent = 'Edit as markdown';
+  raw.title = 'Edit the raw SKILL.md — including Pitfalls, Verification and frontmatter';
+  raw.addEventListener('click', (e) => {
+    e.stopPropagation();
+    form.remove();
+    _openRawSkillEditor(card, name);
+  });
+  form.appendChild(raw);
+
+  preview.insertBefore(form, preview.querySelector('.doclib-card-expanded-actions'));
+  form.querySelector('input, textarea')?.focus();
+  _enterEditMode(card);
+  if (card._fillH) card._fillH();
+}
+
+// Raw SKILL.md editing — the previous behaviour, now reached from the form.
+function _openRawSkillEditor(card, name) {
+  const preview = card.querySelector('.skill-card-preview');
+  if (!preview) return;
   const pre = preview.querySelector('.skill-md-pre');
   const ta = document.createElement('textarea');
   ta.className = 'skill-md-editor';
@@ -1056,9 +1178,60 @@ function _toggleSkillEdit(card, name) {
   if (pre) pre.style.display = 'none';
   preview.insertBefore(ta, preview.querySelector('.doclib-card-expanded-actions'));
   ta.focus();
-  // Flip the Edit button label to "Save".
-  const editBtn = [...preview.querySelectorAll('.doclib-card-action-btn')].find(b => /Edit|Save/.test(b.textContent));
-  if (editBtn) editBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save';
+  _enterEditMode(card);
+  if (card._fillH) card._fillH();
+}
+
+// The Edit button toggles: open the form, or commit whichever editor is open.
+function _toggleSkillEdit(card, name) {
+  const preview = card.querySelector('.skill-card-preview');
+  if (!preview) return;
+  if (preview.querySelector('.skill-md-editor')) { _saveSkillEdit(card, name); return; }
+  if (preview.querySelector('.skill-form')) { _saveSkillForm(card, name); return; }
+  _openSkillForm(card, name);
+}
+
+async function _saveSkillForm(card, name) {
+  const form = card.querySelector('.skill-card-preview .skill-form');
+  if (!form) return;
+  const val = (key) => (form.querySelector(`[data-field="${key}"]`)?.value || '').trim();
+
+  const description = val('description');
+  const newName = val('name');
+  if (!newName && !description) {
+    uiModule.showError('Name or title is required');
+    return;
+  }
+  const payload = {
+    description,
+    when_to_use: val('when_to_use'),
+    // Same normalisation the Add Skill form uses: strip list bullets/numbering
+    // so a pasted "1. do x" doesn't end up double-numbered on render.
+    procedure: val('procedure')
+      .split('\n').map(s => s.replace(/^\s*(?:[-*]|\d+[.)])\s+/, '').trim()).filter(Boolean),
+    tags: val('tags').split(',').map(t => t.trim()).filter(Boolean),
+  };
+  if (newName && newName !== name) payload.name = newName;
+
+  try {
+    const res = await fetch(`${API}/api/skills/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    // A rename moves the skill dir, so every cached handle keyed by the old
+    // name is stale — drop it and re-target the card at the slug the server
+    // actually wrote (it slugifies, so "Check Temp" comes back "check-temp").
+    const saved = data.name || newName || name;
+    _mdCache.delete(name);
+    if (saved !== name) _mdCache.delete(saved);
+    uiModule.showToast(saved !== name ? `Saved as ${saved}` : 'Saved');
+    await loadSkills();
+  } catch (e) {
+    uiModule.showError('Save failed: ' + e.message);
+  }
 }
 
 async function _saveSkillEdit(card, name) {

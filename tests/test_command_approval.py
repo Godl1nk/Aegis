@@ -333,3 +333,55 @@ class TestAsyncGate:
 
     def test_resolve_invalid_choice_returns_false(self):
         assert resolve_approval("nope", "sure") is False
+
+    def test_pending_approval_is_owner_scoped_and_single_use(self):
+        async def scenario():
+            observed = {}
+
+            async def emit(evt):
+                approval_id = evt["approval_request"]["approval_id"]
+                observed["alice"] = ca.list_pending_approvals(owner="alice")
+                observed["bob"] = ca.list_pending_approvals(owner="bob")
+                observed["wrong_owner"] = resolve_approval(
+                    approval_id, "once", owner="bob"
+                )
+                observed["first"] = resolve_approval(
+                    approval_id, "once", owner="alice"
+                )
+                observed["second"] = resolve_approval(
+                    approval_id, "deny", owner="alice"
+                )
+
+            result = await check_command_guard(
+                "rm -rf build/",
+                session_id="owned-session",
+                owner="alice",
+                emit_event=emit,
+            )
+            return result, observed
+
+        result, observed = _run(scenario())
+        assert result["approved"] is True
+        assert len(observed["alice"]) == 1
+        assert observed["alice"][0]["session_id"] == "owned-session"
+        assert "owner" not in observed["alice"][0]
+        assert observed["bob"] == []
+        assert observed["wrong_owner"] is False
+        assert observed["first"] is True
+        assert observed["second"] is False
+
+    def test_auth_disabled_empty_owner_can_resolve_unowned_guard(self):
+        async def scenario():
+            async def emit(evt):
+                approval_id = evt["approval_request"]["approval_id"]
+                assert len(ca.list_pending_approvals(owner="")) == 1
+                assert resolve_approval(approval_id, "once", owner="") is True
+
+            return await check_command_guard(
+                "rm -rf build/",
+                session_id="single-user-session",
+                owner=None,
+                emit_event=emit,
+            )
+
+        assert _run(scenario())["approved"] is True

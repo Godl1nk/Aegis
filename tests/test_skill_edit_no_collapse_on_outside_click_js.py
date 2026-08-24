@@ -19,8 +19,13 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "static/js/skills.js"
 
-# The guard the fix introduces inside the card click handler.
-GUARD = re.compile(r"querySelector\(\s*['\"]\.skill-md-editor['\"]\s*\)\s*\)\s*return")
+# The guard the fix introduces inside the card click handler. The selector may
+# list sibling editor roots (the user card also opens a structured
+# `.skill-form`), so match any selector string that names .skill-md-editor.
+GUARD = re.compile(r"querySelector\(\s*['\"][^'\"]*\.skill-md-editor[^'\"]*['\"]\s*\)\s*\)\s*return")
+# The structured form is the user card's DEFAULT editor, so its click handler
+# must bail for that too or Edit → click-the-padding still discards the edits.
+FORM_GUARD = re.compile(r"querySelector\(\s*['\"][^'\"]*\.skill-form[^'\"]*['\"]\s*\)\s*\)\s*return")
 
 
 def _handler_body(text: str, anchor: str, call: str) -> str:
@@ -41,6 +46,10 @@ def test_user_skill_card_does_not_collapse_while_editing():
     assert GUARD.search(body), (
         "user-skill card click handler must skip collapse while a "
         ".skill-md-editor is present (issue #4002)"
+    )
+    assert FORM_GUARD.search(body), (
+        "user-skill card click handler must skip collapse while the structured "
+        ".skill-form editor is open"
     )
 
 

@@ -50,14 +50,25 @@ def test_vision_describe_skips_thinking():
     """Thinking-enabled Qwen burned 1000+ <think> tokens before the image
     description — a minute of invisible pre-stream latency per image. The
     describe prompt steers reasoning off (/no_think = Qwen3 soft switch; other
-    VL models see a stray token, harmless). Deliberately NO max_tokens cap —
-    the user wants full description detail preserved."""
+    VL models see a stray token, harmless)."""
     src = Path("src/document_processor.py").read_text(encoding="utf-8")
     assert "/no_think" in src
     assert "no reasoning" in src
-    # No hard cap on the describe call (detail > speed, per user).
-    idx = src.index("VISION_ANALYSIS_TIMEOUT_SECONDS")
-    assert "max_tokens" not in src[idx:idx + 300]
+
+
+def test_vision_describe_is_capped_generously():
+    """This call used to be uncapped on purpose ("detail > speed"). That let a
+    VL model run to 5096 tokens / 2m05s and get cut by the proxy, which the
+    user saw as a bare "Error 524" — no description AND no reply.
+
+    So there is now a ceiling, deliberately set far above a real description
+    rather than tuned for speed: it exists to stop runaway loops, not to trim
+    detail. VISION_MAX_TOKENS=0 restores the uncapped behaviour."""
+    src = Path("src/document_processor.py").read_text(encoding="utf-8")
+    assert "VISION_MAX_OUTPUT_TOKENS" in src
+    assert "max_tokens=VISION_MAX_OUTPUT_TOKENS" in src
+    import src.document_processor as dp
+    assert dp.VISION_MAX_OUTPUT_TOKENS >= 1536, "the cap must not be tuned down into real output"
 
 
 def test_dead_fetch_reconnects_instead_of_reprompting_when_run_alive():
@@ -91,8 +102,21 @@ def test_stream_registered_before_preprocessing_with_self_heal():
     # occurrence in the file, which belongs to a different route.
     ctx = routes_src.index("# Build shared context (stream path uses enhanced_message")
     assert reg < ctx, "early registration must precede chat_stream preprocessing"
-    assert "_active_streams.setdefault(session, {" in routes_src
+    assert "_active_streams.setdefault(session, _preparing_stream)" in routes_src
 
     # Self-heal in stream_status for orphaned preparing entries.
     heal = routes_src.index('rec.get("phase") == "preparing"')
     assert 'rec.get("ts", 0) > 900' in routes_src[heal:heal + 200]
+
+
+def test_preprocessing_failure_clears_only_its_own_stream_marker():
+    """A context-build failure occurs before _safe_stream exists, so it must
+    remove its early marker immediately without deleting an older live run
+    observed by setdefault during a rapid second send."""
+    routes_src = Path("routes/chat_routes.py").read_text(encoding="utf-8")
+    ctx = routes_src.index("# Build shared context (stream path uses enhanced_message")
+    block = routes_src[ctx:ctx + 2200]
+    assert "try:\n            ctx = await build_chat_context(" in block
+    assert "except BaseException:" in block
+    assert "if _active_streams.get(session) is _preparing_stream:" in block
+    assert "_active_streams.pop(session, None)" in block

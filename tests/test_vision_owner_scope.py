@@ -103,12 +103,12 @@ def test_vision_analysis_uses_owner_scoped_primary_and_fallback(monkeypatch, tmp
 
 
 def test_request_vision_call_sites_pass_owner():
-    chat_source = (ROOT / "src" / "chat_handler.py").read_text()
-    processor_source = (ROOT / "src" / "document_processor.py").read_text()
-    upload_source = (ROOT / "routes" / "upload_routes.py").read_text()
-    document_source = (ROOT / "routes" / "document_routes.py").read_text()
-    gallery_source = (ROOT / "routes" / "gallery" / "gallery_routes.py").read_text()
-    memory_source = (ROOT / "routes" / "memory" / "memory_routes.py").read_text()
+    chat_source = (ROOT / "src" / "chat_handler.py").read_text(encoding="utf-8")
+    processor_source = (ROOT / "src" / "document_processor.py").read_text(encoding="utf-8")
+    upload_source = (ROOT / "routes" / "upload_routes.py").read_text(encoding="utf-8")
+    document_source = (ROOT / "routes" / "document_routes.py").read_text(encoding="utf-8")
+    gallery_source = (ROOT / "routes" / "gallery" / "gallery_routes.py").read_text(encoding="utf-8")
+    memory_source = (ROOT / "routes" / "memory" / "memory_routes.py").read_text(encoding="utf-8")
 
     assert "asyncio.to_thread(" in chat_source
     assert "analyze_image_with_vl_result," in chat_source

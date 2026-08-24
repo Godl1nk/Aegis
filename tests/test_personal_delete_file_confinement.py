@@ -2,7 +2,11 @@ import asyncio
 import os
 from pathlib import Path
 
+import pytest
+
 from routes import personal_routes
+
+_WINDOWS = os.name == "nt"
 
 
 class _FakePersonalDocs:
@@ -30,6 +34,9 @@ def _delete_endpoint(personal_docs):
     raise AssertionError("DELETE /api/personal/file endpoint not found")
 
 
+@pytest.mark.skipif(
+    _WINDOWS, reason="symlink creation needs SeCreateSymbolicLink privilege"
+)
 def test_delete_file_refuses_symlink_directory_escape(tmp_path, monkeypatch):
     uploads = tmp_path / "uploads"
     uploads.mkdir()

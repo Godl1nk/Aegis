@@ -227,11 +227,10 @@ def test_audit_session_fallback_uses_resolver_without_manual_default(monkeypatch
     monkeypatch.setattr(task_endpoint, "resolve_task_endpoint", fake_resolve_task_endpoint)
     monkeypatch.setattr(mr, "audit_memories", fake_audit_memories)
     monkeypatch.setitem(sys.modules, "routes.model_routes", fake_model_routes)
-    monkeypatch.setattr(
-        mr,
-        "SessionLocal",
-        lambda: (_ for _ in ()).throw(AssertionError("manual default branch should not run")),
-    )
+    # (There used to be a SessionLocal tripwire here asserting the manual
+    # default branch never runs. memory_routes no longer references
+    # SessionLocal at all — the import was dead — so patching the attribute
+    # could never fire. The resolver assertions below cover the same intent.)
 
     out = asyncio.run(audit_route(request=_request("alice"), session="session-1"))
 

@@ -44,26 +44,10 @@ async def _delete_endpoint_for_task(task: dict) -> None:
             task.get("sessionId") or task.get("id") or "",
         )
         return
-    import re as _re
-    payload = task.get("payload") or {}
-    cmd = str(payload.get("_cmd") or "")
-    remote = task.get("remoteHost") or ""
-    # Build host the same way _auto_register_llm_endpoint does so URL match wins.
-    if remote:
-        host = remote.split("@")[-1] if "@" in remote else remote
-    else:
-        host = "host.docker.internal"
-    port_match = _re.search(r"--port\s+(\d+)", cmd)
-    ollama_host_match = _re.search(r"OLLAMA_HOST=[^\s]*?:(\d+)", cmd)
-    if port_match:
-        port = int(port_match.group(1))
-    elif ollama_host_match:
-        port = int(ollama_host_match.group(1))
-    elif "ollama" in cmd:
-        port = 11434
-    else:
-        port = 8080
-    base_url = f"http://{host}:{port}/v1"
+    # (No host/port parsing here: this used to derive a base_url to match the
+    # endpoint by URL. The lookup below matches on endpoint_id instead — see the
+    # comment there for why URL matching was unsafe — so the derived URL had no
+    # remaining consumer.)
     try:
         async with httpx.AsyncClient(timeout=8) as client:
             r = await client.get(

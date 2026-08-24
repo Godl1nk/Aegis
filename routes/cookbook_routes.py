@@ -53,11 +53,9 @@ from routes.cookbook_helpers import (
     _safe_env_prefix, _local_tooling_path_export, _append_serve_preflight_exit_lines,
     _append_serve_exit_code_lines, _append_llama_cpp_linux_accel_build_lines, _cached_model_scan_script,
     load_stored_hf_token,
-    _append_vllm_linux_preflight_lines, _ollama_bind_from_cmd, _pip_install_fallback_chain,
+    _ollama_bind_from_cmd, _pip_install_fallback_chain,
     _pip_install_no_cache, _user_shell_path_bootstrap, _venv_safe_local_pip_install_cmd,
-    _diagnose_serve_output, run_ssh_command_async,
-    _ollama_bind_from_cmd, _pip_install_fallback_chain, _pip_install_no_cache,
-    _user_shell_path_bootstrap, _venv_safe_local_pip_install_cmd,
+    run_ssh_command_async,
     _append_pip_install_runner_lines, _pip_install_command_without_break_system_packages,
     _normalize_llama_cpp_python_cache_types,
     ModelDownloadRequest, ServeRequest,
@@ -1240,7 +1238,6 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append(_HF_TOKEN_STATUS_SNIPPET)
             # Wrap the download in a retry loop. Large HF/Ollama transfers can
             # hit transient network failures; both backends resume cached partials.
-            mw = 4 if req.disable_hf_transfer else 8
             runner_lines.append('_max_retries=10; _attempt=0; _ec=0')
             runner_lines.append('while [ $_attempt -lt $_max_retries ]; do')
             runner_lines.append('  _attempt=$((_attempt+1))')
@@ -3182,8 +3179,6 @@ def setup_cookbook_routes() -> APIRouter:
         if _cookbook_state_path.exists():
             try:
                 state = json.loads(_cookbook_state_path.read_text(encoding="utf-8"))
-                saved_tasks = state.get("tasks", [])
-                tasks = saved_tasks if isinstance(saved_tasks, list) else list(saved_tasks.values()) if isinstance(saved_tasks, dict) else []
                 client_state = _state_for_client(state)
                 _state_get_cache.update({"ts": now, "mtime": mtime, "value": client_state})
                 return client_state

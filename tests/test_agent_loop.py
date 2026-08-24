@@ -4,6 +4,8 @@ and _append_tool_results. Uses mock imports to avoid loading the full app stack.
 import sys
 from unittest.mock import MagicMock
 
+import pytest
+
 _MOCKED_IMPORTS = [
     'sqlalchemy', 'sqlalchemy.orm', 'sqlalchemy.ext', 'sqlalchemy.ext.declarative',
     'sqlalchemy.ext.hybrid', 'sqlalchemy.sql', 'sqlalchemy.sql.expression',
@@ -120,6 +122,7 @@ def test_code_generation_request_classifies_as_document():
     assert artifact == {
         "requested": True,
         "standalone": False,
+        "multi_file": False,
         "language": "html",
         "title": "Generating HTML",
     }
@@ -133,6 +136,32 @@ def test_explicit_chat_output_request_classifies_as_standalone():
     assert artifact["requested"] is True
     assert artifact["standalone"] is True
     assert artifact["language"] == "html"
+
+
+def test_multi_file_code_request_routes_to_workspace_files():
+    text = "Create a multi-file React app in a new workspace."
+    artifact = _classify_code_artifact_request(text)
+    intent = _classify_agent_request([], text)
+
+    assert artifact["requested"] is True
+    assert artifact["standalone"] is False
+    assert artifact["multi_file"] is True
+    assert "files" in intent["domains"]
+    assert "documents" not in intent["domains"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Set up a React project.",
+        "Create a multi-file project.",
+        "Create a repository for this codebase.",
+    ],
+)
+def test_project_phrasing_routes_to_workspace_files(text):
+    artifact = _classify_code_artifact_request(text)
+    assert artifact["requested"] is True
+    assert artifact["multi_file"] is True
 
 
 def test_conceptual_code_question_does_not_open_artifact_editor():

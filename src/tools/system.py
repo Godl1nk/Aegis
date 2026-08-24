@@ -8,8 +8,6 @@ The admin manage_* tools (endpoints, mcp, webhooks, tokens, settings) live in
 """
 import json
 import logging
-import os
-import re
 from typing import Any, Dict, List, Optional
 
 from src.tools._common import _parse_tool_args
@@ -513,6 +511,7 @@ _APP_API_BLOCKLIST_PREFIXES = (
     "/api/shell",          # host shell execution must stay behind named command tooling
     "/api/backup/restore", # destructive restore
     "/api/approvals",      # dangerous-command approvals: only the HUMAN resolves these
+    "/api/workspace",      # host file browser/editor is human-only; agent uses confined file tools
 )
 
 # (method, prefix) pairs to refuse specifically. Used for endpoints

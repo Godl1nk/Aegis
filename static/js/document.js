@@ -4470,6 +4470,22 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     _discardEmail();
   }
 
+  /** Hide transient views that belong to the document being left. */
+  function _resetTransientDocViews() {
+    exitHtmlPreview();
+    _setMarkdownPreviewActive(false, { remember: false });
+    for (const id of ['doc-csv-preview', 'doc-run-output']) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      el.style.display = 'none';
+      el.innerHTML = '';
+    }
+    const pdfView = document.getElementById('doc-pdf-view');
+    if (pdfView) pdfView.style.display = 'none';
+    const wrap = document.getElementById('doc-editor-wrap');
+    if (wrap) wrap.style.display = '';
+  }
+
   function switchToDoc(docId, opts = {}) {
     if (!docs.has(docId)) return;
     _hideLoadingOverlay();
@@ -4480,6 +4496,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // the doc being opened, so saving here wrote '' into the map and the doc
     // opened blank (close + reopen "fixed" it by refetching from the server).
     if (!opts.skipSave) saveCurrentToMap();
+    _resetTransientDocViews();
 
     // Auto-delete the doc we're leaving if it's completely empty
     const prevId = activeDocId;
@@ -10287,6 +10304,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // points at the previously-active doc here, so exitDiffMode(true) restores
     // and saves THAT doc — same guard handleDocUpdate/switchToDoc use.
     if (_diffModeActive) exitDiffMode(true);
+    if (!_streamDocId || activeDocId !== _streamDocId) saveCurrentToMap();
+    _resetTransientDocViews();
     _setDocWritingIndicator(true, 'generating');
     // Live view: mount the editor pane so the user watches the code being
     // written as it streams, instead of it landing invisibly behind a closed
@@ -10543,6 +10562,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     return !!(preview && preview.style.display !== 'none');
   }
 
+  function _isHtmlPreviewVisible() {
+    const preview = document.getElementById('doc-html-preview');
+    return !!(_htmlPreviewActive && preview && preview.style.display !== 'none');
+  }
+
   function _handleMarkdownPreviewClickHint() {
     if (!_isMarkdownPreviewVisible()) return;
     const lang = ((docs.get(activeDocId)?.language) || document.getElementById('doc-language-select')?.value || '').toLowerCase();
@@ -10576,9 +10600,24 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     return true;
   }
 
+  function _refreshHtmlPreviewIfVisible(docId, content) {
+    if (!_isHtmlPreviewVisible() || docId !== activeDocId) return false;
+    const doc = docs.get(docId);
+    const lang = ((doc && doc.language) || document.getElementById('doc-language-select')?.value || '').toLowerCase();
+    if (!_isRenderLang(lang)) return false;
+    const textarea = document.getElementById('doc-editor-textarea');
+    if (textarea) textarea.value = content;
+    const preview = document.getElementById('doc-html-preview');
+    if (preview) preview.srcdoc = content;
+    syncHighlighting();
+    return true;
+  }
+
   /** Handle SSE doc_update event from AI */
   export function handleDocUpdate(data) {
     const streamingId = streamDocFinalize();
+    const previousActiveDocId = activeDocId;
+    const htmlPreviewWasVisible = _isHtmlPreviewVisible();
     // Discard any pending AI-edit diff before this update changes the active
     // document. The diff state (_diffModeActive/_diffOldContent/...) is a
     // module-global singleton bound to whatever doc was active when the diff
@@ -10731,6 +10770,9 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (docInd) docInd.classList.add('visible');
 
     // Switch to this doc's tab
+    if (previousActiveDocId && previousActiveDocId !== docId) {
+      _resetTransientDocViews();
+    }
     activeDocId = docId;
 
     const badge = document.getElementById('doc-version-badge');
@@ -10763,6 +10805,9 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       if (markdownPreviewWasVisible && _refreshMarkdownPreviewIfVisible(docId, newContent)) {
         // Markdown docs shown as RENDERED preview: refresh the preview in place
         // (issue #2182) rather than dropping into a code diff.
+      } else if (htmlPreviewWasVisible && _refreshHtmlPreviewIfVisible(docId, newContent)) {
+        // Keep a visible HTML/SVG/XML preview live instead of updating only
+        // the hidden editor behind a stale iframe.
       } else {
         // COALESCE rapid multi-edit turns. A "spam edit" (the model firing 10+
         // edit_document calls in one turn) previously rebuilt the entire diff
@@ -10823,7 +10868,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       } else {
         if (textarea) textarea.value = newContent;
         syncHighlighting();
-        _refreshMarkdownPreviewIfVisible(docId, newContent);
+        const markdownRefreshed = _refreshMarkdownPreviewIfVisible(docId, newContent);
+        if (!markdownRefreshed && htmlPreviewWasVisible) {
+          _refreshHtmlPreviewIfVisible(docId, newContent);
+        }
       }
     }
 

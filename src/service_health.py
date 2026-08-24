@@ -41,7 +41,6 @@ import concurrent.futures
 import logging
 import socket
 import ssl
-import time
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 

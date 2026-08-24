@@ -83,7 +83,7 @@ def test_executor_policy_backstop_blocks_tools():
     )
     assert desc == "bash: BLOCKED"
     assert result["exit_code"] == 1
-    assert "forbade" in result["error"]
+    assert "forbidden" in result["error"]
 
 
 def test_agent_loop_blocks_guide_only_fenced_tool_before_start(monkeypatch):

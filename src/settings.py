@@ -88,6 +88,15 @@ DEFAULT_SETTINGS = {
     "image_quality": "medium",
     "image_prompt_format": "auto",
     "image_prompt_json_template": DEFAULT_JSON_TEMPLATE,
+    # ── Reasoning / thinking effort (src/reasoning_control.py) ──
+    # "auto" leaves each serving path's own default (and reproduces the
+    # behaviour that used to be hardcoded per provider). "off" asks for no
+    # reasoning; low/medium/high grade it on models that grade it. Models whose
+    # only control is boolean ignore the graded levels — the UI hides them.
+    "reasoning_effort_default": "auto",
+    # Per-model override, {model_id: preference}. The preference is model-wide;
+    # reasoning_control.py resolves its wire mechanism for the active endpoint.
+    "reasoning_effort_by_model": {},
     "vision_model": "",
     "vision_enabled": True,
     # Ordered fallback chain for the Vision model (image analysis, OCR, tagging).
@@ -322,6 +331,11 @@ def is_setting_overridden(key: str) -> bool:
 # model + image-generation model. The owner argument is the authed username
 # resolved by FastAPI deps; an empty/None owner falls through to the global.
 _PER_USER_KEYS = {
+    # NOTE: reasoning_effort_* are deliberately NOT here. The payload builders
+    # in llm_core apply them and have no owner in scope, so a per-user value
+    # would show in Settings and never reach a request. Global keeps the UI and
+    # the wire in agreement; make it per-user only alongside threading the
+    # owner through llm_core.
     "vision_model", "vision_enabled", "vision_model_fallbacks",
     "image_model", "image_edit_model", "image_gen_enabled", "image_quality", "image_prompt_format", "image_prompt_json_template",
     "ask_image_model",

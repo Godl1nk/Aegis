@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 from core.models import ChatMessage
 from src.request_models import ChatRequest
-from src.llm_core import llm_call_async, llm_call_async_with_fallback, stream_llm, stream_llm_with_fallback
+from src.llm_core import llm_call_async, stream_llm, stream_llm_with_fallback
 from src.agent_loop import stream_agent_loop
 from src import agent_runs
 from src.model_context import estimate_tokens
@@ -643,7 +643,7 @@ def setup_chat_routes(
         chat_mode = str(form_data.get("mode", "")).lower()  # 'chat' or 'agent'
         # Workspace: confine the agent's file/shell tools to this folder.
         workspace, workspace_rejected = _resolve_request_workspace(
-            request, form_data.get("workspace")
+            request, form_data.get("workspace") or (body or {}).get("workspace")
         )
         # Plan mode is a modifier on agent mode — it only makes sense with tools.
         if plan_mode:
@@ -865,33 +865,42 @@ def setup_chat_routes(
         # completes regardless). setdefault: never clobber a live record.
         # _safe_stream's finally pops it on every generator path; stream_status
         # self-heals a stale 'preparing' entry if the route dies in between.
-        _active_streams.setdefault(session, {
+        _preparing_stream = {
             "status": "streaming", "phase": "preparing", "ts": time.time(),
             "partial": "", "query": message,
-        })
+        }
+        _active_streams.setdefault(session, _preparing_stream)
 
         # Build shared context (stream path uses enhanced_message for context preface)
-        ctx = await build_chat_context(
-            sess, request, chat_handler, chat_processor,
-            message=message,
-            session_id=session,
-            preset_id=preset_id,
-            att_ids=att_ids,
-            use_web=use_web,
-            use_rag=use_rag,
-            time_filter=time_filter,
-            incognito=incognito,
-            no_memory=no_memory,
-            search_context=search_context,
-            compare_mode=compare_mode,
-            webhook_manager=webhook_manager,
-            use_enhanced_message=True,
-            # Skills index only ships when the model can actually call
-            # manage_skills (agent mode). In plain chat or incognito the
-            # index would be useless / unwanted noise.
-            agent_mode=(chat_mode == "agent"),
-            allow_tool_preprocessing=allow_tool_preprocessing,
-        )
+        try:
+            ctx = await build_chat_context(
+                sess, request, chat_handler, chat_processor,
+                message=message,
+                session_id=session,
+                preset_id=preset_id,
+                att_ids=att_ids,
+                use_web=use_web,
+                use_rag=use_rag,
+                time_filter=time_filter,
+                incognito=incognito,
+                no_memory=no_memory,
+                search_context=search_context,
+                compare_mode=compare_mode,
+                webhook_manager=webhook_manager,
+                use_enhanced_message=True,
+                # Skills index only ships when the model can actually call
+                # manage_skills (agent mode). In plain chat or incognito the
+                # index would be useless / unwanted noise.
+                agent_mode=(chat_mode == "agent"),
+                allow_tool_preprocessing=allow_tool_preprocessing,
+            )
+        except BaseException:
+            # Context building runs before the detached generator owns cleanup.
+            # Remove only the marker this request inserted: a rapid second send
+            # may have observed an older live stream via setdefault().
+            if _active_streams.get(session) is _preparing_stream:
+                _active_streams.pop(session, None)
+            raise
 
         _research_flags = {"do": do_research}  # Mutable container for generator scope
 

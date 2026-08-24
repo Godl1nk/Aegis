@@ -80,6 +80,8 @@ def _install_model_route_import_stubs(monkeypatch):
     db_mod.Document = MagicMock()
     db_mod.DocumentVersion = MagicMock()
     db_mod.GalleryImage = MagicMock()
+    log_safety_mod = types.ModuleType("core.log_safety")
+    log_safety_mod.redact_url = lambda url: url
     middleware_mod = types.ModuleType("core.middleware")
     middleware_mod.require_admin = lambda request: None
     multipart_mod = types.ModuleType("python_multipart")
@@ -96,6 +98,7 @@ def _install_model_route_import_stubs(monkeypatch):
     monkeypatch.delitem(sys.modules, "routes.session_routes", raising=False)
     monkeypatch.setitem(sys.modules, "core", core_mod)
     monkeypatch.setitem(sys.modules, "core.database", db_mod)
+    monkeypatch.setitem(sys.modules, "core.log_safety", log_safety_mod)
     monkeypatch.setitem(sys.modules, "core.middleware", middleware_mod)
     monkeypatch.setitem(sys.modules, "python_multipart", multipart_mod)
     monkeypatch.setitem(sys.modules, "core.models", models_mod)
@@ -517,6 +520,32 @@ async def test_app_api_blocks_cookbook_host_control_routes_before_loopback(monke
 
 
 @pytest.mark.asyncio
+async def test_app_api_blocks_all_workspace_routes_before_loopback(monkeypatch):
+    import httpx
+    from src.tool_implementations import do_app_api
+
+    class UnexpectedAsyncClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("app_api should block workspace routes before loopback")
+
+    monkeypatch.setattr(httpx, "AsyncClient", UnexpectedAsyncClient)
+
+    for method, path in (
+        ("GET", "/api/workspace/entries"),
+        ("GET", "/api/workspace/file"),
+        ("PUT", "/api/workspace/file"),
+        ("DELETE", "/api/workspace/entry"),
+        ("POST", "/api/workspace/create"),
+    ):
+        result = await do_app_api(
+            json.dumps({"action": "call", "method": method, "path": path}),
+            owner="admin",
+        )
+        assert result["exit_code"] == 1
+        assert "Path blocked for safety" in result["error"]
+
+
+@pytest.mark.asyncio
 async def test_app_api_blocks_search_route_before_loopback(monkeypatch):
     import httpx
     from src.tool_implementations import do_app_api
@@ -878,6 +907,16 @@ def test_mcp_json_primary_keys_are_all_live():
 
     dead = set(_MCP_JSON_PRIMARY_KEYS) - set(_MCP_TOOL_MAP)
     assert not dead, f"dead JSON-primary entries (never reach _build_mcp_args): {sorted(dead)}"
+
+
+def test_mcp_arg_parsers_are_all_live():
+    """Same reachability rule for _MCP_ARG_PARSERS, the sibling dict that feeds
+    _build_mcp_args. manage_memory sat here as dead code — it routes through
+    dispatch_ai_tool, so its parser never ran."""
+    from src.tool_execution import _MCP_ARG_PARSERS, _MCP_TOOL_MAP
+
+    dead = set(_MCP_ARG_PARSERS) - set(_MCP_TOOL_MAP)
+    assert not dead, f"dead arg parsers (never reach _build_mcp_args): {sorted(dead)}"
 
 
 @pytest.mark.asyncio

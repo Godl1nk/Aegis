@@ -4,10 +4,9 @@ import os
 import re
 import difflib
 import fnmatch
-import shutil
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any
 
-from src.constants import MAX_READ_CHARS, MAX_DIFF_LINES, MAX_OUTPUT_CHARS
+from src.constants import MAX_READ_CHARS, MAX_DIFF_LINES
 
 _CODENAV_SKIP_DIRS = frozenset({
     ".git", ".hg", ".svn", "node_modules", "venv", ".venv", "__pycache__",
@@ -42,6 +41,38 @@ def _glob_to_regex(pat: str) -> "re.Pattern":
             i += 1
     return re.compile("".join(out))
 
+def _detect_newline(path: str, default: str = "\n") -> str:
+    """The line ending the existing file uses, or `default` for a new file.
+
+    Text-mode writes translate "\\n" to os.linesep, so on Windows every write
+    silently converted an LF file to CRLF — a one-line edit rewrote EVERY line
+    in the file. That buries the real change in a whole-file diff, and for
+    shell scripts it reintroduces the CRLF shebang that breaks Docker
+    ("exec entrypoint.sh: no such file or directory", issues #150/#77) — the
+    exact failure .gitattributes exists to prevent.
+    """
+    try:
+        with open(path, "rb") as f:
+            sample = f.read(65536)
+    except OSError:
+        return default
+    if not sample:
+        return default
+    crlf = sample.count(b"\r\n")
+    lf = sample.count(b"\n") - crlf
+    return "\r\n" if crlf > lf else "\n"
+
+
+def _write_text_preserving_newlines(path: str, text: str, newline: str) -> None:
+    """Write `text` (which uses "\\n") with `newline` endings, verbatim.
+
+    newline="" disables translation so what we build is exactly what lands.
+    """
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(normalized.replace("\n", newline) if newline != "\n" else normalized)
+
+
 def _unified_diff(old: str, new: str, path: str) -> Optional[Dict[str, Any]]:
     if old == new:
         return None
@@ -72,7 +103,7 @@ def _unified_diff(old: str, new: str, path: str) -> Optional[Dict[str, Any]]:
 
 class EditFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
+        from src.tool_execution import _resolve_tool_path
         try:
             args = json.loads(content) if content.strip().startswith("{") else {}
         except (json.JSONDecodeError, TypeError):
@@ -94,6 +125,10 @@ class EditFileTool:
 
         def _apply():
             """Helper function that performs the actual string replacement and file writing logic."""
+            # Read with universal newlines so `old_string` matches what the
+            # model saw from read_file, but write back with the file's OWN
+            # ending so an edit never reflows the whole file.
+            eol = _detect_newline(path)
             with open(path, "r", encoding="utf-8") as f:
                 original = f.read()
             count = original.count(old)
@@ -102,8 +137,7 @@ class EditFileTool:
             if count > 1 and not replace_all:
                 return original, None, f"not_unique:{count}"
             updated = original.replace(old, new) if replace_all else original.replace(old, new, 1)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(updated)
+            _write_text_preserving_newlines(path, updated, eol)
             return original, updated, "ok"
 
         try:
@@ -132,7 +166,7 @@ class EditFileTool:
 
 class ReadFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
+        from src.tool_execution import _resolve_tool_path
         raw_path, offset, limit = content.split("\n", 1)[0].strip(), 0, 0
         _stripped = content.strip()
         if _stripped.startswith("{"):
@@ -182,7 +216,7 @@ class ReadFileTool:
 
 class WriteFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
+        from src.tool_execution import _resolve_tool_path
         lines = content.split("\n", 1)
         raw_path = lines[0].strip()
         body = lines[1] if len(lines) > 1 else ""
@@ -213,11 +247,14 @@ class WriteFileTool:
                         old = f.read()
                 except (FileNotFoundError, IsADirectoryError, UnicodeDecodeError, OSError):
                     old = ""
+                # Overwriting keeps the file's existing convention; a NEW file
+                # gets LF, which is what .gitattributes normalises to anyway
+                # (and what shell scripts require).
+                eol = _detect_newline(path, default="\n")
                 d = os.path.dirname(path)
                 if d:
                     os.makedirs(d, exist_ok=True)
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(body)
+                _write_text_preserving_newlines(path, body, eol)
                 return old, len(body)
             old_content, size = await asyncio.to_thread(_write)
         except PermissionError:
@@ -232,7 +269,7 @@ class WriteFileTool:
 
 class LsTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
+        from src.tool_execution import _resolve_search_root, _truncate
         raw_path = ""
         _s = (content or "").strip()
         if _s.startswith("{"):
@@ -284,7 +321,6 @@ class GlobTool:
         from src.tool_execution import (
             _SENSITIVE_BASENAMES,
             _is_sensitive_path,
-            _resolve_tool_path,
             _resolve_search_root,
             _truncate,
         )
@@ -385,7 +421,6 @@ class GrepTool:
         from src.tool_execution import (
             _SENSITIVE_FILE_PATTERNS,
             _is_sensitive_path,
-            _resolve_tool_path,
             _resolve_search_root,
             _truncate,
         )

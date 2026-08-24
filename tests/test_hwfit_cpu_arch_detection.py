@@ -17,6 +17,10 @@ def _clear_hwfit_cache(monkeypatch):
 
 def _stub_common_probe(monkeypatch, machine):
     monkeypatch.setattr(hardware.platform, "machine", lambda: machine)
+    # On a Windows host detect_system() short-circuits into the PowerShell/WMI
+    # probe and never reaches the generic path under test. Disable it so the
+    # arch normalization is exercised the same way on every host OS.
+    monkeypatch.setattr(hardware, "_detect_windows", lambda: None)
     monkeypatch.setattr(hardware, "_get_ram_gb", lambda: 64.0)
     monkeypatch.setattr(hardware, "_get_available_ram_gb", lambda: 48.0)
     monkeypatch.setattr(hardware, "_get_cpu_count", lambda: 16)

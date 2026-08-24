@@ -28,6 +28,16 @@ from src.youtube_handler import (
 
 logger = logging.getLogger(__name__)
 
+# How long a chat turn will wait for an image description before answering
+# without it. Deliberately below the ~100s cut-off common to reverse proxies
+# and tunnels (Cloudflare returns 524), so a slow vision model degrades the
+# reply instead of killing the request. The raw call keeps its own, longer
+# timeout in document_processor for non-chat callers.
+try:
+    VISION_CHAT_WAIT_SECONDS = float(os.environ.get("VISION_CHAT_WAIT_SECONDS", "75") or 75)
+except (TypeError, ValueError):
+    VISION_CHAT_WAIT_SECONDS = 75.0
+
 
 def _sync_upload_vision_to_gallery(file_info: Dict[str, Any], owner: Optional[str], text: str) -> None:
     file_hash = (file_info or {}).get("hash")
@@ -259,11 +269,34 @@ class ChatHandler:
                             except Exception:
                                 vl_desc = None
                         if not vl_desc:
-                            vl_result = await asyncio.to_thread(
-                                analyze_image_with_vl_result,
-                                file_info["path"],
-                                owner=owner,
-                            )
+                            # Bounded wait. The chat request cannot start streaming
+                            # until this returns, so a vision endpoint that stalls
+                            # holds the whole HTTP request open — long enough for a
+                            # reverse proxy to cut it and hand the user a bare
+                            # "Error 524" for a reply that was never coming. Past
+                            # the budget we answer without the description rather
+                            # than losing the turn. (to_thread can't be cancelled;
+                            # the worker finishes into the cache and the NEXT turn
+                            # gets it for free.)
+                            try:
+                                vl_result = await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        analyze_image_with_vl_result,
+                                        file_info["path"],
+                                        owner=owner,
+                                    ),
+                                    timeout=VISION_CHAT_WAIT_SECONDS,
+                                )
+                            except asyncio.TimeoutError:
+                                logger.warning(
+                                    "Vision description exceeded %ss for %s — continuing without it",
+                                    VISION_CHAT_WAIT_SECONDS, file_info.get("name"),
+                                )
+                                vl_result = {
+                                    "text": "[Image description timed out — the vision model did not "
+                                            "respond in time. Ask again to retry.]",
+                                    "model": vl_model,
+                                }
                             vl_desc = vl_result.get("text", "")
                             vl_model = vl_result.get("model", "")
                             if vl_desc and not vl_desc.startswith("["):

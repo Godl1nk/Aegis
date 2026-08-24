@@ -499,3 +499,59 @@ def test_real_inline_math_still_renders(node_available):
     assert _math_spans("Let $x + y$ be the sum.") == ["x + y"]
     assert _math_spans("Solve $3x$ for x.") == ["3x"]
     assert _math_spans("Energy $E = mc^2$ is famous.") == ["E = mc^2"]
+
+
+# ---------------------------------------------------------------------------
+# <br> inside table cells
+# ---------------------------------------------------------------------------
+# GFM tables cannot contain block-level markdown, so <br> is the only way to
+# break a line inside a cell — and models use it constantly for multi-item
+# cells. The renderer escaped it, printing a literal "<br>" through the middle
+# of the text. Reproduced live from a real reply (machining defects table).
+
+_BR_TABLE = (
+    "| Defect | Fix |\n"
+    "| --- | --- |\n"
+    "| Chatter | *If chatter marks:*<br>\u2022 Reduce **cutting speed**"
+    "<br>\u2022 Increase **rigidity** |"
+)
+
+
+def test_br_in_table_cell_becomes_a_real_line_break(node_available):
+    html = _run_markdown_case(_BR_TABLE)
+    assert "&lt;br&gt;" not in html, "the literal tag leaked into the output"
+    assert html.count("<br>") == 2
+
+
+def test_the_surrounding_table_still_renders(node_available):
+    """The first fix routed <br> through the ___ALLOWED_HTML_ placeholder, but
+    the table converter bails on any block containing that prefix — so the
+    table stopped rendering entirely, which is worse than the literal tag."""
+    html = _run_markdown_case(_BR_TABLE)
+    assert "<table" in html
+    assert "<td" in html
+
+
+def test_self_closing_br_forms_are_handled(node_available):
+    html = _run_markdown_case("| a | b |\n| --- | --- |\n| x | one<br/>two<br />three |")
+    assert "&lt;br" not in html
+    assert html.count("<br>") == 2
+
+
+def test_br_outside_a_table_still_breaks(node_available):
+    assert "<br>" in _run_markdown_case("line one<br>line two")
+
+
+def test_a_br_with_attributes_is_still_escaped(node_available):
+    """Only the bare tag is allowed through. Anything carrying attributes is
+    not a line break — it is an injection attempt and stays escaped."""
+    html = _run_markdown_case("text<br onload=alert(1)>more")
+    assert "&lt;br onload" in html
+    assert "<br onload" not in html
+
+
+def test_script_tags_are_still_escaped_alongside_br(node_available):
+    html = _run_markdown_case("a<br><script>alert(1)</script>")
+    assert html.count("<br>") == 1
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
