@@ -40,6 +40,7 @@ try:
         _detect_admin_intent,
         _classify_agent_request,
         _classify_code_artifact_request,
+        _is_workspace_document_transfer,
         _is_incomplete_document_tool_call,
         _document_block_as_chat_code,
         _compute_final_metrics,
@@ -162,6 +163,30 @@ def test_project_phrasing_routes_to_workspace_files(text):
     artifact = _classify_code_artifact_request(text)
     assert artifact["requested"] is True
     assert artifact["multi_file"] is True
+
+
+def test_java_minecraft_plugin_routes_to_workspace_files():
+    artifact = _classify_code_artifact_request(
+        "Code me a simple Java plugin for Minecraft 26.2."
+    )
+    assert artifact["requested"] is True
+    assert artifact["multi_file"] is True
+
+
+def test_editor_documents_can_be_moved_into_workspace():
+    active_document = object()
+    assert _is_workspace_document_transfer(
+        "Move the files into the workspace", active_document
+    ) is True
+    assert _is_workspace_document_transfer(
+        "Move the files into the workspace", None
+    ) is False
+    assert _is_workspace_document_transfer(
+        "Explain how workspaces store files", active_document
+    ) is False
+    assert _is_workspace_document_transfer(
+        "Move the codes into the tornado workspace?", active_document
+    ) is True
 
 
 def test_conceptual_code_question_does_not_open_artifact_editor():

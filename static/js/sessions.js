@@ -9,6 +9,7 @@ import { initModelPicker, updateModelPicker } from './modelPicker.js';
 import effortPickerModule, { initEffortPicker } from './effortPicker.js';
 import themeModule from './theme.js';
 import spinnerModule from './spinner.js';
+import workspaceModule from './workspace.js';
 
 const API_BASE = window.location.origin;
 
@@ -268,6 +269,7 @@ let _sessionListFocused = false;
 function _deselectCurrentSession(sid) {
   if (currentSessionId !== sid) return;
   currentSessionId = null;
+  workspaceModule.resetPendingWorkspace();
   uiModule.el('chat-history').innerHTML = '';
   uiModule.el('current-meta').textContent = 'Aegis Chat';
   Storage.remove('lastSessionId');
@@ -1776,6 +1778,7 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
       try { window.documentModule.clearSelection(); } catch {}
     }
     currentSessionId = id;
+    workspaceModule.syncWorkspaceForSession(id);
     // Identify Assistant / task-output sessions so we don't "trap" the user
     // there on return. Skipped from both `lastSessionId` persistence and the
     // URL hash — the user complained that coming back to Aegis kept
@@ -2106,6 +2109,7 @@ export function createDirectChat(url, modelId, endpointId) {
   _skipAutoSelect = true;
   _suppressNextSessionLoading = true;
   currentSessionId = null;
+  workspaceModule.resetPendingWorkspace();
   Storage.remove('lastSessionId');
   history.replaceState(null, '', window.location.pathname);
   document.querySelectorAll('.list-item.active-session, .session-item.active').forEach(el => {
@@ -2196,6 +2200,7 @@ export async function materializePendingSession() {
     try { window.documentModule.clearSelection(); } catch {}
   }
   currentSessionId = payload.id;
+  workspaceModule.syncWorkspaceForSession(payload.id, { materializePending: true });
   Storage.set('lastSessionId', payload.id);
   history.replaceState(null, '', '#' + payload.id);
 
@@ -2238,6 +2243,8 @@ export function getCurrentEndpointUrl() {
 export function setCurrentSessionId(id) {
   _sessionNavToken++;
   currentSessionId = id;
+  if (id) workspaceModule.syncWorkspaceForSession(id);
+  else workspaceModule.resetPendingWorkspace();
   if (!id) {
     _suppressNextSessionLoading = true;
     Storage.remove('lastSessionId');
@@ -2716,6 +2723,7 @@ async function _arcPeekOpen(sid) {
 
     // Set as current session so chat renders
     currentSessionId = sid;
+    workspaceModule.syncWorkspaceForSession(sid);
 
     // Find the archived session metadata
     const meta = _arc.data.find(s => s.id === sid);

@@ -118,6 +118,19 @@ def test_manage_documents_read_filters_to_calling_owner(monkeypatch):
     assert ("owner", "eq", "alice") in query.filters
 
 
+def test_manage_documents_schema_exposes_read_action():
+    from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+
+    schema = next(
+        item["function"]
+        for item in FUNCTION_TOOL_SCHEMAS
+        if item["function"]["name"] == "manage_documents"
+    )
+    actions = schema["parameters"]["properties"]["action"]["enum"]
+    assert "read" in actions
+    assert "offset" in schema["parameters"]["properties"]
+
+
 def test_update_document_active_id_filters_to_calling_owner(monkeypatch):
     query = _Query()
     _install_database_stub(monkeypatch, "src.database", query)

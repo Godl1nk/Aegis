@@ -10,9 +10,12 @@ Covers: the resolver helper, the central binding (the safety net), end-to-end
 confinement of read/write/edit/grep/ls + subprocess cwd via execute_tool_block,
 the get_workspace tool, no-leak across calls, and the admin-gated browse route.
 """
+import asyncio
+import io
 import json
 import os
 import tempfile
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -299,10 +302,12 @@ def test_multi_file_project_surfaces_file_tools_not_document_tools(monkeypatch, 
 
 # ── browse route is admin-gated ─────────────────────────────────────────
 
-def test_browse_is_admin_gated(monkeypatch):
+def test_browse_is_admin_gated(monkeypatch, tmp_path):
     from fastapi import HTTPException
     import routes.workspace_routes as wr
 
+    managed_root = tmp_path / "Workspaces"
+    monkeypatch.setattr(wr, "_WORKSPACES_DIR", os.path.realpath(managed_root))
     router = wr.setup_workspace_routes()
     browse = next(r.endpoint for r in router.routes if r.path == "/api/workspace/browse")
 
@@ -313,9 +318,15 @@ def test_browse_is_admin_gated(monkeypatch):
     assert ei.value.status_code == 403
 
     monkeypatch.setattr(wr, "owner_is_admin_or_single_user", lambda owner: True)
-    out = browse(request=object(), path=os.path.expanduser("~"))
-    assert "dirs" in out and "path" in out
+    browse(request=object(), path="")  # creates the fixed Workspaces root
+    (managed_root / "README.md").write_text("visible", encoding="utf-8")
+    out = browse(request=object(), path="")
+    assert "dirs" in out and "files" in out and "path" in out
+    assert "has_files" in out
     assert all("name" in d and "path" in d for d in out["dirs"])
+    assert out["files"] == [
+        {"name": "README.md", "path": os.path.join(str(managed_root), "README.md")}
+    ]
 
 
 # ── bind-time vetting of the workspace root ─────────────────────────────
@@ -350,9 +361,15 @@ def test_vet_workspace_rejects_filesystem_root():
     assert vet_workspace("/") is None
 
 
-def test_browse_marks_root_unselectable_and_vet_endpoint(monkeypatch):
+def test_browse_and_vet_are_locked_to_workspaces(monkeypatch, tmp_path):
     import routes.workspace_routes as wr
 
+    managed_root = tmp_path / "Workspaces"
+    child = managed_root / "project"
+    child.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setattr(wr, "_WORKSPACES_DIR", os.path.realpath(managed_root))
     router = wr.setup_workspace_routes()
     browse = next(r.endpoint for r in router.routes if r.path == "/api/workspace/browse")
     vet = next(r.endpoint for r in router.routes if r.path == "/api/workspace/vet")
@@ -360,16 +377,29 @@ def test_browse_marks_root_unselectable_and_vet_endpoint(monkeypatch):
     monkeypatch.setattr(wr, "get_current_user", lambda req: "admin")
     monkeypatch.setattr(wr, "owner_is_admin_or_single_user", lambda owner: True)
 
-    out = browse(request=object(), path="/")
-    assert out["selectable"] is False
-    out = browse(request=object(), path=os.path.expanduser("~"))
+    out = browse(request=object(), path="")
+    assert out["path"] == os.path.realpath(managed_root)
+    assert out["parent"] is None
     assert out["selectable"] is True
-
-    assert vet(request=object(), path="/") == {"ok": False, "path": None}
-    home = os.path.realpath(os.path.expanduser("~"))
-    assert vet(request=object(), path="~") == {"ok": True, "path": home}
+    child_out = browse(request=object(), path=str(child))
+    assert child_out["parent"] == os.path.realpath(managed_root)
+    assert child_out["selectable"] is True
 
     from fastapi import HTTPException
+    with pytest.raises(HTTPException) as outside_browse:
+        browse(request=object(), path=str(outside))
+    assert outside_browse.value.status_code == 400
+    assert vet(request=object(), path="/") == {"ok": False, "path": None}
+    assert vet(request=object(), path=str(outside)) == {"ok": False, "path": None}
+    assert vet(request=object(), path=str(managed_root)) == {
+        "ok": True,
+        "path": os.path.realpath(managed_root),
+    }
+    assert vet(request=object(), path=str(child)) == {
+        "ok": True,
+        "path": os.path.realpath(child),
+    }
+
     monkeypatch.setattr(wr, "owner_is_admin_or_single_user", lambda owner: False)
     with pytest.raises(HTTPException) as ei:
         vet(request=object(), path="/tmp")
@@ -380,14 +410,17 @@ def test_create_workspace_folder(monkeypatch, tmp_path):
     from fastapi import HTTPException
     import routes.workspace_routes as wr
 
+    managed_root = tmp_path / "Workspaces"
+    managed_root.mkdir()
+    monkeypatch.setattr(wr, "_WORKSPACES_DIR", os.path.realpath(managed_root))
     router = wr.setup_workspace_routes()
     create = next(r.endpoint for r in router.routes if r.path == "/api/workspace/create")
     monkeypatch.setattr(wr, "get_current_user", lambda req: "admin")
     monkeypatch.setattr(wr, "owner_is_admin_or_single_user", lambda owner: True)
 
-    payload = wr.WorkspaceCreateRequest(parent=str(tmp_path), name="new-project")
+    payload = wr.WorkspaceCreateRequest(parent=str(managed_root), name="new-project")
     out = create(request=object(), payload=payload)
-    assert out == {"path": os.path.realpath(tmp_path / "new-project")}
+    assert out == {"path": os.path.realpath(managed_root / "new-project")}
     assert os.path.isdir(out["path"])
 
     with pytest.raises(HTTPException) as existing:
@@ -398,10 +431,17 @@ def test_create_workspace_folder(monkeypatch, tmp_path):
         with pytest.raises(HTTPException) as invalid:
             create(
                 request=object(),
-                payload=wr.WorkspaceCreateRequest(parent=str(tmp_path), name=name),
+                payload=wr.WorkspaceCreateRequest(parent=str(managed_root), name=name),
             )
         assert invalid.value.status_code == 400
-    assert not (tmp_path / "id_rsa").exists()
+    assert not (managed_root / "id_rsa").exists()
+
+    with pytest.raises(HTTPException) as outside:
+        create(
+            request=object(),
+            payload=wr.WorkspaceCreateRequest(parent=str(tmp_path), name="escape"),
+        )
+    assert outside.value.status_code == 400
 
     monkeypatch.setattr(wr, "owner_is_admin_or_single_user", lambda owner: False)
     with pytest.raises(HTTPException) as forbidden:
@@ -410,6 +450,30 @@ def test_create_workspace_folder(monkeypatch, tmp_path):
             payload=wr.WorkspaceCreateRequest(parent="/does/not/exist", name="x"),
         )
     assert forbidden.value.status_code == 403
+
+
+def test_workspace_picker_defaults_to_managed_container(monkeypatch, tmp_path):
+    import routes.workspace_routes as wr
+
+    managed_root = tmp_path / "Workspaces"
+    monkeypatch.setattr(wr, "_WORKSPACES_DIR", os.path.realpath(managed_root))
+    monkeypatch.setattr(wr, "get_current_user", lambda req: "admin")
+    monkeypatch.setattr(wr, "owner_is_admin_or_single_user", lambda owner: True)
+    router = wr.setup_workspace_routes()
+    browse = next(r.endpoint for r in router.routes if r.path == "/api/workspace/browse")
+    create = next(r.endpoint for r in router.routes if r.path == "/api/workspace/create")
+
+    listing = browse(request=object(), path="")
+    assert listing["path"] == os.path.realpath(managed_root)
+    assert managed_root.is_dir()
+
+    created = create(
+        request=object(),
+        payload=wr.WorkspaceCreateRequest(parent="", name="project"),
+    )
+    project = Path(created["path"])
+    assert project.parent == managed_root
+    assert wr._is_managed_workspace(str(project)) is True
 
 
 def test_workspace_picker_creates_and_selects_folder():
@@ -438,6 +502,9 @@ def _workspace_content_endpoints(router):
             "/api/workspace/entries",
             "/api/workspace/file",
             "/api/workspace/entry",
+            "/api/workspace/download",
+            "/api/workspace/rename",
+            "/api/workspace/root",
         }
     }
 
@@ -452,6 +519,13 @@ def test_workspace_content_routes_gate_before_path_resolution(monkeypatch):
     monkeypatch.setattr(
         wr,
         "_resolve_workspace_entry",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("path resolution must happen after the admin gate")
+        ),
+    )
+    monkeypatch.setattr(
+        wr,
+        "_require_managed_workspace",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("path resolution must happen after the admin gate")
         ),
@@ -473,6 +547,19 @@ def test_workspace_content_routes_gate_before_path_resolution(monkeypatch):
         lambda: endpoints[("DELETE", "/api/workspace/entry")](
             request=object(), workspace="/secret", path="file.py"
         ),
+        lambda: endpoints[("GET", "/api/workspace/download")](
+            request=object(), workspace="/secret"
+        ),
+        lambda: endpoints[("POST", "/api/workspace/rename")](
+            request=object(),
+            payload=wr.WorkspaceRenameRequest(workspace="/secret", name="renamed"),
+        ),
+        lambda: endpoints[("DELETE", "/api/workspace/root")](
+            request=object(),
+            payload=wr.WorkspaceDeleteRequest(
+                workspace="/secret", confirmation="secret"
+            ),
+        ),
     )
     for call in calls:
         with pytest.raises(HTTPException) as forbidden:
@@ -485,6 +572,7 @@ def test_workspace_entries_view_and_revision_checked_update(monkeypatch, tmp_pat
     import stat
     import routes.workspace_routes as wr
 
+    monkeypatch.setattr(wr, "_WORKSPACES_DIR", os.path.realpath(tmp_path))
     project = tmp_path / "project"
     project.mkdir()
     (project / "src").mkdir()
@@ -547,6 +635,7 @@ def test_workspace_file_update_rechecks_revision_before_replace(monkeypatch, tmp
     from fastapi import HTTPException
     import routes.workspace_routes as wr
 
+    monkeypatch.setattr(wr, "_WORKSPACES_DIR", os.path.realpath(tmp_path))
     project = tmp_path / "project"
     project.mkdir()
     source = project / "app.py"
@@ -588,6 +677,7 @@ def test_workspace_content_rejects_escape_sensitive_binary_and_links(monkeypatch
     from fastapi import HTTPException
     import routes.workspace_routes as wr
 
+    monkeypatch.setattr(wr, "_WORKSPACES_DIR", os.path.realpath(tmp_path))
     project = tmp_path / "project"
     project.mkdir()
     outside = tmp_path / "outside.py"
@@ -641,6 +731,7 @@ def test_workspace_file_size_limit_and_safe_delete(monkeypatch, tmp_path):
     from fastapi import HTTPException
     import routes.workspace_routes as wr
 
+    monkeypatch.setattr(wr, "_WORKSPACES_DIR", os.path.realpath(tmp_path))
     project = tmp_path / "project"
     project.mkdir()
     doomed = project / "doomed.txt"
@@ -681,13 +772,128 @@ def test_workspace_file_size_limit_and_safe_delete(monkeypatch, tmp_path):
     assert nonempty.is_dir()
 
 
+def test_workspace_download_zip_skips_links_and_sensitive_files(monkeypatch, tmp_path):
+    import routes.workspace_routes as wr
+
+    monkeypatch.setattr(wr, "_WORKSPACES_DIR", os.path.realpath(tmp_path))
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "src").mkdir()
+    (project / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    (project / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+    linked = project / "linked.txt"
+    try:
+        linked.symlink_to(outside)
+    except OSError:
+        pass
+
+    endpoints = _workspace_content_endpoints(wr.setup_workspace_routes())
+    monkeypatch.setattr(wr, "get_current_user", lambda req: "admin")
+    monkeypatch.setattr(wr, "owner_is_admin_or_single_user", lambda owner: True)
+    response = endpoints[("GET", "/api/workspace/download")](
+        request=object(), workspace=str(project)
+    )
+
+    async def collect():
+        return b"".join([chunk async for chunk in response.body_iterator])
+
+    payload = asyncio.run(collect())
+    assert int(response.headers["content-length"]) == len(payload)
+    assert response.headers["content-disposition"] == 'attachment; filename="project.zip"'
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        names = set(archive.namelist())
+        assert "project/src/app.py" in names
+        assert "project/.env" not in names
+        assert "project/linked.txt" not in names
+
+
+def test_workspace_rename_and_recursive_delete_are_managed(monkeypatch, tmp_path):
+    from fastapi import HTTPException
+    import routes.workspace_routes as wr
+
+    managed_root = tmp_path / "Workspaces"
+    managed_root.mkdir()
+    project = managed_root / "project"
+    project.mkdir()
+    (project / "src").mkdir()
+    (project / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    unmanaged = tmp_path / "outside"
+    unmanaged.mkdir()
+
+    monkeypatch.setattr(wr, "_WORKSPACES_DIR", os.path.realpath(managed_root))
+    monkeypatch.setattr(wr, "get_current_user", lambda req: "admin")
+    monkeypatch.setattr(wr, "owner_is_admin_or_single_user", lambda owner: True)
+    endpoints = _workspace_content_endpoints(wr.setup_workspace_routes())
+
+    managed_listing = endpoints[("GET", "/api/workspace/entries")](
+        request=object(), workspace=str(project), path=""
+    )
+    assert managed_listing["managed"] is True
+    with pytest.raises(HTTPException) as outside_listing:
+        endpoints[("GET", "/api/workspace/entries")](
+            request=object(), workspace=str(unmanaged), path=""
+        )
+    assert outside_listing.value.status_code == 400
+
+    with pytest.raises(HTTPException) as container_delete:
+        endpoints[("DELETE", "/api/workspace/root")](
+            request=object(),
+            payload=wr.WorkspaceDeleteRequest(
+                workspace=str(managed_root), confirmation="Workspaces"
+            ),
+        )
+    assert container_delete.value.status_code == 400
+    assert managed_root.is_dir()
+
+    renamed = endpoints[("POST", "/api/workspace/rename")](
+        request=object(),
+        payload=wr.WorkspaceRenameRequest(workspace=str(project), name="renamed"),
+    )
+    renamed_path = Path(renamed["path"])
+    assert renamed_path.name == "renamed"
+    assert (renamed_path / "src" / "app.py").is_file()
+    assert not project.exists()
+
+    with pytest.raises(HTTPException) as outside_rename:
+        endpoints[("POST", "/api/workspace/rename")](
+            request=object(),
+            payload=wr.WorkspaceRenameRequest(workspace=str(unmanaged), name="nope"),
+        )
+    assert outside_rename.value.status_code == 400
+    assert unmanaged.is_dir()
+
+    with pytest.raises(HTTPException) as wrong_confirmation:
+        endpoints[("DELETE", "/api/workspace/root")](
+            request=object(),
+            payload=wr.WorkspaceDeleteRequest(
+                workspace=str(renamed_path), confirmation="project"
+            ),
+        )
+    assert wrong_confirmation.value.status_code == 400
+    assert renamed_path.is_dir()
+
+    deleted = endpoints[("DELETE", "/api/workspace/root")](
+        request=object(),
+        payload=wr.WorkspaceDeleteRequest(
+            workspace=str(renamed_path), confirmation="renamed"
+        ),
+    )
+    assert deleted["ok"] is True
+    assert deleted["parent"] == os.path.realpath(managed_root)
+    assert not renamed_path.exists()
+
+
 # ── send-time privilege gate (no path oracle for non-admins) ────────────
 
 def test_request_workspace_gate(ws, monkeypatch):
     """Non-admin chat callers must get a uniform drop with no vetting: the
     workspace_rejected signal would otherwise reveal which host paths exist."""
     import routes.chat_routes as cr
+    import routes.workspace_routes as wr
 
+    monkeypatch.setattr(wr, "_WORKSPACES_DIR", os.path.realpath(ws))
     monkeypatch.setattr(cr, "get_current_user", lambda req: "bob")
     vet_calls = []
     import src.tool_execution as te
@@ -704,4 +910,6 @@ def test_request_workspace_gate(ws, monkeypatch):
 
     monkeypatch.setattr(ts, "owner_is_admin_or_single_user", lambda owner: True)
     assert cr._resolve_request_workspace(object(), ws) == (os.path.realpath(ws), "")
+    outside = tempfile.mkdtemp()
+    assert cr._resolve_request_workspace(object(), outside) == ("", outside)
     assert cr._resolve_request_workspace(object(), "/nonexistent/xyz") == ("", "/nonexistent/xyz")

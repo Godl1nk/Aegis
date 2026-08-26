@@ -1066,10 +1066,32 @@ _CODE_ARTIFACT_CONCEPT_RE = re.compile(
 _CODE_PROJECT_RE = re.compile(
     r"\b(?:multi[- ]file|multiple files?|separate files?|repo(?:sitory)?|codebase|workspace)\b|"
     r"\b(?:scaffold|set up)\b[^.\n]{0,40}\b(?:project|app|repo(?:sitory)?)\b|"
-    r"\b(?:react|vue|svelte|next(?:\.js)?|node|python|rust|go|java)\s+project\b|"
+    r"\b(?:react|vue|svelte|next(?:\.js)?|node|python|rust|go|java)\s+(?:project|plugin)\b|"
+    r"\b(?:minecraft|bukkit|spigot|paper|fabric|forge)\s+plugin\b|"
     r"\bproject\s+(?:folder|structure|layout)\b",
     re.IGNORECASE,
 )
+
+_WORKSPACE_TRANSFER_ACTION_RE = re.compile(
+    r"\b(?:move|copy|put|save|export|transfer)\b",
+    re.IGNORECASE,
+)
+_WORKSPACE_TRANSFER_SOURCE_RE = re.compile(
+    r"\b(?:files?|documents?|docs?|them|these|project|codes?)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_workspace_document_transfer(text: str, active_document) -> bool:
+    """Whether this turn explicitly moves editor artifacts into a workspace."""
+    value = str(text or "")
+    return bool(
+        active_document is not None
+        and re.search(r"\bworkspace\b", value, re.IGNORECASE)
+        and _WORKSPACE_TRANSFER_ACTION_RE.search(value)
+        and _WORKSPACE_TRANSFER_SOURCE_RE.search(value)
+    )
+
 
 # Explicit image-generation request detector — operates on the USER MESSAGE
 # (not model output). Local reasoning models frequently "think" about calling
@@ -2984,6 +3006,16 @@ async def stream_agent_loop(
     _active_document_editable = (
         active_document is not None and not _is_email_document_obj(active_document)
     )
+    _workspace_document_transfer = _is_workspace_document_transfer(
+        _last_user, active_document
+    )
+    if _workspace_document_transfer:
+        _code_artifact.update({
+            "requested": True,
+            "standalone": False,
+            "multi_file": True,
+        })
+        _intent.setdefault("domains", set()).update({"documents", "files"})
     _prompt_active_document = (
         active_document if (_active_document_relevant or _active_document_editable) else None
     )
@@ -3290,6 +3322,8 @@ async def stream_agent_loop(
                 "get_workspace", "ls", "glob", "grep", "read_file",
                 "write_file", "edit_file", "bash", "python",
             })
+            if _workspace_document_transfer:
+                _relevant_tools.add("manage_documents")
         elif "create_document" not in disabled_tools:
             # Keep create_document available even when a document is open: the
             # user may want a genuinely NEW artifact. edit_document/update_document
@@ -3542,20 +3576,34 @@ async def stream_agent_loop(
             "An active workspace is set. Use relative paths inside it."
             if workspace
             else (
-                "No workspace is set. Call `ls` with no path to learn the default "
-                "writable root, then use that absolute root in every file path and "
-                "create one project subfolder there."
+                "No active workspace is set. Do not write files elsewhere. Tell the "
+                "user to create or select a folder under Workspaces, then stop."
             )
         )
-        _code_project_directive = (
-            "## MULTI-FILE CODE PROJECT\n"
-            "Build the requested project on disk as separate files. Do not call "
-            "create_document and do not collapse the project into one chat code block. "
-            "Use `write_file` for new files, `edit_file` for focused changes, and "
-            "the navigation tools to inspect what exists. "
-            f"{_workspace_instruction} Start with the first concrete tool call; "
-            "after writing, run only the smallest relevant verification."
-        )
+        if _workspace_document_transfer:
+            _code_project_directive = (
+                "## EDITOR DOCUMENTS TO WORKSPACE\n"
+                "Move the current project from editor documents into real workspace "
+                "files. Call `manage_documents` with action `list`, then action `read` "
+                "for each document belonging to this project, and call `write_file` "
+                "once per file. Preserve a path already present in the document title; "
+                "when the title is only a basename, place it in the standard project "
+                "path required by its role or package declaration. "
+                "Preserve each document's content exactly and do not delete or modify "
+                "the source documents. "
+                f"{_workspace_instruction} Do not say this is complete until the "
+                "`write_file` results confirm the files exist."
+            )
+        else:
+            _code_project_directive = (
+                "## MULTI-FILE CODE PROJECT\n"
+                "Build the requested project on disk as separate files. Do not call "
+                "create_document and do not collapse the project into one chat code block. "
+                "Use `write_file` for new files, `edit_file` for focused changes, and "
+                "the navigation tools to inspect what exists. "
+                f"{_workspace_instruction} Start with the first concrete tool call; "
+                "after writing, run only the smallest relevant verification."
+            )
         if messages and messages[0].get("role") == "system":
             messages[0]["content"] += "\n\n" + _code_project_directive
         else:
@@ -3712,6 +3760,8 @@ async def stream_agent_loop(
     _code_stream_completed = False
     _direct_code_retry_count = 0
     _malformed_doc_nudge_count = 0
+    _project_write_nudged = False
+    _project_file_written = False
     # Anti-loop: once a document write lands this turn, nudge the model (once)
     # that the change is saved so it stops recreating/rewriting the same
     # artifact round after round (the injected doc context stays the pre-edit
@@ -4547,6 +4597,29 @@ async def stream_agent_loop(
                 yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
                 continue
 
+            # A multi-file/project turn is not complete until a real mutation
+            # tool succeeds. This catches terse false confirmations such as
+            # "ok" after only get_workspace/ls, which bypass the generic
+            # intent and thinking-only supervisors below.
+            if (
+                _code_project_enabled
+                and bool(workspace)
+                and not _project_file_written
+                and not _force_answer
+                and not _project_write_nudged
+            ):
+                _project_write_nudged = True
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "No project file has been written yet. The task is not complete. "
+                        "Call `write_file` now for the first real project file; do not "
+                        "answer with a confirmation or more planning."
+                    ),
+                })
+                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                continue
+
             # ── Completion verifier (mechanism 3a) ────────────────────
             # The model is finishing. If this was an effectful agentic turn,
             # have a fresh-context verifier independently check the work
@@ -4679,15 +4752,23 @@ async def stream_agent_loop(
                     "[agent] empty-answer nudge on round %d (reasoning only, no reply)",
                     round_num,
                 )
-                messages.append({
-                    "role": "system",
-                    "content": (
+                _empty_answer_instruction = (
+                    "Your last turn contained only internal reasoning and no project "
+                    "file was written. Continue the task now by calling `write_file` "
+                    "for the first real project file; do not output more reasoning or "
+                    "claim completion."
+                    if _code_project_enabled and not _project_file_written
+                    else (
                         "Your last turn contained only internal reasoning — the "
                         "user sees an empty reply. Write the actual answer now, "
                         "in plain text. Do not reason further; state your "
                         "conclusion. If you genuinely could not determine it, "
                         "say that plainly in one sentence."
-                    ),
+                    )
+                )
+                messages.append({
+                    "role": "system",
+                    "content": _empty_answer_instruction,
                 })
                 yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
                 continue
@@ -5264,6 +5345,12 @@ async def stream_agent_loop(
                 # instead of it vanishing (the exact bug the user hit).
                 tool_event["image_choice"] = _pending_image_choice_event
             tool_events.append(tool_event)
+            if (
+                block.tool_type == "write_file"
+                and not result.get("error")
+                and result.get("exit_code") in (None, 0)
+            ):
+                _project_file_written = True
             if block.tool_type in _VERIFIER_EFFECTFUL_TOOLS:
                 _effectful_used = True
             # Remember the last code document written this turn so the

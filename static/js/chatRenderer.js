@@ -2510,9 +2510,57 @@ export function renderAskUserCard(payload, options) {
   return card;
 }
 
-/**
- * Add a message to the chat history.
- */
+/** Collapse repeated completed tools into one expandable summary row. */
+export function compactAgentToolThread(threadWrap) {
+  if (!threadWrap) return;
+
+  const existingGroups = new Map();
+  const directCalls = new Map();
+  for (const child of Array.from(threadWrap.children)) {
+    if (child.classList.contains('agent-thread-group')) {
+      existingGroups.set(child.dataset.toolGroup || '', child);
+      continue;
+    }
+    if (!child.classList.contains('agent-thread-node') || child.classList.contains('running') || child.classList.contains('supervisor-step')) continue;
+    const key = String(child.dataset.tool || '').trim().toLowerCase();
+    if (!key) continue;
+    if (!directCalls.has(key)) directCalls.set(key, []);
+    directCalls.get(key).push(child);
+  }
+
+  for (const [key, calls] of directCalls) {
+    let group = existingGroups.get(key);
+    if (!group && calls.length < 2) continue;
+
+    if (!group) {
+      group = document.createElement('div');
+      group.className = 'agent-thread-group';
+      group.dataset.toolGroup = key;
+      group.innerHTML = '<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon"></span><span class="agent-thread-tool"></span><span class="agent-thread-count"></span><span class="agent-thread-status"></span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-group-items"></div>';
+      calls[0].before(group);
+      existingGroups.set(key, group);
+    }
+
+    const items = group.querySelector('.agent-thread-group-items');
+    const wasOpen = group.classList.contains('open') || calls.some((call) => call.classList.contains('open'));
+    calls.forEach((call) => items.appendChild(call));
+
+    const groupedCalls = Array.from(items.children).filter((call) => call.classList.contains('agent-thread-node'));
+    const failed = groupedCalls.filter((call) => call.classList.contains('error')).length;
+    const done = groupedCalls.length - failed;
+    const firstTool = groupedCalls[0]?.querySelector('.agent-thread-tool')?.textContent || key;
+    group.classList.toggle('error', failed > 0);
+    group.classList.toggle('open', wasOpen);
+    group.querySelector('.agent-thread-icon').textContent = failed ? '\u2717' : '\u2713';
+    group.querySelector('.agent-thread-tool').textContent = firstTool;
+    group.querySelector('.agent-thread-count').textContent = `\u00d7${groupedCalls.length}`;
+    group.querySelector('.agent-thread-status').textContent = failed && done
+      ? `${done} done \u00b7 ${failed} failed`
+      : (failed ? 'failed' : 'done');
+  }
+}
+
+/** Add a message to the chat history. */
 export function addMessage(role, content, modelName, metadata) {
   try {
     hideWelcomeScreen();
@@ -2649,6 +2697,7 @@ export function addMessage(role, content, modelName, metadata) {
             }
             const node = document.createElement('div');
             node.className = 'agent-thread-node' + (ok ? '' : ' error');
+            node.dataset.tool = String(ev.tool || '');
             // Hide the raw JSON command when a diff says it better (same as live).
             const evCmdHtml = (ev.command && !(ev.diff && ev.diff.text)) ? `<pre class="agent-thread-cmd">${esc(ev.command)}</pre>` : '';
             // Open-document button, sourced from the persisted tool_event (NOT a
@@ -2664,6 +2713,7 @@ export function addMessage(role, content, modelName, metadata) {
             // Click handling is delegated globally \u2014 see chat.js init.
             threadWrap.appendChild(node);
           }
+          compactAgentToolThread(threadWrap);
           // Check if next round has text — extend line down to connect
           const nextTxt = (roundTexts[r + 1] || '').trim();
           if (nextTxt) threadWrap.classList.add('has-bottom');
@@ -3075,6 +3125,7 @@ const chatRenderer = {
   showWelcomeScreen,
   createMsgFooter,
   displayMetrics,
+  compactAgentToolThread,
   addMessage,
   buildAttachCards,
   updateMessageAttachments,

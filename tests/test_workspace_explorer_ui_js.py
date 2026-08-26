@@ -4,6 +4,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 INDEX_HTML = (ROOT / "static/index.html").read_text(encoding="utf-8")
 WORKSPACE_JS = (ROOT / "static/js/workspace.js").read_text(encoding="utf-8")
+STORAGE_JS = (ROOT / "static/js/storage.js").read_text(encoding="utf-8")
+SESSIONS_JS = (ROOT / "static/js/sessions.js").read_text(encoding="utf-8")
+CHAT_JS = (ROOT / "static/js/chat.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static/style.css").read_text(encoding="utf-8")
 
 
@@ -50,7 +53,8 @@ def test_workspace_async_loads_and_escape_do_not_clobber_active_editor():
     assert "function _bindWorkspaceEscape()" in WORKSPACE_JS
     assert "closeWorkspaceBrowser();" in WORKSPACE_JS
     assert "document.getElementById(cancelId)?.click()" in WORKSPACE_JS
-    assert 'class="workspace-row" role="button" tabindex="0"' in WORKSPACE_JS
+    assert 'class="workspace-tree" role="tree"' in WORKSPACE_JS
+    assert 'class="workspace-tree-row" role="treeitem" tabindex="0"' in WORKSPACE_JS
 
 
 def test_workspace_explorer_respects_scaled_desktop_viewport():
@@ -71,3 +75,61 @@ def test_workspace_explorer_reuses_picker_and_stays_lightweight():
     assert "monaco" not in WORKSPACE_JS.lower()
     assert "documentModule" not in WORKSPACE_JS
     assert "WORKSPACES" not in WORKSPACE_JS
+
+
+def test_workspace_management_actions_are_confined_and_confirmed():
+    assert 'id="workspace-download"' in WORKSPACE_JS
+    assert 'id="workspace-rename"' in WORKSPACE_JS
+    assert 'id="workspace-delete"' in WORKSPACE_JS
+    assert "/api/workspace/download?workspace=${encodeURIComponent(workspace)}" in WORKSPACE_JS
+    assert "/api/workspace/rename" in WORKSPACE_JS
+    assert "/api/workspace/root" in WORKSPACE_JS
+    assert "data.managed === true" in WORKSPACE_JS
+    assert "Available for folders inside Workspaces" in WORKSPACE_JS
+    assert 'Delete workspace "${name}" and all its contents? This cannot be undone.' in WORKSPACE_JS
+    assert "confirmText: 'Delete workspace', danger: true" in WORKSPACE_JS
+    assert ".workspace-delete-btn:hover:not(:disabled)" in STYLE_CSS
+
+
+def test_workspace_picker_has_a_fixed_read_only_root():
+    assert 'aria-label="Workspaces path" readonly' in WORKSPACE_JS
+    assert "Type or paste a folder path" not in WORKSPACE_JS
+    assert "<strong>Workspaces</strong> is the fixed root" in WORKSPACE_JS
+    assert "Workspace reset to Workspaces" in WORKSPACE_JS
+
+
+def test_workspace_picker_uses_lazy_compact_tree_navigation():
+    assert "async function _compactPickerBranch" in WORKSPACE_JS
+    assert "['java', 'kotlin', 'scala', 'groovy'].includes(folderName)" in WORKSPACE_JS
+    assert "data.has_files === false" in WORKSPACE_JS
+    assert "names.join('.')" in WORKSPACE_JS
+    assert "async function _renderPickerChildren" in WORKSPACE_JS
+    assert "workspace-tree-node workspace-tree-file" in WORKSPACE_JS
+    assert "branch.data.files" in WORKSPACE_JS
+    assert "workspace-tree-node.expanded > .workspace-tree-children" in STYLE_CSS
+    assert "aria-selected=\"true\"" in STYLE_CSS
+
+
+def test_workspace_selection_is_scoped_to_each_chat_session():
+    assert "WORKSPACE_SESSIONS: 'odysseus-workspaces-by-session'" in STORAGE_JS
+    assert "Storage.getJSON(KEYS.WORKSPACE_SESSIONS, {})" in WORKSPACE_JS
+    assert "workspaces[String(nextSessionId)] = pending" in WORKSPACE_JS
+    assert "workspaceModule.getWorkspace()" in CHAT_JS
+    assert "Storage.get(Storage.KEYS.WORKSPACE" not in CHAT_JS
+    assert "workspaceModule.syncWorkspaceForSession(id)" in SESSIONS_JS
+    assert "workspaceModule.resetPendingWorkspace()" in SESSIONS_JS
+    assert "materializePending: true" in SESSIONS_JS
+
+
+def test_workspace_modal_resets_drag_position_on_mobile():
+    workspace_css = STYLE_CSS[STYLE_CSS.index(".workspace-file-status") :]
+    assert "#workspace-modal .workspace-modal-content" in workspace_css
+    assert "left: auto !important" in workspace_css
+    assert "#workspace-modal.workspace-explorer-open .workspace-modal-content" in workspace_css
+    assert "left: 8px !important" in workspace_css
+    assert "width: calc(100vw - 16px) !important" in workspace_css
+
+
+def test_disabled_workspace_save_is_visually_distinct():
+    assert "#workspace-file-save:disabled" in STYLE_CSS
+    assert "opacity: 0.38" in STYLE_CSS

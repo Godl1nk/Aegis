@@ -23,6 +23,7 @@ import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handle
 import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
 import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composerArrowUpRecall.js';
+import workspaceModule from './workspace.js';
 
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
@@ -1493,7 +1494,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (isIncognito) {
         fd.append('incognito', 'true');
       }
-      const _ws = (Storage.KEYS && Storage.get(Storage.KEYS.WORKSPACE, '')) || '';
+      const _ws = workspaceModule.getWorkspace();
       if (_ws) {
         fd.append('workspace', _ws);
       }
@@ -2000,11 +2001,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
             // (thinking spinner removal is handled in agent_step / tool_start / content handlers)
 
-            // Background detection: are we on a different session?
-            const _isBg = (sessionModule.getCurrentSessionId() !== streamSessionId);
+            // A detached reader stays background-owned after the user returns.
+            // Its original DOM is stale; resumeStream owns the newly selected
+            // chat while this reader only maintains persisted/background state.
+            const _isOtherSession = (sessionModule.getCurrentSessionId() !== streamSessionId);
+            const _isBg = _isOtherSession || _backgroundStreams.has(streamSessionId);
 
             // On first transition to background, store state in map
-            if (_isBg && !_backgroundStreams.has(streamSessionId)) {
+            if (_isOtherSession && !_backgroundStreams.has(streamSessionId)) {
               _backgroundStreams.set(streamSessionId, {
                 status: 'running',
                 accumulated: accumulated,
@@ -2021,14 +2025,15 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
             if (data === '[DONE]') {
               _streamSawDone = true;
-              // Always update background map if entry exists (even if user switched back)
+              // Always update the background map if this stream was detached.
+              // Even when the user has already returned, the reattach/poll path
+              // owns the visible bubble. Keep the completion marker so the old
+              // reader cannot fall through and finalize against detached DOM.
               var bgDone = _backgroundStreams.get(streamSessionId);
-              if (bgDone && !_isBg) {
-                _backgroundStreams.delete(streamSessionId);
-              } else if (bgDone) {
+              if (bgDone) {
                 bgDone.status = 'completed';
                 bgDone.accumulated = accumulated;
-                if (_isBg) {
+                if (_isOtherSession) {
                   try {
                     _notifyStreamComplete(streamSessionId, streamQuery);
                     _insertStreamDoneToast(streamSessionId, streamQuery);
@@ -3003,6 +3008,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   const _wasOpen = currentToolBubble.classList.contains('open');
                   currentToolBubble.className = 'agent-thread-node' + (ok ? '' : ' error') + (_wasOpen ? ' open' : '');
                   currentToolBubble.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(json.tool)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${cmdHtml2}${outHtml}${diffHtml}</div>`;
+                  chatRenderer.compactAgentToolThread(currentToolBubble.closest('.agent-thread'));
                   // Reset so thinking spinner between tools says "Thinking" not the old tool's label
                   _lastToolName = '';
                   uiModule.scrollHistory();
@@ -3940,6 +3946,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         _webLockRelease = null;
       }
 
+      // A completed reader must not permanently block later stream-status and
+      // resume checks. Do not clear a newer stream that reused the shared slot.
+      if (_streamSessionId === streamSessionId) _streamSessionId = null;
+
       // Refresh session list after a delay (picks up auto-generated names)
       setTimeout(() => {
         if (sessionModule && sessionModule.loadSessions) {
@@ -4227,9 +4237,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
    * reloaded from the DB so its full render stays faithful. Returns true if it
    * attached, false to let the caller fall back to spinner+poll.
    */
-  export async function resumeStream(sessionId) {
+  export async function resumeStream(sessionId, { allowDetachedReader = false } = {}) {
     if (!sessionId) return false;
-    if (hasActiveStream(sessionId)) return false;
+    if (_resumingStreams.has(sessionId)) return false;
+    if (!allowDetachedReader && hasActiveStream(sessionId)) return false;
 
     let res;
     try {
@@ -4403,7 +4414,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
    * Check for background streams when switching to a session.
    * Called after history loads on session switch.
    */
-  export function checkBackgroundStream(sessionId) {
+  export async function checkBackgroundStream(sessionId) {
     if (!sessionId || !_backgroundStreams.has(sessionId)) return;
     var entry = _backgroundStreams.get(sessionId);
 
@@ -4426,6 +4437,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     }
 
     if (entry.status === 'running') {
+      // The original request reader still owns this detached run, but its DOM
+      // belongs to the chat we left. Subscribe to the server replay stream so
+      // returning resumes live output instead of waiting behind a placeholder.
+      // The old reader keeps the map entry and therefore cannot paint duplicate
+      // tool nodes into the newly selected chat.
+      if (await resumeStream(sessionId, { allowDetachedReader: true })) return;
+
       // Stream is still active — show a clean spinner, poll until done,
       // then reload history to show the final saved response.
       var box = document.getElementById('chat-history');
@@ -5959,7 +5977,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     document.body.addEventListener('click', (e) => {
       const header = e.target.closest('.agent-thread-header');
       if (!header) return;
-      const node = header.closest('.agent-thread-node');
+      const node = header.closest('.agent-thread-node, .agent-thread-group');
       if (!node) return;
       const opened = node.classList.toggle('open');
       if (opened) {

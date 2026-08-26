@@ -126,6 +126,15 @@ def test_multi_file_project_uses_workspace_tools_not_document_stream():
     assert "and not _code_project_enabled\n            and not has_doc_tool" in AGENT_LOOP
 
 
+def test_document_to_workspace_followup_requires_real_file_writes():
+    assert "EDITOR DOCUMENTS TO WORKSPACE" in AGENT_LOOP
+    assert '_relevant_tools.add("manage_documents")' in AGENT_LOOP
+    assert "action `read`" in AGENT_LOOP
+    assert "Continue the task now by calling `write_file`" in AGENT_LOOP
+    assert "No project file has been written yet" in AGENT_LOOP
+    assert "Do not write files elsewhere" in AGENT_LOOP
+
+
 def test_dead_parallel_live_preview_panel_is_removed():
     assert "live-preview-panel" not in INDEX_HTML
     assert ".live-preview-panel" not in STYLE_CSS

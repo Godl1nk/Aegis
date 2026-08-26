@@ -189,11 +189,9 @@ def _resolve_request_workspace(request, raw_value) -> tuple:
     and no event: otherwise the presence/absence of workspace_rejected would
     let a non-admin chat caller probe which host paths exist.
 
-    vet_workspace rejects non-directories, sensitive roots (.ssh, .gnupg,
-    ...), and filesystem roots; on rejection there is no confinement and the
-    default tool-path allowlist applies. The rejected value is surfaced so the
-    stream can tell an admin client (which believes a workspace is active)
-    that it was dropped.
+    The workspace must also be the fixed Workspaces root or one of its
+    descendants. The rejected value is surfaced so the stream can tell an
+    admin client (which believes a workspace is active) that it was dropped.
     """
     requested = (raw_value or "").strip()
     if not requested:
@@ -203,6 +201,10 @@ def _resolve_request_workspace(request, raw_value) -> tuple:
         return "", ""
     from src.tool_execution import vet_workspace
     workspace = vet_workspace(requested) or ""
+    if workspace:
+        from routes.workspace_routes import _is_workspace_scope
+        if not _is_workspace_scope(workspace):
+            workspace = ""
     return workspace, (requested if not workspace else "")
 
 

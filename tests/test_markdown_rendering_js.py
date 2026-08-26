@@ -115,6 +115,20 @@ def test_ordered_lists_render_as_one_unwrapped_ol(node_available):
     assert "<p>After</p>" in html
 
 
+def test_stray_asterisk_does_not_leak_emphasis_across_lines(node_available):
+    html = _run_markdown_case(
+        "*What you can do (the real wins):\n\n"
+        "1. *Raise the power limits* — **this is the big one**\n"
+        "2. Better cooling decides whether it holds* boost or backs off."
+    )
+
+    assert "<p>*What you can do (the real wins):</p>" in html
+    assert "<em>Raise the power limits</em>" in html
+    assert "<strong>this is the big one</strong>" in html
+    assert "holds* boost" in html
+    assert html.count("<em>") == 1
+
+
 def test_table_separator_row_not_rendered_as_data(node_available):
     html = _run_markdown_case("| A | B |\n|---|---|\n| 1 | 2 |")
 
@@ -166,6 +180,59 @@ def test_llama_swap_banner_collapsed_even_without_reasoning(node_available):
     assert "thinking-section" in html
     assert "Here is your answer." in html
     assert html.index("llama-swap loading model") < html.index("Here is your answer.")
+
+
+def test_llama_swap_banner_accepts_production_heavy_separator(node_available):
+    html = _run_markdown_case(
+        "━━━━\n"
+        "llama-swap loading model: Qwen3.8-27B\n\n"
+        "Compressing optimism into FP16 ........\n\n"
+        "Baking the weights at 350° for a golden-brown inference ...........\n\n"
+        "Loading a model larger than your attention span ...\n\n"
+        "Done! (19.28s)\n\n"
+        "━━━━\n\n"
+        "The user wants me to move the plugin files into the workspace.\n\n"
+        "The files are ready in the workspace.",
+        "mod.processWithThinking(input)",
+    )
+
+    assert "thinking-section" in html
+    think_start = html.index("thinking-section")
+    reply_start = html.index("The files are ready in the workspace.")
+    assert "llama-swap loading model" in html[think_start:reply_start]
+    assert "The user wants me to move" in html[think_start:reply_start]
+
+
+def test_llama_swap_tool_round_keeps_generic_reasoning_lines_collapsed(node_available):
+    raw = (
+        "━━━\n"
+        "llama-swap loading model: Qwen3.8-27B\n\n"
+        "Zipping the GPUs to make them go faster ........\n\n"
+        "Done! (7.27s)\n\n"
+        "━━━\n\n"
+        "The user is telling me they have a Huananzhi X99 TF motherboard.\n\n"
+        "I need to be careful and verify the board details.\n\n"
+        "Let me think about what is realistically achievable.\n\n"
+        "This is a factual technical question where accuracy matters.\n\n"
+        "Let me verify the specifics on that board rather than guess."
+    )
+    extracted = _run_markdown_case(raw, "mod.extractThinkingBlocks(input)")
+
+    assert extracted["content"] == ""
+    assert len(extracted["thinkingBlocks"]) == 1
+    assert "llama-swap loading model" in extracted["thinkingBlocks"][0]
+    assert "Let me verify the specifics" in extracted["thinkingBlocks"][0]
+
+
+def test_reasoning_prefix_detection_looks_past_llama_swap_banner(node_available):
+    assert _run_markdown_case(
+        _LLAMA_SWAP_BANNER + "The user wants me to check the motherboard.",
+        "mod.startsWithReasoningPrefix(input)",
+    ) is True
+    assert _run_markdown_case(
+        _LLAMA_SWAP_BANNER + "Here is the verified answer.",
+        "mod.startsWithReasoningPrefix(input)",
+    ) is False
 
 
 def test_ordinary_text_mentioning_llama_swap_is_not_stripped(node_available):

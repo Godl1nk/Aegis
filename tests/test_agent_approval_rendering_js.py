@@ -20,7 +20,7 @@ def test_resumed_stream_renders_approval_request():
 
 def test_background_stream_preserves_and_renders_approval_request():
     assert "bgApproval.pendingApproval = json" in CHAT_JS
-    body = _function_source("export function checkBackgroundStream")
+    body = _function_source("export async function checkBackgroundStream")
     assert "entry.pendingApproval" in body
     assert "_renderApprovalCard(curPoll.pendingApproval" in body
 

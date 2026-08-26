@@ -257,10 +257,13 @@ export function hasUnclosedThinkTag(text) {
 //   ─────────
 // It is infrastructure noise, never part of the reply.
 const LLAMA_SWAP_BANNER_RE =
-  /^\s*(?:[-—–_─=*]{3,}[ \t]*\r?\n)?[ \t]*llama-swap\s+loading\s+model:[\s\S]*?Done!\s*\([^)]*\)(?:\s*[-—–_─=*]{3,}[ \t]*)?\s*/i;
+  /^\s*(?:[-—–_─━=*]{3,}[ \t]*\r?\n)?[ \t]*llama-swap\s+loading\s+model:[\s\S]*?Done!\s*\([^)]*\)(?:\s*[-—–_─━=*]{3,}[ \t]*)?\s*/i;
 
 export function startsWithReasoningPrefix(text) {
-  return /^\s*(?:thinking(?:\s+process)?\s*:|the user |user wants|we need |i need |i should |i will |i'll |i am going |let me (?:think|look|see|check|read|review|analyze|parse|figure|draft|write)|they are |the question |i can )/i.test(text || '');
+  let candidate = String(text || '').trimStart();
+  const bannerMatch = LLAMA_SWAP_BANNER_RE.exec(candidate);
+  if (bannerMatch) candidate = candidate.slice(bannerMatch[0].length).trimStart();
+  return /^(?:thinking(?:\s+process)?\s*:|the user |user wants|we need |i need |i should |i will |i'll |i am going |let me (?:think|look|see|check|read|review|analyze|parse|figure|draft|write)|they are |the question |i can )/i.test(candidate);
 }
 
 export function normalizeThinkingMarkup(text) {
@@ -319,7 +322,7 @@ function normalizePlainThinking(text) {
   const prefixRegex = /^(thinking(?:\s+process)?\s*:)\s*/i;
   const escapedReplyStarts = replyStarts.map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   const boundaryRegex = new RegExp(
-    `^([\\s\\S]*?)(\\n\\n(?=${escapedReplyStarts.join('|')}|I |What|Let|This |As ))[\\s\\S]*$`,
+    `^([\\s\\S]*?)(\\n\\n(?=${escapedReplyStarts.join('|')}))[\\s\\S]*$`,
     'i'
   );
   const boundaryMatch = boundaryRegex.exec(trimmed);
@@ -920,8 +923,12 @@ export function mdToHtml(src, opts) {
   // Horizontal rules (must come before bold/italic to avoid * conflicts)
   s = s.replace(/^(?:---|\*\*\*|___)\s*$/gm, '<hr>');
 
-  // Bold, italic, strikethrough
-  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  // Bold, italic, strikethrough. Keep emphasis on one line and require the
+  // authored marker to touch its content. A stray `*` must not pair with a
+  // marker several paragraphs later and italicize the entire section.
+  s = s
+    .replace(/(?<!\*)\*\*(?![\s*])([^*\n]*?\S)\*\*(?!\*)/g, '<strong>$1</strong>')
+    .replace(/(?<!\*)\*(?![\s*])([^*\n]*?\S)\*(?!\*)/g, '<em>$1</em>');
   s = s.replace(/~~([^~]+)~~/g, '<del>$1</del>');
 
   // Headers

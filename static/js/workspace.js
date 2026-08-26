@@ -24,9 +24,23 @@ let _pickerLoadToken = 0;
 let _entryLoadToken = 0;
 let _fileLoadToken = 0;
 let _escapeBound = false;
+let _activeSessionId = null;
+let _pendingWorkspace = '';
 
-export function getWorkspace() {
-  return Storage.get(KEYS.WORKSPACE, '') || '';
+function _workspaceMap() {
+  const saved = Storage.getJSON(KEYS.WORKSPACE_SESSIONS, {});
+  return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
+}
+
+function _saveWorkspaceMap(workspaces) {
+  if (Object.keys(workspaces).length) Storage.setJSON(KEYS.WORKSPACE_SESSIONS, workspaces);
+  else Storage.remove(KEYS.WORKSPACE_SESSIONS);
+}
+
+export function getWorkspace(sessionId = _activeSessionId) {
+  if (!sessionId) return _pendingWorkspace;
+  const path = _workspaceMap()[String(sessionId)];
+  return typeof path === 'string' ? path : '';
 }
 
 function _basename(p) {
@@ -68,9 +82,41 @@ export function applyMode(_mode) {
 }
 
 export function setWorkspace(path) {
-  if (path) Storage.set(KEYS.WORKSPACE, path);
-  else Storage.remove(KEYS.WORKSPACE);
-  syncWorkspaceIndicator(path || '');
+  const value = typeof path === 'string' ? path : '';
+  if (_activeSessionId) {
+    const workspaces = _workspaceMap();
+    const key = String(_activeSessionId);
+    if (value) workspaces[key] = value;
+    else delete workspaces[key];
+    _saveWorkspaceMap(workspaces);
+  } else {
+    _pendingWorkspace = value;
+  }
+  syncWorkspaceIndicator(value);
+}
+
+// A new chat has no workspace until the user assigns one. If they assign it
+// before sending the first message, materialization transfers that temporary
+// selection to the newly created session.
+export function resetPendingWorkspace() {
+  _activeSessionId = null;
+  _pendingWorkspace = '';
+  syncWorkspaceIndicator('');
+}
+
+export function syncWorkspaceForSession(sessionId, { materializePending = false } = {}) {
+  const nextSessionId = sessionId || null;
+  const pending = _pendingWorkspace;
+  _activeSessionId = nextSessionId;
+  _pendingWorkspace = '';
+
+  if (nextSessionId && materializePending && pending) {
+    const workspaces = _workspaceMap();
+    workspaces[String(nextSessionId)] = pending;
+    _saveWorkspaceMap(workspaces);
+  }
+
+  syncWorkspaceIndicator(getWorkspace());
 }
 
 /**
@@ -121,7 +167,7 @@ async function _loadAndRenderPicker(path) {
   try {
     const data = await _loadPicker(path);
     if (token !== _pickerLoadToken) return false;
-    _renderPicker(data);
+    await _renderPicker(data, token);
     return true;
   } catch (e) {
     if (token !== _pickerLoadToken) return false;
@@ -129,57 +175,188 @@ async function _loadAndRenderPicker(path) {
   }
 }
 
-function _renderPicker(data) {
-  _curPath = data.path;
+function _selectPickerFolder(path, selectable = true) {
+  _curPath = path;
   const body = _modal.querySelector('#workspace-body');
   const pathEl = _modal.querySelector('#workspace-cur-path');
   if (pathEl) {
-    // Reflect the resolved (realpath) location back into the editable field.
-    pathEl.value = data.path;
-    pathEl.title = data.path;
+    // Show the backend-resolved location. It is intentionally read-only:
+    // Workspaces is the fixed root and the backend enforces the same boundary.
+    pathEl.value = path;
+    pathEl.title = path;
   }
-  let rows = '';
-  if (data.parent) {
-    rows += `<div class="workspace-row workspace-up" role="button" tabindex="0" data-path="${encodeURIComponent(data.parent)}">↑ ..</div>`;
+  body?.querySelectorAll('.workspace-tree-row[aria-selected="true"]').forEach((row) => {
+    row.setAttribute('aria-selected', 'false');
+  });
+  const encodedPath = encodeURIComponent(path);
+  const selectedNode = body
+    ? Array.from(body.querySelectorAll('.workspace-tree-node')).find((node) => node.dataset.path === encodedPath)
+    : null;
+  const selected = selectedNode?.querySelector(':scope > .workspace-tree-row');
+  if (selected) selected.setAttribute('aria-selected', 'true');
+  const useBtn = _modal.querySelector('#workspace-use');
+  if (useBtn) {
+    useBtn.disabled = !selectable;
+    useBtn.title = !selectable ? 'This folder cannot be used as a workspace' : '';
   }
-  for (const d of data.dirs) {
-    // Backend supplies the full child path (os.path.join → cross-platform).
-    rows += `<div class="workspace-row" role="button" tabindex="0" data-path="${encodeURIComponent(d.path)}">${_FOLDER_SVG}<span>${uiModule.esc(d.name)}</span></div>`;
+  const createBtn = _modal.querySelector('#workspace-create');
+  if (createBtn) {
+    createBtn.disabled = !selectable;
+    createBtn.title = !selectable ? 'Choose a valid parent folder first' : '';
   }
-  if (data.truncated) {
-    rows += '<div class="workspace-empty">Too many folders to list. Type or paste a path above to jump in.</div>';
+}
+
+async function _compactPickerBranch(dir, token, compactPackages = false) {
+  const names = [String(dir.name || _basename(dir.path))];
+  let path = String(dir.path || '');
+  let data = await _loadPicker(path);
+  let depth = 0;
+  while (
+    token === _pickerLoadToken
+    && compactPackages
+    && depth < 24
+    && data.has_files === false
+    && data.truncated !== true
+    && Array.isArray(data.dirs)
+    && data.dirs.length === 1
+  ) {
+    const only = data.dirs[0];
+    names.push(String(only.name || _basename(only.path)));
+    path = String(only.path || path);
+    data = await _loadPicker(path);
+    depth += 1;
   }
-  if (!data.dirs.length && !data.parent) rows = '<div class="workspace-empty">No subfolders</div>';
-  body.innerHTML = rows || '<div class="workspace-empty">No subfolders</div>';
-  body.querySelectorAll('.workspace-row').forEach((row) => {
-    const activate = () => _navigate(decodeURIComponent(row.dataset.path));
+  return { path, label: names.join('.'), data };
+}
+
+async function _renderPickerChildren(container, dirs, files, token, compactPackages = false) {
+  if (!container || token !== _pickerLoadToken) return;
+  const list = Array.isArray(dirs) ? dirs : [];
+  const fileList = Array.isArray(files) ? files : [];
+  if (!list.length && !fileList.length) {
+    container.innerHTML = '<div class="workspace-empty workspace-tree-empty">Empty folder</div>';
+    return;
+  }
+
+  container.innerHTML = '<div class="workspace-tree-loading">Loading folders…</div>';
+  const branches = await Promise.all(list.map((dir) => _compactPickerBranch(dir, token, compactPackages)));
+  if (token !== _pickerLoadToken) return;
+  container.innerHTML = '';
+
+  for (const branch of branches) {
+    const hasChildren = (Array.isArray(branch.data.dirs) && branch.data.dirs.length > 0)
+      || (Array.isArray(branch.data.files) && branch.data.files.length > 0);
+    const node = document.createElement('div');
+    node.className = 'workspace-tree-node';
+    node.dataset.path = encodeURIComponent(branch.path);
+    node.innerHTML = `
+      <div class="workspace-tree-row" role="treeitem" tabindex="0" aria-selected="false" aria-expanded="false">
+        <span class="workspace-tree-chevron${hasChildren ? '' : ' is-leaf'}" aria-hidden="true">›</span>
+        ${_FOLDER_SVG}
+        <span class="workspace-tree-label">${uiModule.esc(branch.label)}</span>
+      </div>
+      <div class="workspace-tree-children" role="group"></div>`;
+    container.appendChild(node);
+
+    const row = node.querySelector('.workspace-tree-row');
+    const children = node.querySelector('.workspace-tree-children');
+    let loaded = false;
+    const toggle = async (forceOpen = null) => {
+      if (!hasChildren) return;
+      const open = forceOpen === null ? !node.classList.contains('expanded') : forceOpen;
+      node.classList.toggle('expanded', open);
+      row.setAttribute('aria-expanded', String(open));
+      if (open && !loaded) {
+        loaded = true;
+        try {
+          const folderName = _basename(branch.path).toLowerCase();
+          const compactChildren = branch.label.includes('.')
+            || ['java', 'kotlin', 'scala', 'groovy'].includes(folderName);
+          await _renderPickerChildren(
+            children,
+            branch.data.dirs,
+            branch.data.files,
+            token,
+            compactChildren,
+          );
+        } catch (e) {
+          loaded = false;
+          children.innerHTML = '<div class="workspace-empty workspace-tree-empty">Could not open folder</div>';
+        }
+      }
+    };
+    const activate = () => {
+      _selectPickerFolder(branch.path, branch.data.selectable !== false);
+      toggle();
+    };
     row.addEventListener('click', activate);
     row.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
         activate();
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        toggle(true);
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        if (node.classList.contains('expanded')) toggle(false);
+        else node.parentElement?.closest('.workspace-tree-node')?.querySelector(':scope > .workspace-tree-row')?.focus();
       }
     });
-  });
-  // Filesystem roots (and sensitive dirs) can be browsed through but never
-  // bound as the workspace; the backend rejects them too.
-  const useBtn = _modal.querySelector('#workspace-use');
-  if (useBtn) {
-    useBtn.disabled = data.selectable === false;
-    useBtn.title = data.selectable === false ? 'This folder cannot be used as a workspace' : '';
   }
-  const createBtn = _modal.querySelector('#workspace-create');
-  if (createBtn) {
-    createBtn.disabled = data.selectable === false;
-    createBtn.title = data.selectable === false ? 'Choose a valid parent folder first' : '';
+
+  for (const file of fileList) {
+    const name = String(file.name || _basename(file.path));
+    const node = document.createElement('div');
+    node.className = 'workspace-tree-node workspace-tree-file';
+    node.innerHTML = `
+      <div class="workspace-tree-row" role="treeitem" tabindex="0" aria-selected="false" title="${uiModule.esc(name)}">
+        <span class="workspace-tree-chevron is-leaf" aria-hidden="true">›</span>
+        ${_FILE_SVG}
+        <span class="workspace-tree-label">${uiModule.esc(name)}</span>
+      </div>`;
+    container.appendChild(node);
   }
 }
 
-async function _navigate(path) {
-  try {
-    await _loadAndRenderPicker(path);
-  } catch (e) {
-    if (uiModule && uiModule.showError) uiModule.showError('Could not open folder');
+async function _renderPicker(data, token) {
+  const body = _modal.querySelector('#workspace-body');
+  body.innerHTML = `
+    <div class="workspace-tree" role="tree" aria-label="Workspace folders">
+      <div class="workspace-tree-node workspace-tree-root expanded" data-path="${encodeURIComponent(data.path)}">
+        <div class="workspace-tree-row" role="treeitem" tabindex="0" aria-selected="true" aria-expanded="true">
+          <span class="workspace-tree-chevron" aria-hidden="true">›</span>
+          ${_FOLDER_SVG}
+          <span class="workspace-tree-label">Workspaces</span>
+        </div>
+        <div class="workspace-tree-children" role="group"></div>
+      </div>
+    </div>`;
+  _selectPickerFolder(data.path, data.selectable !== false);
+  const root = body.querySelector('.workspace-tree-root');
+  const rootRow = root.querySelector(':scope > .workspace-tree-row');
+  const rootChildren = root.querySelector(':scope > .workspace-tree-children');
+  rootRow.addEventListener('click', () => {
+    _selectPickerFolder(data.path, data.selectable !== false);
+    const open = !root.classList.contains('expanded');
+    root.classList.toggle('expanded', open);
+    rootRow.setAttribute('aria-expanded', String(open));
+  });
+  rootRow.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      rootRow.click();
+    } else if (e.key === 'ArrowRight') {
+      root.classList.add('expanded');
+      rootRow.setAttribute('aria-expanded', 'true');
+    } else if (e.key === 'ArrowLeft') {
+      root.classList.remove('expanded');
+      rootRow.setAttribute('aria-expanded', 'false');
+    }
+  });
+  await _renderPickerChildren(rootChildren, data.dirs, data.files, token);
+  if (data.truncated && token === _pickerLoadToken) {
+    rootChildren.insertAdjacentHTML('beforeend', '<div class="workspace-empty workspace-tree-empty">Folder list truncated.</div>');
   }
 }
 
@@ -235,6 +412,7 @@ function _setView(view) {
   picker.classList.toggle('hidden', isExplorer);
   explorer.classList.toggle('hidden', !isExplorer);
   _modal.classList.toggle('workspace-explorer-open', isExplorer);
+  _modal.classList.toggle('workspace-picker-open', !isExplorer);
   if (title) title.textContent = isExplorer ? 'Workspace' : 'Select workspace';
 }
 
@@ -284,6 +462,15 @@ function _renderEntries(data) {
     const shown = _explorerPath ? `${_basename(workspace)} / ${_explorerPath}` : _basename(workspace);
     pathEl.textContent = shown;
     pathEl.title = _explorerPath ? `${workspace} / ${_explorerPath}` : workspace;
+  }
+  const managed = data.managed === true;
+  for (const id of ['workspace-rename', 'workspace-delete']) {
+    const button = _modal.querySelector(`#${id}`);
+    if (!button) continue;
+    button.disabled = !managed;
+    button.title = managed
+      ? (id === 'workspace-rename' ? 'Rename workspace' : 'Delete workspace')
+      : 'Available for folders inside Workspaces';
   }
 
   let rows = '';
@@ -466,7 +653,7 @@ async function _refreshExplorer() {
 
 async function _showPicker(path = '') {
   _setView('picker');
-  await _loadAndRenderPicker(path);
+  await _loadAndRenderPicker('');
 }
 
 async function _showExplorer(workspace = getWorkspace()) {
@@ -486,6 +673,79 @@ async function _changeWorkspace() {
     await _showPicker(getWorkspace());
   } catch (e) {
     if (uiModule?.showError) uiModule.showError(e.message || 'Could not browse folders');
+  }
+}
+
+function _downloadWorkspace() {
+  const workspace = getWorkspace();
+  if (!workspace) return;
+  const link = document.createElement('a');
+  link.href = `${API_BASE}/api/workspace/download?workspace=${encodeURIComponent(workspace)}`;
+  link.download = `${_basename(workspace) || 'workspace'}.zip`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+async function _renameWorkspace() {
+  if (!(await _confirmDiscard())) return;
+  const workspace = getWorkspace();
+  if (!workspace) return;
+  const currentName = _basename(workspace);
+  const name = await uiModule.styledPrompt(`Rename "${currentName}"`, {
+    title: 'Rename workspace',
+    defaultValue: currentName,
+    placeholder: 'Folder name',
+    confirmText: 'Rename',
+  });
+  if (!name || name.trim() === currentName) return;
+
+  const button = _modal.querySelector('#workspace-rename');
+  if (button) button.disabled = true;
+  try {
+    const data = await _fetchJSON(`${API_BASE}/api/workspace/rename`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspace, name }),
+    }, 'Could not rename workspace');
+    setWorkspace(data.path);
+    if (uiModule?.showToast) uiModule.showToast(`Workspace renamed: ${_basename(data.path)}`);
+    await _showExplorer(data.path);
+  } catch (e) {
+    if (uiModule?.showError) uiModule.showError(e.message || 'Could not rename workspace');
+    if (button) button.disabled = false;
+  }
+}
+
+async function _deleteWorkspace() {
+  if (!(await _confirmDiscard())) return;
+  const workspace = getWorkspace();
+  if (!workspace) return;
+  const name = _basename(workspace);
+  const ask = uiModule?.styledConfirm || window.styledConfirm;
+  const message = `Delete workspace "${name}" and all its contents? This cannot be undone.`;
+  const confirmed = ask
+    ? await ask(message, { confirmText: 'Delete workspace', danger: true })
+    : window.confirm(message);
+  if (!confirmed) return;
+
+  const button = _modal.querySelector('#workspace-delete');
+  if (button) button.disabled = true;
+  try {
+    const data = await _fetchJSON(`${API_BASE}/api/workspace/root`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspace, confirmation: name }),
+    }, 'Could not delete workspace');
+    setWorkspace('');
+    _resetFile();
+    if (uiModule?.showToast) uiModule.showToast(`Workspace deleted: ${name}`);
+    await _showPicker(data.parent || '');
+  } catch (e) {
+    if (uiModule?.showError) uiModule.showError(e.message || 'Could not delete workspace');
+    if (button) button.disabled = false;
   }
 }
 
@@ -564,9 +824,8 @@ function _getModal() {
       </div>
       <section class="workspace-picker hidden" id="workspace-picker">
         <input type="text" class="styled-prompt-input workspace-cur" id="workspace-cur-path"
-               spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off"
-               placeholder="Type or paste a folder path, then press Enter" />
-        <p class="muted workspace-note">File tools are <strong>confined</strong> to this folder. Shell commands start here but are <strong>not sandboxed</strong> and can reach outside it. A workspace scopes the tools; it is not a security boundary.</p>
+               aria-label="Workspaces path" readonly />
+        <p class="muted workspace-note"><strong>Workspaces</strong> is the fixed root. Create or select a project folder here; workspace file tools cannot browse outside it.</p>
         <div class="modal-body workspace-body" id="workspace-body"></div>
         <div class="modal-footer workspace-footer">
           <button type="button" class="confirm-btn confirm-btn-secondary" id="workspace-create">New folder</button>
@@ -579,6 +838,9 @@ function _getModal() {
           <button type="button" class="workspace-toolbar-btn" id="workspace-explorer-back" title="Back" aria-label="Back to parent folder">←</button>
           <div class="workspace-explorer-path" id="workspace-explorer-path"></div>
           <button type="button" class="workspace-toolbar-btn" id="workspace-explorer-refresh" title="Refresh" aria-label="Refresh workspace">↻</button>
+          <button type="button" class="workspace-toolbar-btn" id="workspace-download" title="Download workspace as ZIP" aria-label="Download workspace as ZIP">ZIP</button>
+          <button type="button" class="workspace-toolbar-btn" id="workspace-rename" title="Rename workspace" aria-label="Rename workspace" disabled>Rename</button>
+          <button type="button" class="workspace-toolbar-btn workspace-delete-btn" id="workspace-delete" title="Delete workspace" aria-label="Delete workspace" disabled>Delete</button>
           <button type="button" class="workspace-toolbar-btn workspace-change-btn" id="workspace-change">Change</button>
         </div>
         <div class="workspace-explorer-main">
@@ -613,14 +875,6 @@ function _getModal() {
     if (getWorkspace()) await _showExplorer();
     else closeWorkspaceBrowser();
   });
-  // Editable path bar: Enter navigates to a typed/pasted folder.
-  _modal.querySelector('#workspace-cur-path').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      const v = e.target.value.trim();
-      if (v) _navigate(v);
-    }
-  });
   _modal.querySelector('#workspace-use').addEventListener('click', async () => {
     setWorkspace(_curPath);
     if (uiModule && uiModule.showToast) uiModule.showToast(`Workspace set: ${_basename(_curPath)}`);
@@ -630,6 +884,9 @@ function _getModal() {
     if (_explorerParent !== null) _openDirectory(_explorerParent);
   });
   _modal.querySelector('#workspace-explorer-refresh').addEventListener('click', _refreshExplorer);
+  _modal.querySelector('#workspace-download').addEventListener('click', _downloadWorkspace);
+  _modal.querySelector('#workspace-rename').addEventListener('click', _renameWorkspace);
+  _modal.querySelector('#workspace-delete').addEventListener('click', _deleteWorkspace);
   _modal.querySelector('#workspace-change').addEventListener('click', _changeWorkspace);
   _modal.querySelector('#workspace-file-editor').addEventListener('input', _syncFileActions);
   _modal.querySelector('#workspace-file-save').addEventListener('click', _saveFile);
@@ -652,6 +909,12 @@ export async function openWorkspaceBrowser() {
     if (getWorkspace()) await _showExplorer();
     else await _showPicker('');
   } catch (e) {
+    if (getWorkspace() && e?.status === 400) {
+      setWorkspace('');
+      await _showPicker('');
+      if (uiModule?.showToast) uiModule.showToast('Workspace reset to Workspaces');
+      return;
+    }
     if (uiModule && uiModule.showError) uiModule.showError(e.message || 'Could not open workspace');
   }
 }
@@ -668,7 +931,9 @@ export async function closeWorkspaceBrowser(force = false) {
 }
 
 export function initWorkspace() {
-  // Restore persisted workspace into the pill on load.
+  // The old global key could leak a workspace into unrelated chats. It is no
+  // longer used; each persisted selection is keyed by session ID instead.
+  Storage.remove(KEYS.WORKSPACE);
   syncWorkspaceIndicator(getWorkspace());
   const overflow = document.getElementById('overflow-workspace-btn');
   if (overflow) overflow.addEventListener('click', openWorkspaceBrowser);
@@ -686,4 +951,4 @@ export function initWorkspace() {
   if (pill) pill.addEventListener('click', clearWorkspace);
 }
 
-export default { initWorkspace, openWorkspaceBrowser, closeWorkspaceBrowser, getWorkspace, setWorkspace, vetAndSetWorkspace, clearWorkspace, syncWorkspaceIndicator, applyMode };
+export default { initWorkspace, openWorkspaceBrowser, closeWorkspaceBrowser, getWorkspace, setWorkspace, vetAndSetWorkspace, clearWorkspace, syncWorkspaceIndicator, syncWorkspaceForSession, resetPendingWorkspace, applyMode };
