@@ -32,46 +32,6 @@ from .skill_format import Skill, slugify
 logger = logging.getLogger(__name__)
 
 
-_BUILTIN_SKILLS = (
-    {
-        "name": "web-knowledge-learning",
-        "description": (
-            "Research an important unknown or outdated fact online, validate it, "
-            "and retain it only when it is reusable."
-        ),
-        "version": "1.0.0",
-        "category": "research",
-        "tags": ["unknown", "web", "research", "knowledge", "learn", "remember"],
-        "requires_toolsets": ["web_search", "web_fetch", "manage_knowledge"],
-        "status": "published",
-        "confidence": 1.0,
-        "source": "builtin",
-        "when_to_use": (
-            "A request depends on a reusable factual claim that is unknown, "
-            "uncertain, or likely newer than model training."
-        ),
-        "procedure": [
-            "Search existing durable knowledge first with manage_knowledge search.",
-            "If no fresh entry answers the gap, search the web with a focused query and fetch the strongest primary or authoritative sources.",
-            "Require support from at least two genuinely independent publishers; check negation, dates, quantities, scope, and contradictions rather than relying on keyword overlap.",
-            "Answer the current request from the fetched evidence and cite the sources.",
-            "Only when the claim is atomic, reusable, non-personal, and non-sensitive, call manage_knowledge learn with the concise claim and validation query.",
-            "Accept a saved claim only if manage_knowledge independently validates it; never bypass a rejection.",
-        ],
-        "pitfalls": [
-            "Do not learn from snippets alone, mirrors, copied articles, or two pages controlled by the same publisher.",
-            "Do not save opinions, secrets, personal data, one-off task output, or medical, legal, financial, emergency, or other high-stakes claims.",
-            "Do not treat stored knowledge as permanent truth; respect provenance and expiry.",
-        ],
-        "verification": [
-            "The saved claim is supported in context by two independent fetched sources.",
-            "Names, numbers, versions, dates, qualifiers, and negation match the sources.",
-            "A manage_knowledge search can retrieve the new entry with provenance and a future expiry.",
-        ],
-    },
-)
-
-
 # ---------------------------------------------------------------------------
 # Token / similarity helpers (kept for the relevance fallback)
 # ---------------------------------------------------------------------------
@@ -118,7 +78,6 @@ class SkillsManager:
         self.data_dir = data_dir
         self.skills_root = os.path.join(data_dir, "skills")
         self.usage_file = os.path.join(self.skills_root, "_usage.json")
-        self.builtin_state_file = os.path.join(self.skills_root, "_builtin_installations.json")
         self.legacy_file = os.path.join(data_dir, "skills.json")  # back-compat
         os.makedirs(self.skills_root, exist_ok=True)
 
@@ -327,60 +286,6 @@ class SkillsManager:
             except Exception as e:
                 logger.warning("Failed to backfill owner for skill %s: %s", sk.name, e)
         return changed
-
-    def ensure_builtin_skills(self, owner: str) -> List[str]:
-        """Install editable built-in skills once for the primary local owner.
-
-        Installation state is separate from the skill file so deleting a
-        built-in skill remains an explicit opt-out instead of causing it to be
-        recreated on every application restart. Existing user edits are never
-        overwritten.
-        """
-        owner = (owner or "").strip()
-        if not owner:
-            return []
-
-        state: Dict[str, bool] = {}
-        if os.path.exists(self.builtin_state_file):
-            try:
-                with open(self.builtin_state_file, encoding="utf-8") as f:
-                    loaded = json.load(f)
-                if isinstance(loaded, dict):
-                    state = {str(k): bool(v) for k, v in loaded.items()}
-            except Exception as e:
-                logger.warning("Failed to read built-in skill installation state: %s", e)
-
-        existing = {s.get("name"): s for s in self.load_all()}
-        installed: List[str] = []
-        state_changed = False
-        for spec in _BUILTIN_SKILLS:
-            name = str(spec["name"])
-            state_key = self._usage_key(name, owner)
-            if state.get(state_key):
-                continue
-
-            prior = existing.get(name)
-            if prior:
-                if prior.get("owner") != owner:
-                    logger.warning(
-                        "Built-in skill %s not installed for %s because that name is owned by %s",
-                        name,
-                        owner,
-                        prior.get("owner") or "an unclaimed skill",
-                    )
-                    continue
-            else:
-                sk = Skill(owner=owner, **deepcopy(spec))
-                self._write_skill(sk)
-                installed.append(name)
-
-            state[state_key] = True
-            state_changed = True
-
-        if state_changed:
-            from core.atomic_io import atomic_write_json
-            atomic_write_json(self.builtin_state_file, state, indent=2)
-        return installed
 
     # ----------------------------------------------------------------------
     # Public API — keeps the old method names so callers don't break
