@@ -901,6 +901,10 @@ async def _execute_tool_block_impl(
     elif tool in ("pipeline", "manage_memory", "ui_control"):
         from src.ai_interaction import dispatch_ai_tool
         desc, result = await dispatch_ai_tool(tool, content, session_id, owner=owner)
+    elif tool == "manage_knowledge":
+        desc = "manage_knowledge"
+        result = await _document_tool_dispatch(tool, content, session_id, owner) \
+            or {"error": "manage_knowledge: execution failed", "exit_code": 1}
     elif tool == "manage_tasks":
         desc = "manage_tasks"
         result = await do_manage_tasks(content, owner=owner)

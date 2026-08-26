@@ -168,6 +168,113 @@ class MemoryManager:
             return entries
         return [e for e in entries if e.get("owner") == owner]
 
+    def load_by_ids(self, ids, owner: str = None) -> List[Dict]:
+        ordered_ids = list(dict.fromkeys(str(mid) for mid in ids if mid))
+        if self._v2 is not None:
+            try:
+                return self._validate_entries(self._v2.load_by_ids(ordered_ids, owner=owner))
+            except Exception as e:
+                logger.warning("Memory V2 id load failed, falling back to JSON: %s", e)
+        by_id = {entry.get("id"): entry for entry in self.load(owner=owner)}
+        return [by_id[mid] for mid in ordered_ids if mid in by_id]
+
+    def load_pinned(self, owner: str = None, limit: int = 12, kinds=None) -> List[Dict]:
+        if self._v2 is not None:
+            try:
+                return self._validate_entries(
+                    self._v2.load_pinned(owner, limit=limit, kinds=kinds)
+                )
+            except Exception as e:
+                logger.warning("Memory V2 pinned load failed, falling back to JSON: %s", e)
+        allowed = set(kinds or [])
+        rows = [entry for entry in self.load(owner=owner) if entry.get("pinned")]
+        if allowed:
+            rows = [entry for entry in rows if (entry.get("kind") or "saved") in allowed]
+        rows.sort(
+            key=lambda entry: (
+                int(entry.get("priority") or 0),
+                int(entry.get("uses") or 0),
+                int(entry.get("timestamp") or 0),
+            ),
+            reverse=True,
+        )
+        return rows[:max(1, int(limit))]
+
+    def load_recent(self, owner: str = None, limit: int = 20, kinds=None) -> List[Dict]:
+        if self._v2 is not None:
+            try:
+                return self._validate_entries(
+                    self._v2.load_recent(owner, limit=limit, kinds=kinds)
+                )
+            except Exception as e:
+                logger.warning("Memory V2 recent load failed, falling back to JSON: %s", e)
+        allowed = set(kinds or [])
+        rows = self.load(owner=owner)
+        if allowed:
+            rows = [entry for entry in rows if (entry.get("kind") or "saved") in allowed]
+        rows.sort(key=lambda entry: int(entry.get("timestamp") or 0), reverse=True)
+        return rows[:max(1, int(limit))]
+
+    def load_knowledge(
+        self,
+        owner: str = None,
+        include_expired: bool = False,
+        limit: int = 50,
+    ) -> List[Dict]:
+        if self._v2 is not None:
+            try:
+                return self._validate_entries(self._v2.load_knowledge(
+                    owner,
+                    include_expired=include_expired,
+                    limit=limit,
+                ))
+            except Exception as e:
+                logger.warning("Memory V2 knowledge load failed, falling back to JSON: %s", e)
+        now = int(time.time())
+        rows = []
+        for entry in self.load(owner=owner):
+            if entry.get("kind") != "knowledge":
+                continue
+            try:
+                fresh = int(entry.get("expires_at") or now + 1) > now
+            except (TypeError, ValueError):
+                fresh = False
+            if include_expired or fresh:
+                rows.append(entry)
+        rows.sort(key=lambda entry: int(entry.get("timestamp") or 0), reverse=True)
+        return rows[:max(1, int(limit))]
+
+    def upsert_knowledge(self, **kwargs) -> Dict:
+        if self._v2 is not None:
+            return self._v2.upsert_knowledge(**kwargs)
+
+        owner = kwargs.get("owner")
+        text = " ".join(str(kwargs.get("text") or "").split()).strip()
+        entries = self.load_all()
+        entry = next((
+            row for row in entries
+            if row.get("owner") == owner
+            and row.get("kind") == "knowledge"
+            and " ".join(str(row.get("text") or "").split()).strip() == text
+        ), None)
+        if entry is None:
+            entry = self.add_entry(text, source="web_validated", category="knowledge", owner=owner)
+            entries.append(entry)
+        entry.update({
+            "kind": "knowledge",
+            "status": "active",
+            "source": "web_validated",
+            "category": "knowledge",
+            "source_refs": list(kwargs.get("source_refs") or []),
+            "query": str(kwargs.get("query") or ""),
+            "confidence": str(kwargs.get("confidence") or "medium"),
+            "validated_at": int(kwargs.get("validated_at") or time.time()),
+            "expires_at": int(kwargs.get("expires_at") or time.time()),
+        })
+        entry["timestamp"] = entry["validated_at"]
+        self.save(entries)
+        return entry
+
     def claim_ownerless(self, owner: str):
         """Assign all ownerless memory entries to the given owner."""
         if self._v2 is not None:

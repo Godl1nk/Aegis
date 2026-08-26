@@ -686,8 +686,8 @@ async def build_chat_context(
     mem_enabled = not incognito and not no_memory and uprefs.get("memory_enabled", True)
     reference_saved_memories = mem_enabled and uprefs.get("reference_saved_memories", True)
     reference_chat_history = mem_enabled and uprefs.get("reference_chat_history", True)
-    # Skills injection respects its own enable toggle (mirrors memory_enabled).
-    # When off, the "Available skills" index is not added to the prompt.
+    # Skills prompting respects its own enable toggle (mirrors memory_enabled).
+    # Agent-loop prompt assembly owns the single bounded catalogue injection.
     skills_enabled = not incognito and uprefs.get("skills_enabled", True)
     if not allow_tool_preprocessing:
         mem_enabled = False

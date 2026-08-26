@@ -22,7 +22,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
+from copy import deepcopy
 from typing import Dict, Iterable, List, Optional
 
 from .skill_format import Skill, slugify
@@ -62,6 +64,16 @@ def _to_float(x, default: float = 0.0) -> float:
 class SkillsManager:
     """Read/write SKILL.md files under <data_dir>/skills/."""
 
+    # Managers are short-lived and several are constructed during one agent
+    # turn. Cache parsed markdown by absolute path + stat signature at class
+    # scope so those managers share the work. Values are copied on return:
+    # update paths mutate Skill objects and must never mutate the cached source.
+    _cache_lock = threading.RLock()
+    _skill_cache: Dict[str, tuple[tuple[int, int], Skill]] = {}
+    _usage_cache: Dict[str, tuple[tuple[int, int], Dict[str, Dict]]] = {}
+    _catalog_cache: Dict[str, tuple[float, List[Dict]]] = {}
+    CATALOG_CACHE_TTL_SECONDS = 2.0
+
     def __init__(self, data_dir: str):
         self.data_dir = data_dir
         self.skills_root = os.path.join(data_dir, "skills")
@@ -89,9 +101,19 @@ class SkillsManager:
         if not os.path.exists(self.usage_file):
             return {}
         try:
+            cache_path = os.path.abspath(self.usage_file)
+            stat = os.stat(cache_path)
+            signature = (stat.st_mtime_ns, stat.st_size)
+            with self._cache_lock:
+                cached = self._usage_cache.get(cache_path)
+                if cached and cached[0] == signature:
+                    return deepcopy(cached[1])
             with open(self.usage_file, encoding="utf-8") as f:
                 d = json.load(f)
-            return d if isinstance(d, dict) else {}
+            usage = d if isinstance(d, dict) else {}
+            with self._cache_lock:
+                self._usage_cache[cache_path] = (signature, deepcopy(usage))
+            return usage
         except Exception:
             return {}
 
@@ -104,6 +126,18 @@ class SkillsManager:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(usage, f, indent=2)
             os.replace(tmp, self.usage_file)
+        try:
+            cache_path = os.path.abspath(self.usage_file)
+            stat = os.stat(cache_path)
+            with self._cache_lock:
+                self._usage_cache[cache_path] = (
+                    (stat.st_mtime_ns, stat.st_size),
+                    deepcopy(usage),
+                )
+        except OSError:
+            with self._cache_lock:
+                self._usage_cache.pop(os.path.abspath(self.usage_file), None)
+        self._invalidate_catalog_cache(self.skills_root)
 
     @staticmethod
     def _usage_key(name: str, owner: Optional[str] = None) -> str:
@@ -165,18 +199,43 @@ class SkillsManager:
 
     def _read_skill(self, path: str) -> Optional[Skill]:
         try:
-            with open(path, encoding="utf-8") as f:
+            cache_path = os.path.abspath(path)
+            stat = os.stat(cache_path)
+            signature = (stat.st_mtime_ns, stat.st_size)
+            with self._cache_lock:
+                cached = self._skill_cache.get(cache_path)
+                if cached and cached[0] == signature:
+                    return deepcopy(cached[1])
+            with open(cache_path, encoding="utf-8") as f:
                 text = f.read()
-            return Skill.from_markdown(text, path=path)
+            skill = Skill.from_markdown(text, path=path)
+            with self._cache_lock:
+                self._skill_cache[cache_path] = (signature, deepcopy(skill))
+            return skill
         except Exception as e:
             logger.warning(f"Failed to parse {path}: {e}")
             return None
+
+    @classmethod
+    def _invalidate_skill_cache(cls, path: str) -> None:
+        with cls._cache_lock:
+            cls._skill_cache.pop(os.path.abspath(path), None)
+
+    @classmethod
+    def _invalidate_catalog_cache(cls, skills_root: str) -> None:
+        with cls._cache_lock:
+            cls._catalog_cache.pop(
+                os.path.normcase(os.path.abspath(skills_root)),
+                None,
+            )
 
     def _write_skill(self, sk: Skill) -> str:
         path = self._skill_file(sk.category or "general", sk.name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         from core.atomic_io import atomic_write_text
         atomic_write_text(path, sk.to_markdown())
+        self._invalidate_skill_cache(path)
+        self._invalidate_catalog_cache(self.skills_root)
         sk.path = path
         return path
 
@@ -216,13 +275,57 @@ class SkillsManager:
 
     def load_all(self) -> List[Dict]:
         """Return every skill as a plain dict, plus any legacy JSON entries."""
+        catalog_key = os.path.normcase(os.path.abspath(self.skills_root))
+        now = time.monotonic()
+        with self._cache_lock:
+            cached_catalog = self._catalog_cache.get(catalog_key)
+            if (
+                cached_catalog
+                and now - cached_catalog[0] <= self.CATALOG_CACHE_TTL_SECONDS
+            ):
+                return deepcopy(cached_catalog[1])
+
         usage = self._load_usage()
         out: List[Dict] = []
         seen_names: set[str] = set()
-        for path in self._iter_skill_files():
+        live_paths = list(self._iter_skill_files())
+        live_cache_paths = {
+            os.path.normcase(os.path.abspath(path)) for path in live_paths
+        }
+        root_prefix = os.path.normcase(os.path.abspath(self.skills_root) + os.sep)
+        with self._cache_lock:
+            stale = [
+                path for path in self._skill_cache
+                if os.path.normcase(path).startswith(root_prefix)
+                and os.path.normcase(path) not in live_cache_paths
+            ]
+            for path in stale:
+                self._skill_cache.pop(path, None)
+        seen_disk: Dict[tuple[str, str], tuple[bool, int]] = {}
+        for path in live_paths:
             sk = self._read_skill(path)
             if not sk:
                 continue
+            # A move interrupted between writing the new category and removing
+            # the old one can leave two files with the same owner/name. Surface
+            # one deterministic record instead of duplicating prompt/catalog
+            # entries. Prefer the canonical <category>/<name>/SKILL.md path.
+            identity = (sk.owner or "", sk.name)
+            canonical = os.path.normcase(os.path.abspath(
+                self._skill_file(sk.category or "general", sk.name)
+            ))
+            is_canonical = os.path.normcase(os.path.abspath(path)) == canonical
+            prior = seen_disk.get(identity)
+            if prior is not None:
+                prior_is_canonical, prior_idx = prior
+                if prior_is_canonical or not is_canonical:
+                    logger.warning(
+                        "Ignoring duplicate skill %s for owner %s at %s",
+                        sk.name,
+                        sk.owner or "",
+                        path,
+                    )
+                    continue
             d = sk.to_dict()
             u = self._usage_entry(usage, sk.name, sk.owner)
             d["uses"] = int(u.get("uses", 0))
@@ -233,7 +336,12 @@ class SkillsManager:
             d["audit_teacher_model"] = u.get("audit_teacher_model")
             d["audited_at"] = u.get("audited_at")
             d["necessity"] = u.get("necessity")
+            if prior is not None:
+                out[prior_idx] = d
+                seen_disk[identity] = (is_canonical, prior_idx)
+                continue
             out.append(d)
+            seen_disk[identity] = (is_canonical, len(out) - 1)
             seen_names.add(sk.name)
         # Legacy JSON entries — surfaced as draft, not editable from new flow
         if os.path.exists(self.legacy_file):
@@ -273,6 +381,8 @@ class SkillsManager:
                         })
             except Exception:
                 pass
+        with self._cache_lock:
+            self._catalog_cache[catalog_key] = (time.monotonic(), deepcopy(out))
         return out
 
     def load(self, owner: Optional[str] = None) -> List[Dict]:
@@ -426,6 +536,7 @@ class SkillsManager:
             note = f"Imported from {source_url}"
             sk.body_extra = f"{extra}\n\n{note}".strip() if extra else note
         atomic_write_text(self._skill_file(cat, nm), sk.to_markdown())
+        self._invalidate_catalog_cache(self.skills_root)
         sk.path = self._skill_file(cat, nm)
         return sk.to_dict()
 
@@ -518,6 +629,8 @@ class SkillsManager:
                     for d in dirs:
                         os.rmdir(os.path.join(root, d))
                 os.rmdir(skill_dir)
+                self._invalidate_skill_cache(path)
+                self._invalidate_catalog_cache(self.skills_root)
             except Exception as e:
                 logger.warning(f"Failed to remove skill dir {skill_dir}: {e}")
                 return False

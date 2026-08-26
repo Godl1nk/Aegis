@@ -227,6 +227,16 @@ DEFAULT_SETTINGS = {
     # Max relevant skills injected into the prompt for one request. The skills
     # library can grow beyond this; cleanup/retirement is an explicit review flow.
     "skill_max_injected": 3,
+    # Level-0 skill catalogue budget. Full matching procedures have their own
+    # smaller top-k cap and remain available on demand through manage_skills.
+    "skill_index_max_items": 64,
+    "skill_index_max_chars": 8000,
+    # Source-grounded durable web knowledge. Learning is conservative: claims
+    # need independent fetched sources and expire instead of becoming timeless.
+    "knowledge_auto_learn_enabled": True,
+    "knowledge_min_sources": 2,
+    "knowledge_support_threshold": 0.55,
+    "knowledge_default_ttl_days": 180,
     # Reminders
     "reminder_channel": "browser",   # "browser" | "email" | "ntfy" | "webhook"
     "reminder_llm_synthesis": False,

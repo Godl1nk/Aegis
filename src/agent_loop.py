@@ -365,7 +365,7 @@ def _domain_rules_for_tools(tool_names: set) -> list[str]:
     for domain, domain_tools in _DOMAIN_TOOL_MAP.items():
         if names & domain_tools:
             rules.append(_DOMAIN_RULES[domain])
-    if names & {"create_session", "list_sessions", "manage_session", "manage_documents", "manage_notes", "manage_calendar", "manage_tasks", "manage_skills", "manage_research"}:
+    if names & {"create_session", "list_sessions", "manage_session", "manage_documents", "manage_notes", "manage_calendar", "manage_tasks", "manage_skills", "manage_knowledge", "manage_research"}:
         rules.append(_LINK_RULES)
     return rules
 
@@ -488,6 +488,7 @@ Generate an image. Line 1 = description, line 2 = model ("auto" unless the user 
     "list_models": "- ```list_models``` — Show all available AI models across all endpoints. Use when user asks what models are available.",
     "manage_session": "- ```manage_session``` — Rename, archive, delete, fork, switch, or `list` chats (the UI calls them 'chats'; 'session' is internal). Line 1 = action (list/switch/rename/archive/unarchive/delete/important/unimportant/truncate/fork), Line 2 = exact chat id from `list_sessions` (or `current` where supported). For delete/archive/truncate, always list first and reuse the exact id; never invent placeholder ids. `switch`/`open` returns a clickable anchor link the user can tap to open the chat — use for \"open my X chat\".",
     "manage_memory": "- ```manage_memory``` — Manage the user's persistent memory (facts about the USER themselves, their preferences, context that persists across chats). Line 1 = action (list/add/edit/delete/search), rest = content. Use when user says 'remember this' about themselves, states identity facts like 'my name is <name>' / 'call me <name>' / 'I live in <place>', or asks about stored memories. DO NOT use for info about another person (their address, phone, email, birthday) — that goes in `manage_contact`. If the user pastes an address/phone with a name and says 'save this for <person>', use `manage_contact add` with the address arg, NOT manage_memory.",
+    "manage_knowledge": "- ```manage_knowledge``` — Durable non-personal web knowledge. When a task exposes a genuine knowledge gap or a reusable fact not safely known from training, search online first. If worth retaining, call action=learn with ONE concise claim and a validation query; the tool independently searches, requires corroborating fetched content from at least two domains, stores provenance, and expires stale facts. Do not save opinions, secrets, personal data, one-off task output, or medical/legal/financial/emergency claims. Use action=search before repeating web work on a topic. Treat retrieved knowledge as source-grounded but fallible; expired entries are excluded.",
     "manage_skills": "- ```manage_skills``` — Skill registry (SKILL.md format). Args (JSON): {\"action\": \"list|view|view_ref|search|add|edit|patch|publish|delete\", ...}. `list` returns the index of available skills (published + teacher-escalation drafts); `view name=foo` fetches the full SKILL.md; `view_ref name=foo path=...` loads a reference file under the skill directory. For `add`, provide an explicit kebab-case `name` and only report the exact returned name, because storage may normalize or dedupe it. Use this BEFORE doing domain work — there may already be a procedure (published or draft) that prescribes the correct steps. Drafts written by the teacher loop are authoritative guidance even though they're not yet published.",
     "manage_tasks": "- ```manage_tasks``` — Create and manage scheduled background tasks (recurring AI jobs). Args (JSON): {\"action\": \"list|create|edit|delete|pause|resume|run\", ...}",
     "manage_endpoints": "- ```manage_endpoints``` — Add, remove, or configure AI model API endpoints. Args (JSON): {\"action\": \"list|add|delete|enable|disable\", ...}. Use when user wants to add a new AI provider.",
@@ -2450,6 +2451,60 @@ _ADMIN_TOOLS = {
     "send_to_session", "pipeline", "ask_teacher", "list_models",
 }
 
+def _format_skill_index(
+    skill_idx: List[Dict],
+    *,
+    max_items: int = 64,
+    max_chars: int = 8000,
+) -> str:
+    """Build a bounded Level-0 skill catalogue.
+
+    Full procedures are injected separately for top relevant matches or fetched
+    through manage_skills(view). This catalogue only needs discovery metadata;
+    it must not grow until it crowds conversation and retrieved knowledge out.
+    """
+    if not skill_idx or max_items <= 0 or max_chars <= 0:
+        return ""
+
+    max_items = max(1, min(int(max_items), 256))
+    max_chars = max(512, min(int(max_chars), 40_000))
+    lines = [
+        "## Available skills",
+        "Procedures the assistant may consult before domain work. Fetch the full "
+        "procedure with `manage_skills` action=view name=<name> when relevant. "
+        "Teacher-written `(draft)` entries are pending audit; use only when they "
+        "closely match the request.",
+    ]
+    content_limit = max_chars - 100  # reserve room for an omission notice
+    included = 0
+    current_category = None
+    for skill in skill_idx:
+        if included >= max_items:
+            break
+        category = str(skill.get("category") or "general")
+        name = str(skill.get("name") or "?")
+        description = " ".join(str(skill.get("description") or "").split())[:240]
+        badge = " *(draft)*" if skill.get("status") == "draft" else ""
+        additions = []
+        if category != current_category:
+            additions.append(f"\n**{category}**")
+        additions.append(f"- `{name}` — {description}{badge}")
+        if len("\n".join([*lines, *additions])) > content_limit:
+            break
+        lines.extend(additions)
+        current_category = category
+        included += 1
+
+    block = "\n".join(lines)
+    omitted = max(0, len(skill_idx) - included)
+    if omitted:
+        block += (
+            f"\n- ... {omitted} additional skills omitted; use `manage_skills` "
+            "search for the full catalogue."
+        )
+    return block[:max_chars]
+
+
 def _build_base_prompt(
     disabled_tools,
     mcp_mgr,
@@ -2520,22 +2575,21 @@ def _build_base_prompt(
             active_tools = list(set(TOOL_SECTIONS.keys()) - set(disabled or []))
             skill_idx = _sm.index_for(owner=owner, active_toolsets=active_tools)
             if skill_idx:
-                lines = ["## Available skills",
-                         "Procedures the assistant should consult before doing domain work. "
-                         "Fetch the full procedure with `manage_skills` action=view name=<name> "
-                         "when one looks relevant. Entries tagged `(draft)` were written by the "
-                         "teacher-escalation loop after a prior failure — treat them as authoritative "
-                         "guidance; if you follow one and it works, that's a good signal the procedure "
-                         "is correct."]
-                by_cat: dict[str, list] = {}
-                for s in skill_idx:
-                    by_cat.setdefault(s["category"], []).append(s)
-                for cat in sorted(by_cat):
-                    lines.append(f"\n**{cat}**")
-                    for s in by_cat[cat]:
-                        badge = " *(draft)*" if s.get("status") == "draft" else ""
-                        lines.append(f"- `{s['name']}` — {s['description']}{badge}")
-                skill_index_block = "\n\n" + "\n".join(lines)
+                try:
+                    _index_max_items = int(get_setting("skill_index_max_items", 64) or 64)
+                except (TypeError, ValueError):
+                    _index_max_items = 64
+                try:
+                    _index_max_chars = int(get_setting("skill_index_max_chars", 8000) or 8000)
+                except (TypeError, ValueError):
+                    _index_max_chars = 8000
+                formatted = _format_skill_index(
+                    skill_idx,
+                    max_items=_index_max_items,
+                    max_chars=_index_max_chars,
+                )
+                if formatted:
+                    skill_index_block = "\n\n" + formatted
         except Exception as _e:
             # Skill index is a soft enhancement — never fail prompt assembly on it.
             logger.debug(f"Skill-index injection skipped: {_e}")

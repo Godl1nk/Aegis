@@ -104,6 +104,12 @@ def _content_tokens(text: str) -> list:
 
 
 class ChatProcessor:
+    # Pinned memories are high priority, not permission to consume an
+    # unbounded prompt. Overflow joins the normal retrieval pool so it remains
+    # available when relevant instead of disappearing from recall entirely.
+    PINNED_MEMORY_MAX_ITEMS = 12
+    PINNED_MEMORY_MAX_CHARS = 6000
+
     def __init__(self, memory_manager, personal_docs_manager, memory_vector=None, skills_manager=None):
         self.memory_manager = memory_manager
         self.personal_docs_manager = personal_docs_manager
@@ -112,6 +118,127 @@ class ChatProcessor:
 
     # Minimum similarity score for RAG results to be injected
     RAG_SIMILARITY_THRESHOLD = 0.35
+
+    @classmethod
+    def _partition_pinned_memories(cls, memories: list) -> tuple[list, list]:
+        ranked = sorted(
+            memories,
+            key=lambda m: (
+                int(m.get("priority") or 0),
+                int(m.get("uses") or 0),
+                int(m.get("timestamp") or 0),
+            ),
+            reverse=True,
+        )
+        selected = []
+        overflow = []
+        used_chars = 0
+        for memory in ranked:
+            text = str(memory.get("text") or "")
+            cost = len(text) + 3  # bullet prefix + newline
+            if (
+                len(selected) < cls.PINNED_MEMORY_MAX_ITEMS
+                and used_chars + cost <= cls.PINNED_MEMORY_MAX_CHARS
+            ):
+                selected.append(memory)
+                used_chars += cost
+            else:
+                overflow.append(memory)
+        return selected, overflow
+
+    @staticmethod
+    def _memory_is_fresh(memory: dict) -> bool:
+        if memory.get("kind") != "knowledge":
+            return True
+        try:
+            return int(memory.get("expires_at") or 0) > int(time.time())
+        except (TypeError, ValueError):
+            return False
+
+    def _load_context_candidates(
+        self,
+        message: str,
+        owner: Optional[str],
+        *,
+        reference_saved_memories: bool,
+        reference_chat_history: bool,
+    ) -> list:
+        """Use vector IDs first so prompt construction stays corpus-independent."""
+        has_index = bool(
+            self.memory_vector
+            and getattr(self.memory_vector, "healthy", False)
+            and hasattr(self.memory_manager, "load_by_ids")
+            and hasattr(self.memory_manager, "load_pinned")
+        )
+        if not has_index:
+            return self.memory_manager.load(owner=owner)
+
+        kinds = []
+        if reference_saved_memories:
+            kinds.extend(["saved", "knowledge"])
+        if reference_chat_history:
+            kinds.append("synthesized")
+        if not kinds:
+            return []
+
+        pinned = self.memory_manager.load_pinned(
+            owner=owner,
+            limit=self.PINNED_MEMORY_MAX_ITEMS,
+            kinds=kinds,
+        )
+
+        broad_recall = not _content_tokens(message) and re.search(
+            r"\b(?:about me|know me|remember|who am i)\b",
+            message.lower(),
+        )
+        if broad_recall and hasattr(self.memory_manager, "load_recent"):
+            candidates = self.memory_manager.load_recent(
+                owner=owner,
+                limit=20,
+                kinds=kinds,
+            )
+        else:
+            try:
+                hits = self.memory_vector.search(message, k=24, owner=owner)
+            except TypeError:
+                try:
+                    hits = self.memory_vector.search(message, k=24)
+                except Exception:
+                    hits = []
+            except Exception:
+                hits = []
+            candidates = self.memory_manager.load_by_ids(
+                [hit.get("memory_id") for hit in hits if isinstance(hit, dict)],
+                owner=owner,
+            )
+
+        merged = []
+        seen = set()
+        for memory in [*pinned, *candidates]:
+            mid = memory.get("id")
+            if mid and mid in seen:
+                continue
+            if mid:
+                seen.add(mid)
+            merged.append(memory)
+        return merged
+
+    @staticmethod
+    def _retrieved_memory_line(memory: dict) -> str:
+        text = str(memory.get("text") or "")
+        if memory.get("kind") != "knowledge":
+            return f"- {text}"
+        from urllib.parse import urlparse
+
+        domains = []
+        for ref in memory.get("source_refs") or []:
+            if not isinstance(ref, dict):
+                continue
+            host = (urlparse(str(ref.get("url") or "")).hostname or "").lower()
+            if host and host not in domains:
+                domains.append(host)
+        provenance = ", ".join(domains[:3]) or "sources retained in knowledge store"
+        return f"- [validated web knowledge; sources: {provenance}] {text}"
 
     def _hybrid_retrieve(self, message: str, mem_entries: list, k: int = 5, owner: Optional[str] = None) -> list:
         """Retrieve memories relevant to the message.
@@ -288,9 +415,16 @@ class ChatProcessor:
         # Memory: pinned (always included) + extended (RAG-retrieved when relevant)
         self._last_used_memories = []  # track what was injected
         if use_memory:
-            mem_entries = self.memory_manager.load(owner=owner)
+            mem_entries = self._load_context_candidates(
+                message,
+                owner,
+                reference_saved_memories=reference_saved_memories,
+                reference_chat_history=reference_chat_history,
+            )
             filtered_entries = []
             for memory in mem_entries:
+                if not self._memory_is_fresh(memory):
+                    continue
                 is_chat_history_memory = (
                     (memory.get("kind") or "saved") == "synthesized"
                     or memory.get("source") == "dream"
@@ -301,15 +435,21 @@ class ChatProcessor:
                     filtered_entries.append(memory)
             mem_entries = filtered_entries
 
-            pinned = [m for m in mem_entries if m.get("pinned")]
+            all_pinned = [m for m in mem_entries if m.get("pinned")]
+            pinned, pinned_overflow = self._partition_pinned_memories(all_pinned)
             extended = [m for m in mem_entries if not m.get("pinned")]
+            extended.extend(pinned_overflow)
 
             _used_ids: list = []
             if pinned:
                 pinned_text = "\n- ".join([m["text"] for m in pinned])
                 preface.append(untrusted_context_message(
                     "saved memory: pinned user facts",
-                    f"Core facts about the user:\n- {pinned_text}",
+                    f"Core facts about the user:\n- {pinned_text}"
+                    + (
+                        f"\n[{len(pinned_overflow)} additional pinned memories are available through relevance retrieval.]"
+                        if pinned_overflow else ""
+                    ),
                 ))
                 for m in pinned:
                     self._last_used_memories.append({
@@ -326,7 +466,9 @@ class ChatProcessor:
             if extended:
                 relevant = self._hybrid_retrieve(message, extended, k=3, owner=owner)
                 if relevant:
-                    ext_text = "\n".join([f"- {m['text']}" for m in relevant])
+                    ext_text = "\n".join(
+                        self._retrieved_memory_line(memory) for memory in relevant
+                    )
                     preface.append(untrusted_context_message(
                         "saved memory: retrieved context",
                         (
@@ -465,27 +607,9 @@ class ChatProcessor:
                         f"Content from {url}:\n\n{content}",
                     ))
 
-        # Skills index — progressive disclosure. Only injected when the
-        # model has the `manage_skills` tool available (agent_mode), and
-        # never in incognito mode (the user has explicitly opted out of
-        # context retention this turn). In plain chat mode the model can't
-        # call the tool anyway, so the index would be noise.
-        if agent_mode and not incognito and use_skills and self.skills_manager:
-            try:
-                idx = self.skills_manager.index_for(owner=owner)
-            except Exception as e:
-                logger.debug(f"Skills index unavailable: {e}")
-                idx = []
-            if idx:
-                by_cat: Dict[str, list] = {}
-                for s in idx:
-                    by_cat.setdefault(s.get("category") or "general", []).append(s)
-                lines = ["[Available skills — call manage_skills(action='view', name='...') to load one when relevant]"]
-                for cat in sorted(by_cat):
-                    lines.append(f"  {cat}:")
-                    for s in sorted(by_cat[cat], key=lambda x: x["name"]):
-                        desc = s.get("description") or ""
-                        lines.append(f"    - {s['name']}: {desc}" if desc else f"    - {s['name']}")
-                preface.append(untrusted_context_message("available skills index", "\n".join(lines)))
+        # Agent-mode skill prompting is owned by src.agent_loop. Keeping a
+        # second catalogue here duplicated every eligible skill in the same
+        # request and used different toolset gating. `use_skills` and the
+        # constructor argument remain for API compatibility with callers.
 
         return preface, rag_sources, web_sources

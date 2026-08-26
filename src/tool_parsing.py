@@ -313,6 +313,8 @@ _TOOL_NAME_MAP = {
     "session_control": "manage_session",
     "manage_memory": "manage_memory",
     "memory": "manage_memory",
+    "manage_knowledge": "manage_knowledge",
+    "knowledge": "manage_knowledge",
     "manage_tasks": "manage_tasks",
     "tasks": "manage_tasks",
     "schedule": "manage_tasks",
@@ -763,7 +765,7 @@ def _raw_openai_tool_call_to_block(value) -> Optional[ToolBlock]:
             content = f"toggle {name_arg} {value}"
         else:
             content = action
-    elif tool_type in ("manage_tasks", "manage_skills", "api_call", "manage_endpoints",
+    elif tool_type in ("manage_tasks", "manage_skills", "manage_knowledge", "api_call", "manage_endpoints",
                        "manage_mcp", "manage_webhooks", "manage_tokens",
                        "manage_documents", "manage_settings", "manage_notes",
                        "manage_research", "manage_bg_jobs"):

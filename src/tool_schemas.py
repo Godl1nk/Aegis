@@ -428,6 +428,35 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "manage_knowledge",
+            "description": "Validate reusable non-personal knowledge against multiple independent web sources, then persist it with provenance and expiry; or list/search/delete previously validated knowledge. Never use learn for medical, legal, financial, emergency, or other high-stakes claims.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["learn", "list", "search", "delete"],
+                    },
+                    "claim": {
+                        "type": "string",
+                        "description": "One concise reusable factual claim to validate and save.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Web-validation query for learn, or retrieval query for search.",
+                    },
+                    "knowledge_id": {
+                        "type": "string",
+                        "description": "Exact knowledge entry id for delete.",
+                    },
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_models",
             "description": "List all available AI models across configured endpoints. Optionally filter by keyword.",
             "parameters": {
@@ -1507,6 +1536,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
                 content += "\n" + args["category"]
         else:
             content = action
+    elif tool_type == "manage_knowledge":
+        content = json.dumps(args)
     elif tool_type == "list_models":
         content = args.get("filter", "")
     elif tool_type == "ui_control":

@@ -170,7 +170,26 @@ class MemoryVectorStore:
                 return True
         return False
 
-    def search(self, query: str, k: int = 8, owner: str = None) -> List[Dict]:
+    @staticmethod
+    def _where_filter(owner: str = None, kind: str = None):
+        clauses = []
+        if owner is not None:
+            clauses.append({"owner": owner or ""})
+        if kind is not None:
+            clauses.append({"kind": kind})
+        if not clauses:
+            return None
+        if len(clauses) == 1:
+            return clauses[0]
+        return {"$and": clauses}
+
+    def search(
+        self,
+        query: str,
+        k: int = 8,
+        owner: str = None,
+        kind: str = None,
+    ) -> List[Dict]:
         """Search for the most relevant memory IDs by semantic similarity.
         Returns list of {"memory_id": str, "score": float}.
 
@@ -181,7 +200,7 @@ class MemoryVectorStore:
             return []
 
         out = []
-        where_filter = {"owner": owner or ""} if owner is not None else None
+        where_filter = self._where_filter(owner, kind)
         lane_priority = {LANE_CUSTOM: 0, LANE_FASTEMBED: 1}
         for lane in self._lanes:
             try:
@@ -207,12 +226,18 @@ class MemoryVectorStore:
         out.sort(key=lambda row: (-row["score"], lane_priority.get(row["embedding_lane"], 99)))
         return dedupe_results(out, id_key="memory_id", limit=k)
 
-    def find_similar(self, text: str, threshold: float = 0.92, owner: str = None) -> Optional[str]:
+    def find_similar(
+        self,
+        text: str,
+        threshold: float = 0.92,
+        owner: str = None,
+        kind: str = None,
+    ) -> Optional[str]:
         """Check if a near-duplicate exists. Returns memory_id if found, else None."""
         if not self._healthy or self.count() == 0:
             return None
 
-        where_filter = {"owner": owner or ""} if owner is not None else None
+        where_filter = self._where_filter(owner, kind)
         for lane in self._lanes:
             try:
                 if lane.count() == 0:

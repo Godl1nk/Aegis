@@ -1042,6 +1042,7 @@ def setup_chat_routes(
         ):
             disabled_tools.add("web_search")
             disabled_tools.add("web_fetch")
+            disabled_tools.add("manage_knowledge")
         if _explicit_web_intent:
             # A direct lookup/search request should not drift into personal
             # tools or shell fallbacks. We still keep web_search/web_fetch
@@ -1058,15 +1059,18 @@ def setup_chat_routes(
             })
             disabled_tools.discard("web_search")
             disabled_tools.discard("web_fetch")
+            disabled_tools.discard("manage_knowledge")
         elif _search_enabled:
             disabled_tools.discard("web_search")
             disabled_tools.discard("web_fetch")
+            disabled_tools.discard("manage_knowledge")
 
         # Nobody/incognito mode: deny tools that would expose the user's
         # persistent memory, past chats, or other identity-linked data.
         if incognito:
             disabled_tools.update({
                 "manage_memory",      # persistent memory store
+                "manage_knowledge",   # source-grounded persistent knowledge
                 "search_chats",       # past chat history
                 "manage_skills",      # skill presets tied to user
             })
@@ -1101,7 +1105,7 @@ def setup_chat_routes(
             if not _privs.get("can_generate_images", True):
                 disabled_tools.add("generate_image")
             if not _privs.get("can_manage_memory", True):
-                disabled_tools.update({"manage_memory", "manage_skills"})
+                disabled_tools.update({"manage_memory", "manage_knowledge", "manage_skills"})
             if not _privs.get("can_use_research", True):
                 _research_flags["do"] = False
             if not _privs.get("can_use_agent", True):
@@ -1140,13 +1144,13 @@ def setup_chat_routes(
                 "create_document", "edit_document", "update_document",
                 "chat_with_model", "create_session", "list_sessions",
                 "send_to_session",
-                "pipeline", "manage_session", "manage_memory", "list_models",
+                "pipeline", "manage_session", "manage_memory", "manage_knowledge", "list_models",
                 "generate_image", "ui_control",
             }
             disabled_tools.update(_compare_strip)
             # In chat mode compare, disable ALL agent tools (no bash, python, file ops)
             if chat_mode == 'chat':
-                disabled_tools.update({"bash", "python", "read_file", "write_file", "web_search", "web_fetch", "search_chats", "manage_tasks"})
+                disabled_tools.update({"bash", "python", "read_file", "write_file", "web_search", "web_fetch", "manage_knowledge", "search_chats", "manage_tasks"})
 
         # Plan mode: investigate read-only, propose a plan, don't mutate. Block
         # every tool not on the read-only allowlist. (stream_agent_loop enforces

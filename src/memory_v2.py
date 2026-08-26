@@ -183,10 +183,179 @@ class MemoryV2Store:
             return [self._item_to_dict(row) for row in rows]
 
     def load(self, owner: Optional[str] = None) -> list[dict]:
-        rows = self.load_all()
         if owner is None:
-            return rows
-        return [row for row in rows if row.get("owner") == owner]
+            return self.load_all()
+
+        # Keep tenant filtering in SQLite. The previous implementation loaded
+        # every active row for every owner and then filtered in Python on every
+        # prompt build, bypassing ix_memory_items_owner_status and making both
+        # latency and process memory scale with the global corpus.
+        from core.database import MemoryItem
+
+        self.migrate_from_json_once()
+        with self._db() as db:
+            rows = (
+                db.query(MemoryItem)
+                .filter(
+                    MemoryItem.owner == owner,
+                    MemoryItem.status == "active",
+                )
+                .order_by(MemoryItem.timestamp.desc())
+                .all()
+            )
+            return [self._item_to_dict(row) for row in rows]
+
+    def load_by_ids(self, ids: Iterable[str], owner: Optional[str] = None) -> list[dict]:
+        """Load a bounded set of active rows without materializing an owner corpus."""
+        from core.database import MemoryItem
+
+        ordered_ids = list(dict.fromkeys(str(mid) for mid in ids if mid))
+        if not ordered_ids:
+            return []
+        self.migrate_from_json_once()
+        with self._db() as db:
+            query = db.query(MemoryItem).filter(
+                MemoryItem.id.in_(ordered_ids),
+                MemoryItem.status == "active",
+            )
+            if owner is not None:
+                query = query.filter(MemoryItem.owner == owner)
+            by_id = {row.id: self._item_to_dict(row) for row in query.all()}
+        return [by_id[mid] for mid in ordered_ids if mid in by_id]
+
+    def load_pinned(
+        self,
+        owner: Optional[str],
+        *,
+        limit: int = 12,
+        kinds: Optional[Iterable[str]] = None,
+    ) -> list[dict]:
+        from core.database import MemoryItem
+
+        limit = max(1, min(int(limit), 100))
+        self.migrate_from_json_once()
+        with self._db() as db:
+            query = db.query(MemoryItem).filter(
+                MemoryItem.owner == owner,
+                MemoryItem.status == "active",
+                MemoryItem.pinned == True,
+            )
+            if kinds:
+                query = query.filter(MemoryItem.kind.in_(list(kinds)))
+            rows = (
+                query.order_by(
+                    MemoryItem.priority.desc(),
+                    MemoryItem.uses.desc(),
+                    MemoryItem.timestamp.desc(),
+                )
+                .limit(limit)
+                .all()
+            )
+            return [self._item_to_dict(row) for row in rows]
+
+    def load_recent(
+        self,
+        owner: Optional[str],
+        *,
+        limit: int = 20,
+        kinds: Optional[Iterable[str]] = None,
+    ) -> list[dict]:
+        from core.database import MemoryItem
+
+        limit = max(1, min(int(limit), 100))
+        self.migrate_from_json_once()
+        with self._db() as db:
+            query = db.query(MemoryItem).filter(
+                MemoryItem.owner == owner,
+                MemoryItem.status == "active",
+            )
+            if kinds:
+                query = query.filter(MemoryItem.kind.in_(list(kinds)))
+            rows = query.order_by(MemoryItem.timestamp.desc()).limit(limit).all()
+            return [self._item_to_dict(row) for row in rows]
+
+    def load_knowledge(
+        self,
+        owner: Optional[str],
+        *,
+        include_expired: bool = False,
+        limit: int = 50,
+    ) -> list[dict]:
+        from core.database import MemoryItem
+
+        now = int(time.time())
+        limit = max(1, min(int(limit), 500))
+        self.migrate_from_json_once()
+        with self._db() as db:
+            rows = (
+                db.query(MemoryItem)
+                .filter(
+                    MemoryItem.owner == owner,
+                    MemoryItem.kind == "knowledge",
+                    MemoryItem.status == "active",
+                )
+                .order_by(MemoryItem.timestamp.desc())
+                .limit(limit)
+                .all()
+            )
+            items = [self._item_to_dict(row) for row in rows]
+        if include_expired:
+            return items
+        fresh = []
+        for item in items:
+            try:
+                if int(item.get("expires_at") or now + 1) > now:
+                    fresh.append(item)
+            except (TypeError, ValueError):
+                continue
+        return fresh
+
+    def upsert_knowledge(
+        self,
+        *,
+        owner: Optional[str],
+        text: str,
+        source_refs: list[dict],
+        query: str,
+        confidence: str,
+        validated_at: int,
+        expires_at: int,
+        kind: str = "knowledge",
+    ) -> dict:
+        """Insert or refresh one exact, source-grounded knowledge claim."""
+        from core.database import MemoryItem
+
+        normalized = " ".join((text or "").split()).strip()
+        if not normalized:
+            raise ValueError("Knowledge text cannot be empty")
+        with self._db() as db:
+            item = (
+                db.query(MemoryItem)
+                .filter(
+                    MemoryItem.owner == owner,
+                    MemoryItem.kind == "knowledge",
+                    MemoryItem.text == normalized,
+                    MemoryItem.status != "deleted",
+                )
+                .first()
+            )
+            if item is None:
+                item = MemoryItem(id=str(uuid.uuid4()), owner=owner, kind=kind)
+                db.add(item)
+            item.text = normalized
+            item.category = "knowledge"
+            item.source = "web_validated"
+            item.status = "active"
+            item.timestamp = int(validated_at)
+            item.confidence = confidence
+            item.source_refs = _json_dumps(source_refs)
+            item.metadata_json = _json_dumps({
+                "query": query,
+                "validated_at": int(validated_at),
+                "expires_at": int(expires_at),
+            })
+            db.flush()
+            return self._item_to_dict(item)
 
     def save(self, entries: Iterable[dict]):
         from core.database import MemoryItem
@@ -204,13 +373,17 @@ class MemoryV2Store:
                     item = MemoryItem(id=mid)
                 db.add(item)
                 self._apply_dict(item, entry)
-            # Archive items NOT in the incoming set — but NEVER touch
-            # synthesized/dream items; those are managed by the dreamer,
-            # not the legacy save path. Without this guard every save()
-            # call silently destroyed all dream-generated memories.
-            from sqlalchemy import or_
+            # Archive items NOT in the incoming set — but NEVER touch rows
+            # managed outside the legacy memory.json path.
+            from sqlalchemy import or_, and_
             q = db.query(MemoryItem).filter(
-                or_(MemoryItem.kind.is_(None), MemoryItem.kind != "synthesized")
+                or_(
+                    MemoryItem.kind.is_(None),
+                    and_(
+                        MemoryItem.kind != "synthesized",
+                        MemoryItem.kind != "knowledge",
+                    ),
+                )
             )
             if ids:
                 owners = {entry.get("owner") for entry in entries}
