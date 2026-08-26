@@ -1187,6 +1187,9 @@ async def _startup_event():
             changed = skills_manager.backfill_owner(primary_owner, set(users.keys()))
             if changed:
                 logger.info("Assigned %s legacy skill file(s) to %s", changed, primary_owner)
+            installed = skills_manager.ensure_builtin_skills(primary_owner)
+            if installed:
+                logger.info("Installed built-in skill(s) for %s: %s", primary_owner, ", ".join(installed))
     except Exception as e:
         logger.debug(f"Skill owner backfill skipped: {e}")
 

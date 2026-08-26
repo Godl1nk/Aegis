@@ -429,7 +429,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_knowledge",
-            "description": "Validate reusable non-personal knowledge against multiple independent web sources, then persist it with provenance and expiry; or list/search/delete previously validated knowledge. Never use learn for medical, legal, financial, emergency, or other high-stakes claims.",
+            "description": "Manage durable web-knowledge entries: validate and learn a claim with provenance and expiry, or search, list, and delete entries.",
             "parameters": {
                 "type": "object",
                 "properties": {

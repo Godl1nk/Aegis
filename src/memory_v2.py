@@ -287,7 +287,7 @@ class MemoryV2Store:
         limit = max(1, min(int(limit), 500))
         self.migrate_from_json_once()
         with self._db() as db:
-            rows = (
+            query = (
                 db.query(MemoryItem)
                 .filter(
                     MemoryItem.owner == owner,
@@ -295,20 +295,30 @@ class MemoryV2Store:
                     MemoryItem.status == "active",
                 )
                 .order_by(MemoryItem.timestamp.desc())
-                .limit(limit)
-                .all()
             )
-            items = [self._item_to_dict(row) for row in rows]
-        if include_expired:
-            return items
-        fresh = []
-        for item in items:
-            try:
-                if int(item.get("expires_at") or now + 1) > now:
-                    fresh.append(item)
-            except (TypeError, ValueError):
-                continue
-        return fresh
+            if include_expired:
+                return [self._item_to_dict(row) for row in query.limit(limit).all()]
+
+            fresh = []
+            offset = 0
+            batch_size = max(100, limit)
+            while len(fresh) < limit:
+                rows = query.offset(offset).limit(batch_size).all()
+                if not rows:
+                    break
+                offset += len(rows)
+                for row in rows:
+                    item = self._item_to_dict(row)
+                    try:
+                        if int(item.get("expires_at") or now + 1) > now:
+                            fresh.append(item)
+                    except (TypeError, ValueError):
+                        continue
+                    if len(fresh) >= limit:
+                        break
+                if len(rows) < batch_size:
+                    break
+            return fresh
 
     def upsert_knowledge(
         self,

@@ -39,7 +39,6 @@ ALWAYS_AVAILABLE = frozenset({
     # of topic. Without this, RAG drops it and the agent falls back to
     # app_api /api/memory/add which fails with 422 on first attempt.
     "manage_memory",
-    "manage_knowledge",
     # Ask the user a multiple-choice question for a decision/clarification.
     # Always reachable so the agent can pause and ask at any point.
     "ask_user",
@@ -61,7 +60,7 @@ ASSISTANT_ALWAYS_AVAILABLE = frozenset({
     "list_email_accounts", "list_emails", "read_email", "send_email", "reply_to_email",
     "bulk_email", "archive_email", "delete_email", "mark_email_read",
     "manage_calendar", "manage_notes", "manage_tasks",
-    "manage_memory", "manage_knowledge", "web_search", "read_file",
+    "manage_memory", "web_search", "read_file",
     "create_document", "update_document",
     "resolve_contact", "search_chats",
     "api_call",  # For Miniflux/Gitea/Linkding/etc. integrations
@@ -101,7 +100,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "list_models": "List all available AI models and their endpoints.",
     "manage_session": "Chat management: rename, archive, delete, or fork chats (the UI calls these 'chats'; internally 'sessions'). Use for 'rename my chats', 'rename this chat', 'archive/delete a chat'.",
     "manage_memory": "Memory management: list, add, edit, delete, or search persistent memories. For facts about the USER (their name, preferences, where they live). NOT for info about ANOTHER person — addresses, phones, emails belonging to a contact go in manage_contact, not memory.",
-    "manage_knowledge": "Validate and save reusable non-personal factual knowledge from at least two independent fetched web sources, with provenance and expiry. Search, list, or delete validated knowledge. Never auto-learn high-stakes medical, legal, financial, or emergency claims.",
+    "manage_knowledge": "Manage durable web-knowledge entries: validate and learn, search, list, or delete them.",
     "manage_skills": "Skill management: add, update, publish, or search reusable skills/presets.",
     "manage_tasks": "Scheduled task management: list, create, edit, delete, pause, resume, or run cron tasks.",
     "manage_endpoints": "Endpoint management: list, add, delete, enable, or disable model API endpoints.",

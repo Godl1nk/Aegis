@@ -488,7 +488,6 @@ Generate an image. Line 1 = description, line 2 = model ("auto" unless the user 
     "list_models": "- ```list_models``` — Show all available AI models across all endpoints. Use when user asks what models are available.",
     "manage_session": "- ```manage_session``` — Rename, archive, delete, fork, switch, or `list` chats (the UI calls them 'chats'; 'session' is internal). Line 1 = action (list/switch/rename/archive/unarchive/delete/important/unimportant/truncate/fork), Line 2 = exact chat id from `list_sessions` (or `current` where supported). For delete/archive/truncate, always list first and reuse the exact id; never invent placeholder ids. `switch`/`open` returns a clickable anchor link the user can tap to open the chat — use for \"open my X chat\".",
     "manage_memory": "- ```manage_memory``` — Manage the user's persistent memory (facts about the USER themselves, their preferences, context that persists across chats). Line 1 = action (list/add/edit/delete/search), rest = content. Use when user says 'remember this' about themselves, states identity facts like 'my name is <name>' / 'call me <name>' / 'I live in <place>', or asks about stored memories. DO NOT use for info about another person (their address, phone, email, birthday) — that goes in `manage_contact`. If the user pastes an address/phone with a name and says 'save this for <person>', use `manage_contact add` with the address arg, NOT manage_memory.",
-    "manage_knowledge": "- ```manage_knowledge``` — Durable non-personal web knowledge. When a task exposes a genuine knowledge gap or a reusable fact not safely known from training, search online first. If worth retaining, call action=learn with ONE concise claim and a validation query; the tool independently searches, requires corroborating fetched content from at least two domains, stores provenance, and expires stale facts. Do not save opinions, secrets, personal data, one-off task output, or medical/legal/financial/emergency claims. Use action=search before repeating web work on a topic. Treat retrieved knowledge as source-grounded but fallible; expired entries are excluded.",
     "manage_skills": "- ```manage_skills``` — Skill registry (SKILL.md format). Args (JSON): {\"action\": \"list|view|view_ref|search|add|edit|patch|publish|delete\", ...}. `list` returns the index of available skills (published + teacher-escalation drafts); `view name=foo` fetches the full SKILL.md; `view_ref name=foo path=...` loads a reference file under the skill directory. For `add`, provide an explicit kebab-case `name` and only report the exact returned name, because storage may normalize or dedupe it. Use this BEFORE doing domain work — there may already be a procedure (published or draft) that prescribes the correct steps. Drafts written by the teacher loop are authoritative guidance even though they're not yet published.",
     "manage_tasks": "- ```manage_tasks``` — Create and manage scheduled background tasks (recurring AI jobs). Args (JSON): {\"action\": \"list|create|edit|delete|pause|resume|run\", ...}",
     "manage_endpoints": "- ```manage_endpoints``` — Add, remove, or configure AI model API endpoints. Args (JSON): {\"action\": \"list|add|delete|enable|disable\", ...}. Use when user wants to add a new AI provider.",
@@ -2302,9 +2301,18 @@ def _build_system_prompt(
                 except (TypeError, ValueError):
                     _skill_max_injected = 3
                 _skill_max_injected = max(0, min(12, _skill_max_injected))
+                from src.tool_policy import known_tool_names
+                _available_skill_tools = known_tool_names() - set(disabled_tools or [])
+                _eligible_skills = [
+                    sk for sk in sm.load(owner=owner)
+                    if all(
+                        tool in _available_skill_tools
+                        for tool in (sk.get("requires_toolsets") or [])
+                    )
+                ]
                 relevant_skills = sm.get_relevant_skills(
                     last_user,
-                    skills=sm.load(owner=owner),
+                    skills=_eligible_skills,
                     threshold=0.25,
                     max_items=_skill_max_injected,
                     min_confidence=_skill_min_conf,
@@ -2572,7 +2580,8 @@ def _build_base_prompt(
             from services.memory.skills import SkillsManager
             from src.constants import DATA_DIR
             _sm = SkillsManager(DATA_DIR)
-            active_tools = list(set(TOOL_SECTIONS.keys()) - set(disabled or []))
+            from src.tool_policy import known_tool_names
+            active_tools = list(known_tool_names() - set(disabled or []))
             skill_idx = _sm.index_for(owner=owner, active_toolsets=active_tools)
             if skill_idx:
                 try:
@@ -3424,6 +3433,16 @@ async def stream_agent_loop(
                 pass
             _sm = SkillsManager(DATA_DIR)
             _owner_skills = _sm.load(owner=owner) if _skills_on else []
+            if _owner_skills:
+                from src.tool_policy import known_tool_names
+                _available_skill_tools = known_tool_names() - set(disabled_tools or [])
+                _owner_skills = [
+                    sk for sk in _owner_skills
+                    if all(
+                        tool in _available_skill_tools
+                        for tool in (sk.get("requires_toolsets") or [])
+                    )
+                ]
             if _owner_skills:
                 _relevant_tools.add("manage_skills")
                 if _retrieval_query:

@@ -14,7 +14,7 @@ def _search_result(claim: str, urls: list[str]):
             f"[CONTENT {idx}] From: {url}\n"
             f"Title: Source {idx}\n"
             "------------------------------\n"
-            f"Independent documentation confirms that {claim}."
+            f"Source {idx} independently documents that {claim}."
         )
     return "\n".join(blocks), sources
 
@@ -175,6 +175,39 @@ def test_knowledge_learn_never_searches_private_or_secret_claims(monkeypatch):
     assert "private" in result["error"].lower()
     assert searched is False
     assert manager.saved is None
+
+
+def test_private_data_detection_covers_phone_postal_and_payment_card():
+    from src.agent_tools.knowledge_tools import _contains_private_data
+
+    assert _contains_private_data("My phone is +65 9123 4567")
+    assert _contains_private_data("My postal code is 238801")
+    assert _contains_private_data("Use card 4111 1111 1111 1111")
+    assert not _contains_private_data("SQLite version 3.49.1 was released")
+
+
+def test_support_score_rejects_opposite_negation():
+    from src.agent_tools.knowledge_tools import _support_score
+
+    claim = "SQLite FTS5 provides full text search"
+    assert _support_score(claim, "SQLite FTS5 does not provide full text search.") == 0.0
+    assert _support_score(claim, "SQLite FTS5 provides full text search.") == 1.0
+
+
+def test_supporting_sources_do_not_count_copied_content_twice(monkeypatch):
+    from src.agent_tools import knowledge_tools
+
+    claim = "SQLite FTS5 provides full text search"
+    urls = ["https://one.example/docs", "https://two.example/docs"]
+    sources = [{"url": url, "title": "Copied page"} for url in urls]
+    context = "\n".join(
+        f"[CONTENT {idx}] From: {url}\nTitle: Copied page\n"
+        f"------------------------------\nDocumentation confirms that {claim}."
+        for idx, url in enumerate(urls, 1)
+    )
+    monkeypatch.setattr(knowledge_tools, "get_setting", lambda *_args, **_kwargs: 0.55)
+
+    assert len(knowledge_tools._supporting_sources(claim, context, sources)) == 1
 
 
 def test_knowledge_learn_blocks_possible_contradiction(monkeypatch):

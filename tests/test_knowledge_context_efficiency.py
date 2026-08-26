@@ -176,6 +176,85 @@ def test_skill_catalog_cache_avoids_repeated_filesystem_walks(tmp_path, monkeypa
     assert calls == 1
 
 
+def test_skill_usage_update_does_not_force_catalog_rescan(tmp_path, monkeypatch):
+    from services.memory.skills import SkillsManager
+
+    skill_dir = tmp_path / "skills" / "general" / "used-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: used-skill\ndescription: used\ncategory: general\n"
+        "status: published\nowner: alice\n---\n\n## Procedure\n1. Test\n",
+        encoding="utf-8",
+    )
+
+    calls = 0
+    original = SkillsManager._iter_skill_files
+
+    def counted(self):
+        nonlocal calls
+        calls += 1
+        return original(self)
+
+    monkeypatch.setattr(SkillsManager, "_iter_skill_files", counted)
+    manager = SkillsManager(str(tmp_path))
+    assert manager.load(owner="alice")[0]["uses"] == 0
+    manager.record_use("used-skill", owner="alice")
+    assert manager.load(owner="alice")[0]["uses"] == 1
+    assert calls == 1
+
+
+def test_builtin_web_knowledge_skill_is_editable_and_installed_only_once(tmp_path):
+    from services.memory.skills import SkillsManager
+
+    manager = SkillsManager(str(tmp_path))
+    assert manager.ensure_builtin_skills("alice") == ["web-knowledge-learning"]
+
+    skill = next(s for s in manager.load(owner="alice") if s["name"] == "web-knowledge-learning")
+    assert skill["status"] == "published"
+    assert skill["requires_toolsets"] == ["web_search", "web_fetch", "manage_knowledge"]
+
+    assert manager.update_skill(
+        "web-knowledge-learning",
+        {"description": "Alice's custom acquisition policy"},
+        owner="alice",
+    )
+    assert manager.ensure_builtin_skills("alice") == []
+    edited = next(s for s in manager.load(owner="alice") if s["name"] == "web-knowledge-learning")
+    assert edited["description"] == "Alice's custom acquisition policy"
+
+    assert manager.delete_skill("web-knowledge-learning", owner="alice")
+    assert manager.ensure_builtin_skills("alice") == []
+    assert not manager.load(owner="alice")
+
+
+def test_web_knowledge_policy_is_progressively_disclosed(tmp_path):
+    from services.memory.skills import SkillsManager
+    from src.agent_loop import TOOL_SECTIONS, _format_skill_index
+    from src.tool_index import ALWAYS_AVAILABLE
+    from src.tool_policy import known_tool_names
+
+    manager = SkillsManager(str(tmp_path))
+    manager.ensure_builtin_skills("alice")
+    skills = manager.load(owner="alice")
+
+    assert "manage_knowledge" not in ALWAYS_AVAILABLE
+    assert "manage_knowledge" not in TOOL_SECTIONS
+    assert "Require support from at least two" not in _format_skill_index(skills)
+    assert manager.index_for(
+        owner="alice",
+        active_toolsets=known_tool_names(),
+    )[0]["name"] == "web-knowledge-learning"
+    assert manager.index_for(
+        owner="alice",
+        active_toolsets=known_tool_names() - {"web_search"},
+    ) == []
+    assert manager.get_relevant_skills(
+        "research unknown knowledge on the web and remember it",
+        skills=skills,
+        threshold=0.25,
+    )[0]["name"] == "web-knowledge-learning"
+
+
 def test_vector_candidate_loading_avoids_full_owner_memory_load():
     from src.chat_processor import ChatProcessor
 

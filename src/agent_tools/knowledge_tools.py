@@ -34,8 +34,18 @@ _HIGH_STAKES_RE = re.compile(
 _PRIVATE_RE = re.compile(
     r"(?:\b(?:my\s+)?(?:password|passphrase|api[_ -]?key|access[_ -]?token|"
     r"private[_ -]?key|secret)\s*(?:is|=|:)\s*\S+|\bsk-[a-z0-9_-]{12,}\b|"
-    r"\bmy name is\b|\bi live at\b|\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b|"
-    r"\b\d{3}-\d{2}-\d{4}\b)",
+    r"\bmy name is\b|\bi live at\b|\b(?:my\s+)?(?:home|postal|mailing)?\s*"
+    r"address\s*(?:is|=|:)\s*\S|\b(?:postal|zip)\s*(?:code)?\s*(?:is|=|:)\s*"
+    r"[a-z0-9][a-z0-9 -]{2,10}\b|\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b|"
+    r"\b\d{3}-\d{2}-\d{4}\b|\b(?:phone|mobile|cell|telephone|contact\s+number)"
+    r"\s*(?:is|=|:)?\s*\+?[\d(). -]{7,}\d\b|"
+    r"(?<!\w)\+\d[\d(). -]{6,}\d(?!\w))",
+    re.IGNORECASE,
+)
+_CARD_CANDIDATE_RE = re.compile(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)")
+_NEGATION_RE = re.compile(
+    r"\b(?:no|not|never|neither|without|cannot|can't|doesn't|isn't|aren't|"
+    r"wasn't|weren't|won't|false|incorrect|unsupported)\b",
     re.IGNORECASE,
 )
 _VERY_FRESH_RE = re.compile(
@@ -61,10 +71,35 @@ def _get_memory_dependencies():
 
 
 def _meaningful_tokens(text: str) -> set[str]:
-    return {
-        token for token in re.findall(r"[a-z0-9][a-z0-9_.+-]*", text.lower())
-        if len(token) >= 3 and token not in _STOPWORDS
+    tokens = {
+        token.strip("._+-")
+        for token in re.findall(r"[a-z0-9][a-z0-9_.+-]*", text.lower())
     }
+    return {token for token in tokens if len(token) >= 3 and token not in _STOPWORDS}
+
+
+def _looks_like_payment_card(text: str) -> bool:
+    """Detect plausible card numbers without rejecting arbitrary long IDs."""
+    for match in _CARD_CANDIDATE_RE.finditer(text or ""):
+        digits = re.sub(r"\D", "", match.group(0))
+        if not 13 <= len(digits) <= 19:
+            continue
+        checksum = 0
+        parity = len(digits) % 2
+        for idx, char in enumerate(digits):
+            value = int(char)
+            if idx % 2 == parity:
+                value *= 2
+                if value > 9:
+                    value -= 9
+            checksum += value
+        if checksum % 10 == 0:
+            return True
+    return False
+
+
+def _contains_private_data(text: str) -> bool:
+    return bool(_PRIVATE_RE.search(text or "") or _looks_like_payment_card(text or ""))
 
 
 def _root_domain(url: str) -> str:
@@ -81,13 +116,32 @@ def _root_domain(url: str) -> str:
 
 def _support_score(claim: str, content: str) -> float:
     claim_tokens = _meaningful_tokens(claim)
-    content_tokens = _meaningful_tokens(content)
     if not claim_tokens:
         return 0.0
     numbers = set(re.findall(r"\b\d+(?:\.\d+)?\b", claim))
-    if numbers and not numbers.issubset(set(re.findall(r"\b\d+(?:\.\d+)?\b", content))):
-        return 0.0
-    return len(claim_tokens & content_tokens) / len(claim_tokens)
+    claim_is_negated = bool(_NEGATION_RE.search(claim))
+    chunks = [
+        chunk.strip()
+        for chunk in re.split(r"(?<=[.!?])\s+|\n+", content or "")
+        if chunk.strip()
+    ]
+    # A relevant assertion can span a heading and its following sentence, but
+    # page-wide bag-of-words matching is too permissive and misses negation.
+    candidates = chunks + [
+        f"{chunks[idx]} {chunks[idx + 1]}"
+        for idx in range(len(chunks) - 1)
+    ]
+    best = 0.0
+    for candidate in candidates:
+        if bool(_NEGATION_RE.search(candidate)) != claim_is_negated:
+            continue
+        if numbers and not numbers.issubset(
+            set(re.findall(r"\b\d+(?:\.\d+)?\b", candidate))
+        ):
+            continue
+        score = len(claim_tokens & _meaningful_tokens(candidate)) / len(claim_tokens)
+        best = max(best, score)
+    return best
 
 
 def _ttl_days(claim: str, query: str) -> int:
@@ -115,6 +169,7 @@ def _supporting_sources(claim: str, context: str, sources: list[dict]) -> list[d
     }
     accepted = []
     seen_domains = set()
+    seen_content_hashes = set()
     for match in _CONTENT_RE.finditer(context or ""):
         index = int(match.group(1))
         fetched_url = match.group(2).strip()
@@ -128,13 +183,17 @@ def _supporting_sources(claim: str, context: str, sources: list[dict]) -> list[d
         score = _support_score(claim, content)
         if score < threshold:
             continue
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if content_hash in seen_content_hashes:
+            continue
         seen_domains.add(domain)
+        seen_content_hashes.add(content_hash)
         accepted.append({
             "url": url,
             "title": str(source.get("title") or title)[:300],
             "domain": domain,
             "support_score": round(score, 3),
-            "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "content_hash": content_hash,
         })
     return accepted
 
@@ -233,7 +292,7 @@ class KnowledgeTool:
         query = " ".join(str(args.get("query") or claim).split()).strip()
         if len(claim) < 12 or len(claim) > 2000:
             return {"error": "Knowledge claim must be 12-2000 characters", "exit_code": 1}
-        if _PRIVATE_RE.search(f"{claim} {query}"):
+        if _contains_private_data(f"{claim} {query}"):
             return {
                 "error": "Private, personal, or secret content is never sent to web validation or saved as knowledge.",
                 "exit_code": 1,
