@@ -109,3 +109,8 @@ compound.config.json
 _scratch/
 /odysseus/
 _refs/
+
+# Deploy stamp written by zip-deploy.bat at pack time; must never be committed
+.deploy-commit
+aegis-deploy*.zip
+Aegis.zip

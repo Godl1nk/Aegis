@@ -157,8 +157,31 @@ def local_version() -> str:
         return "unknown"
 
 
+_DEPLOY_STAMP = ".deploy-commit"
+
+
+def _read_deploy_stamp(root: str | None = None) -> str | None:
+    """Commit stamped into the tree at pack time (see zip-deploy.bat)."""
+    try:
+        with open(os.path.join(root or _app_root(), _DEPLOY_STAMP), encoding="utf-8") as f:
+            sha = (f.read() or "").strip()
+        return sha if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha) else None
+    except Exception:
+        return None
+
+
 def installed_commit(data_dir: str | None = None) -> str | None:
-    """Commit this tree was installed from: state file, else git checkout."""
+    """Commit this tree was installed from: pack stamp, state file, git checkout.
+
+    The stamp describes the files actually on disk (zip deploys carry no
+    .git and never record a baseline), so it outranks the state baseline,
+    which can predate a manual deploy. Updater packages never contain the
+    stamp (gitignored) and apply moves custom files to backup, so it cannot
+    shadow a later updater install.
+    """
+    stamped = _read_deploy_stamp()
+    if stamped:
+        return stamped
     state = load_state(data_dir)
     if state.get("installed_commit"):
         return state["installed_commit"]

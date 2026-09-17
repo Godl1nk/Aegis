@@ -25,6 +25,28 @@ def _make_zip(path, top="Aegis-main", extra=None, markers=True):
     return path
 
 
+def test_deploy_stamp_beats_stale_state_baseline(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / ".deploy-commit").write_text("a" * 40 + "\n")
+    data_dir = str(tmp_path / "data")
+    os.makedirs(data_dir)
+    monkeypatch.setattr(app_update, "_app_root", lambda: str(root))
+    app_update._save_state({"installed_commit": "b" * 40}, data_dir)
+    assert app_update.installed_commit(data_dir) == "a" * 40
+
+
+def test_malformed_deploy_stamp_falls_back_to_state(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / ".deploy-commit").write_text("not-a-sha")
+    data_dir = str(tmp_path / "data")
+    os.makedirs(data_dir)
+    monkeypatch.setattr(app_update, "_app_root", lambda: str(root))
+    app_update._save_state({"installed_commit": "b" * 40}, data_dir)
+    assert app_update.installed_commit(data_dir) == "b" * 40
+
+
 def test_host_allowlist():
     assert app_update._check_host_allowed("https://api.github.com/x")
     assert app_update._check_host_allowed("https://codeload.github.com/x/y.zip")
