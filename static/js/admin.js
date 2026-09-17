@@ -3016,13 +3016,13 @@ function initUpdates() {
     if (!ok) return;
     updBtn.disabled = true; say('Downloading update package…');
     const _fmtMB = (b) => b ? ` (${(b / 1048576).toFixed(1)}MB backed up)` : '';
-    const _applyOnce = async (force) => post('/api/admin/updates/apply', { commit: dl.commit, force });
+    const _applyOnce = async (commit, force) => post('/api/admin/updates/apply', { commit, force });
     try {
       const dl = await post('/api/admin/updates/download');
       say(`Downloaded ${String(dl.commit).slice(0, 12)} — backing up and applying…`);
       let ap;
       try {
-        ap = await _applyOnce(false);
+        ap = await _applyOnce(dl.commit, false);
       } catch (e) {
         if (/stream\(s\) active/.test(e.message)) {
           const forceIt = uiModule && uiModule.styledConfirm
@@ -3030,7 +3030,7 @@ function initUpdates() {
             : window.confirm(e.message + ' Apply anyway?');
           if (!forceIt) { say('Update cancelled — streams were active.'); updBtn.disabled = false; await loadUpdateStatus(); return; }
           say('Applying (forced)…');
-          ap = await _applyOnce(true);
+          ap = await _applyOnce(dl.commit, true);
         } else { throw e; }
       }
       const backupNote = ap.backup ? ` Backup at ${ap.backup}${_fmtMB(ap.backup_bytes)}.` : '';
