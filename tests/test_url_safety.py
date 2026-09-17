@@ -57,6 +57,15 @@ def test_loopback_and_lan_allowed_by_default_local_first():
     assert check_outbound_url("http://nas.local:1234/v1", resolver=LAN)[0] is True
 
 
+def test_ipv6_loopback_matches_ipv4_loopback():
+    # CPython flags ::1 as is_reserved; the guard must still treat it as
+    # loopback (allowed by default, blocked under the private knob).
+    v6 = _resolver({"localhost": ["::1"]})
+    assert check_outbound_url("http://localhost:8080/v1", resolver=v6)[0] is True
+    ok, reason = check_outbound_url("http://localhost:8080", block_private=True, resolver=v6)
+    assert ok is False and "private" in reason
+
+
 def test_strict_mode_blocks_private_and_loopback():
     ok, reason = check_outbound_url("http://localhost:8080", block_private=True, resolver=LOOPBACK)
     assert ok is False and "private" in reason

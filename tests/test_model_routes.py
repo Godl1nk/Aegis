@@ -46,6 +46,8 @@ with preserve_import_state("core.database", "src.database", "core.session_manage
         _effective_endpoint_kind,
         _probe_endpoint,
         _ping_endpoint,
+        _probe_single_model,
+        _probe_target_allowed,
         _parse_model_list,
         _normalize_refresh_mode,
         _truthy,
@@ -534,6 +536,58 @@ class TestClassifyEndpoint:
 
 
 # ── setup probing ──
+
+class TestProbeSsrfGuard:
+    """Endpoint probes attach the stored API key, so link-local/metadata
+    targets must be refused before any request (same class as api_call)."""
+
+    def test_metadata_literal_rejected(self):
+        assert _probe_target_allowed("http://169.254.169.254/v1")
+
+    def test_lan_and_loopback_allowed(self):
+        assert _probe_target_allowed("http://192.168.1.50:11434/v1") is None
+        assert _probe_target_allowed("http://127.0.0.1:11434/v1") is None
+
+    def test_single_model_probe_rejected_without_requesting(self, monkeypatch):
+        def _boom(*args, **kwargs):
+            raise AssertionError("probe must not request a rejected URL")
+
+        monkeypatch.setattr(model_routes.httpx, "post", _boom)
+        monkeypatch.setattr(model_routes.httpx, "get", _boom)
+        out = _probe_single_model("http://169.254.169.254/v1", "secret-key", "m")
+        assert out["status"] == "fail"
+        assert "rejected" in out["error"].lower()
+
+    def test_models_probe_rejected_without_requesting(self, monkeypatch):
+        monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("probe must not request a rejected URL")
+
+        monkeypatch.setattr(model_routes.httpx, "get", _boom)
+        assert _probe_endpoint("http://169.254.169.254/v1", "secret-key") == []
+
+    def test_ping_rejected_without_requesting(self, monkeypatch):
+        monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("probe must not request a rejected URL")
+
+        monkeypatch.setattr(model_routes.httpx, "get", _boom)
+        out = _ping_endpoint("http://169.254.169.254/v1", "secret-key", timeout=1)
+        assert out["reachable"] is False
+        assert "rejected" in (out["error"] or "").lower()
+
+    def test_ping_lan_still_reaches(self, monkeypatch):
+        monkeypatch.setattr(endpoint_resolver, "resolve_url", lambda url: url, raising=False)
+
+        def _ok(url, headers=None, timeout=None, verify=None, **kwargs):
+            return httpx.Response(200, request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(model_routes.httpx, "get", _ok)
+        out = _ping_endpoint("http://192.168.1.50:11434/v1", "fake-key", timeout=1)
+        assert out["reachable"] is True
+
 
 class TestSetupProbeSafety:
     @pytest.mark.parametrize("value", ["true", "1", "yes", "on", " TRUE "])

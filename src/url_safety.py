@@ -36,6 +36,12 @@ def _classify(ip: ipaddress._BaseAddress, *, block_private: bool) -> Optional[st
     # IPv4-mapped IPv6 (e.g. ::ffff:169.254.169.254) — judge the embedded v4.
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
+    # Loopback first: CPython reports ::1 as is_reserved, which would
+    # otherwise block IPv6 loopback while 127.0.0.1 stays allowed.
+    if ip.is_loopback:
+        if block_private:
+            return f"private/loopback address blocked: {ip}"
+        return None
     if ip.is_link_local:
         return f"link-local address blocked (SSRF metadata risk): {ip}"
     if ip.is_multicast or ip.is_reserved or ip.is_unspecified:

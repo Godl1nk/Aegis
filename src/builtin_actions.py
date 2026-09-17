@@ -6,10 +6,11 @@ scheduler without needing an LLM call.
 """
 
 import logging
+import ipaddress
 import os
 import json
 from datetime import datetime
-from typing import Tuple
+from typing import Optional, Tuple
 
 from src.auth_helpers import owner_filter
 from core.platform_compat import IS_WINDOWS, find_bash
@@ -310,6 +311,27 @@ async def _run_subprocess(argv, *, shell: bool = False, timeout: int = 120, labe
         return str(e), False
 
 
+def _ssh_host_blocked(host: str) -> Optional[str]:
+    """Refuse SSH at targets where no legitimate server lives.
+
+    ssh_command/run_script accept a caller-supplied host; link-local (cloud
+    metadata), multicast, reserved and unspecified addresses are never valid
+    SSH destinations, so reject them instead of opening connections.
+    Loopback, LAN and public hosts keep working (remote servers are the feature).
+    """
+    h = (host or "").strip()
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return None
+    # Note: CPython reports ::1 as is_reserved, so exempt loopback first.
+    if ip.is_loopback:
+        return None
+    if ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+        return f"refusing SSH to non-routable address: {h}"
+    return None
+
+
 async def action_ssh_command(owner: str, command: str = "", host: str = "localhost", **kwargs) -> Tuple[str, bool]:
     """Run a shell command locally or on a remote host via SSH."""
     if not command:
@@ -321,6 +343,9 @@ async def action_ssh_command(owner: str, command: str = "", host: str = "localho
                 return await _run_subprocess([bash, "-c", command], timeout=120, label="Command")
             return await _run_subprocess(command, shell=True, timeout=120, label="Command")
         return await _run_subprocess(["bash", "-c", command], timeout=120, label="Command")
+    blocked = _ssh_host_blocked(host)
+    if blocked:
+        return blocked, False
     return await _run_subprocess(
         ["ssh", "-o", "ConnectTimeout=10", host, command], timeout=120, label="Command",
     )
@@ -335,6 +360,9 @@ async def action_run_script(owner: str, script: str = "", host: str = "", **kwar
         if IS_WINDOWS and find_bash():
             return await _run_subprocess([find_bash(), "-c", script], timeout=300, label="Script")
         return await _run_subprocess(script, shell=True, timeout=300, label="Script")
+    blocked = _ssh_host_blocked(target_host)
+    if blocked:
+        return blocked, False
     return await _run_subprocess(["ssh", target_host, script], timeout=300, label="Script")
 
 

@@ -701,8 +701,35 @@ def _resolve_probe_key(ep) -> Optional[str]:
         return None
 
 
+def _probe_target_allowed(base_url: str) -> Optional[str]:
+    """SSRF guard for endpoint probes: refuse link-local/metadata targets.
+
+    Probes attach the endpoint's stored API key, so a base URL pointing at
+    the cloud metadata range would exfiltrate it (same class as the api_call
+    guard). Returns a rejection reason, or None when probing may proceed.
+    Private/loopback stays allowed: LAN model servers (Ollama, llama.cpp,
+    LM Studio) are the primary probe targets.
+    """
+    from src.url_safety import check_outbound_url
+    try:
+        ok, reason = check_outbound_url(base_url)
+    except Exception as exc:
+        return f"URL check failed: {exc}"
+    if ok:
+        return None
+    if "does not resolve" in reason:
+        # No DNS for this host: the probe's own request will fail closed too,
+        # so let it run and surface the connection error (keeps typo'd hosts
+        # and offline tests on the request path instead of the guard path).
+        return None
+    return reason
+
+
 def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 10, with_tools: bool = False, api_method: Any = None) -> dict:
     """Send a realistic completion request to a single model. Returns {status, latency_ms, error?}."""
+    reason = _probe_target_allowed(base)
+    if reason:
+        return {"status": "fail", "error": f"URL rejected: {reason}"}
     method = _normalize_api_method(api_method)
     provider = _safe_detect_provider(base, method)
     if _is_discovery_only_provider(provider):
@@ -883,6 +910,10 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5, api_me
     from src.llm_core import httpx_get_kimi_aware
     base = resolve_url(_normalize_base(base_url))
     provider = _safe_detect_provider(base, api_method)
+    reason = _probe_target_allowed(base)
+    if reason:
+        logger.warning("Refusing to probe %s: %s", _redact_url_for_log(base), reason)
+        return []
     if provider == "chatgpt-subscription":
         from src.chatgpt_subscription import fetch_available_models
         if api_key:
@@ -981,6 +1012,9 @@ def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> 
     from src.endpoint_resolver import resolve_url
     base = resolve_url(_normalize_base(base_url))
     headers = _safe_build_headers(api_key, base)
+    reason = _probe_target_allowed(base)
+    if reason:
+        return {"reachable": False, "status_code": None, "error": f"URL rejected: {reason}"}
 
     # Ollama exposes /v1/models (OpenAI-compatible) AND native /api/version,
     # /api/tags. Probe native paths for Ollama-style endpoints, but avoid using
