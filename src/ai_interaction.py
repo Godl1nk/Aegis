@@ -82,7 +82,7 @@ def set_rag_manager(rag_mgr, personal_docs_mgr=None):
 # Model resolution
 # ---------------------------------------------------------------------------
 
-from src.endpoint_resolver import build_chat_url, build_headers, build_models_url, resolve_endpoint_runtime
+from src.endpoint_resolver import build_chat_url, build_headers, build_models_url, resolve_endpoint_runtime, _ep_api_method
 
 
 def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Dict]:
@@ -96,7 +96,7 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
     """
     import httpx
     from src.database import SessionLocal, ModelEndpoint
-    from src.llm_core import _detect_provider, ANTHROPIC_MODELS
+    from src.llm_core import ANTHROPIC_MODELS, _resolve_provider
     from src.auth_helpers import owner_filter
 
     spec = spec.strip()
@@ -127,8 +127,9 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
                 base, api_key = resolve_endpoint_runtime(ep, owner=owner)
             except Exception:
                 continue
-            provider = _detect_provider(base)
-            headers = build_headers(api_key, base)
+            method = _ep_api_method(ep)
+            provider = _resolve_provider(base, method)
+            headers = build_headers(api_key, base, method)
 
             if provider == "anthropic":
                 # Anthropic: match against hardcoded model list
@@ -138,11 +139,11 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
                         matched = am
                         break
                 if matched:
-                    return build_chat_url(base), matched, headers
+                    return build_chat_url(base, method), matched, headers
             else:
                 # OpenAI-compatible and native Ollama: probe the provider's model list.
                 try:
-                    models_url = build_models_url(base)
+                    models_url = build_models_url(base, method)
                     if models_url:
                         r = httpx.get(models_url, headers=headers, timeout=5)
                         r.raise_for_status()
@@ -163,12 +164,12 @@ def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Di
                 # Exact match first
                 for mid in model_ids:
                     if mid.lower() == model_name.lower():
-                        return build_chat_url(base), mid, headers
+                        return build_chat_url(base, method), mid, headers
 
                 # Partial match
                 for mid in model_ids:
                     if model_name.lower() in mid.lower() or mid.lower() in model_name.lower():
-                        return build_chat_url(base), mid, headers
+                        return build_chat_url(base, method), mid, headers
 
         raise ValueError(f"Model '{spec}' not found on any configured endpoint")
     finally:

@@ -45,3 +45,20 @@ def test_empty_and_malformed_tool_calls_are_safe():
     # tool_calls=None and non-dict entries must not raise and must not inflate.
     assert estimate_tokens([{"role": "assistant", "content": "hi", "tool_calls": None}]) == 4 + int(2 * 0.3)
     assert estimate_tokens([{"role": "assistant", "content": None, "tool_calls": ["bad", 5]}]) == 4
+
+
+def test_image_blocks_count_flat_vision_allowance():
+    # A pasted photo carries no text but bills ~1-2k vision tokens; without
+    # the allowance the meter and the compaction/trim gates read it as ~0.
+    msg = {"role": "user", "content": [
+        {"type": "text", "text": "look"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 100000}},
+    ]}
+    est = estimate_tokens([msg])
+    assert est == 4 + int(4 * 0.3) + 1500, est
+
+
+def test_image_block_shapes_are_safe():
+    assert estimate_tokens([{"role": "user", "content": [{"type": "image_url"}]}]) == 4 + 1500
+    assert estimate_tokens([{"role": "user", "content": [{"type": "image_url", "image_url": None}]}]) == 4 + 1500
+    assert estimate_tokens([{"role": "user", "content": ["bad", 5, None]}]) == 4

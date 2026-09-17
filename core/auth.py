@@ -4,6 +4,7 @@ Config stored in data/auth.json. Uses bcrypt directly.
 """
 
 import enum
+import hashlib
 import json
 import os
 import secrets
@@ -96,6 +97,10 @@ class SetAdminResult(enum.Enum):
 class AuthManager:
     """Manages multi-user password + session-token auth system."""
 
+    @staticmethod
+    def _hash_token(token: str) -> str:
+        return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+
     def __init__(self, auth_path: str = DEFAULT_AUTH_PATH):
         self.auth_path = auth_path
         self._sessions_path = os.path.join(os.path.dirname(auth_path), "sessions.json")
@@ -140,16 +145,37 @@ class AuthManager:
             self._config = {}
 
     def _load_sessions(self):
-        """Load persisted session tokens from disk, pruning expired ones."""
+        """Load persisted session tokens from disk, pruning expired ones.
+
+        Keys are SHA-256 digests of the live tokens (see _hash_token). Legacy
+        plaintext keys (64-hex or any non-digest entry) are dropped so a
+        stolen pre-upgrade sessions.json can't be replayed; affected users
+        just log in again."""
         try:
             if os.path.exists(self._sessions_path):
                 with open(self._sessions_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 now = time.time()
-                self._sessions = {k: v for k, v in data.items() if v.get("expiry", 0) > now}
+                valid = {}
+                legacy = 0
+                for k, v in data.items():
+                    if v.get("expiry", 0) <= now:
+                        continue
+                    if k.startswith("sha256:") and len(k) == 71 and all(
+                        c in "0123456789abcdef" for c in k[7:]
+                    ):
+                        valid[k] = v
+                    else:
+                        legacy += 1
+                self._sessions = valid
                 pruned = len(data) - len(self._sessions)
                 if pruned > 0:
                     self._save_sessions()
+                if legacy:
+                    logger.info(
+                        "Dropped %d legacy plaintext session(s); users must re-authenticate",
+                        legacy,
+                    )
                 logger.info(f"Loaded {len(self._sessions)} session(s) from disk")
         except Exception as e:
             logger.error(f"Failed to load sessions: {e}")
@@ -594,7 +620,7 @@ class AuthManager:
                 logger.warning("Refused to issue session for missing user '%s'", username)
                 return None
             with self._sessions_lock:
-                self._sessions[token] = {
+                self._sessions[self._hash_token(token)] = {
                     "username": username,
                     "expiry": time.time() + TOKEN_TTL,
                 }
@@ -607,11 +633,11 @@ class AuthManager:
         expired = False
         deleted_user = False
         with self._sessions_lock:
-            session = self._sessions.get(token)
+            session = self._sessions.get(self._hash_token(token))
             if session is None:
                 return False
             if time.time() > session["expiry"]:
-                self._sessions.pop(token, None)
+                self._sessions.pop(self._hash_token(token), None)
                 expired = True
             else:
                 # SECURITY: if the user record has since been removed (admin
@@ -619,7 +645,7 @@ class AuthManager:
                 # session so the next request kicks them out instead of
                 # silently authenticating against a non-existent account.
                 if session.get("username") not in self.users:
-                    self._sessions.pop(token, None)
+                    self._sessions.pop(self._hash_token(token), None)
                     deleted_user = True
         if expired or deleted_user:
             self._save_sessions()
@@ -633,17 +659,17 @@ class AuthManager:
         expired = False
         deleted_user = False
         with self._sessions_lock:
-            session = self._sessions.get(token)
+            session = self._sessions.get(self._hash_token(token))
             if session is None:
                 return None
             if time.time() > session["expiry"]:
-                self._sessions.pop(token, None)
+                self._sessions.pop(self._hash_token(token), None)
                 expired = True
             else:
                 _u = session["username"]
                 # SECURITY: orphan check — same rationale as validate_token.
                 if _u not in self.users:
-                    self._sessions.pop(token, None)
+                    self._sessions.pop(self._hash_token(token), None)
                     deleted_user = True
                 else:
                     return _u
@@ -653,17 +679,18 @@ class AuthManager:
 
     def revoke_token(self, token: str):
         with self._sessions_lock:
-            self._sessions.pop(token, None)
+            self._sessions.pop(self._hash_token(token), None)
         self._save_sessions()
 
     def revoke_user_sessions(self, username: str, except_token: Optional[str] = None) -> int:
         """Revoke active browser sessions for a user, optionally preserving one."""
         username = username.strip().lower()
+        keep = self._hash_token(except_token) if except_token else None
         revoked = 0
         with self._sessions_lock:
             to_drop = [
                 token for token, session in self._sessions.items()
-                if token != except_token and (session or {}).get("username") == username
+                if token != keep and (session or {}).get("username") == username
             ]
             for token in to_drop:
                 self._sessions.pop(token, None)

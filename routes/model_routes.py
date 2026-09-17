@@ -20,7 +20,7 @@ from core.database import SessionLocal, ModelEndpoint, Session as DbSession
 from core.log_safety import redact_url as _redact_url_for_log
 from core.middleware import require_admin
 from src.constants import COOKBOOK_STATE_FILE
-from src.llm_core import _detect_provider, _host_match, ANTHROPIC_MODELS
+from src.llm_core import _detect_provider, _host_match, ANTHROPIC_MODELS, _normalize_api_method, _resolve_provider
 from src.tls_overrides import llm_verify
 from src.settings import load_settings as _load_settings, save_settings as _save_settings
 from src.endpoint_resolver import (
@@ -448,6 +448,19 @@ def _truthy(value: str | None) -> bool:
 
 _ENDPOINT_KINDS = {"auto", "local", "api", "proxy"}
 _REFRESH_MODES = {"auto", "manual", "disabled"}
+# Wire formats an endpoint may speak. "auto" infers from the base URL (the
+# historical behaviour); the rest force chat/completions, Responses,
+# Anthropic Messages, or Ollama native respectively.
+_API_METHODS = {"auto", "chat_completions", "responses", "anthropic", "ollama"}
+
+
+def _normalize_api_method(value: Any) -> str:
+    method = str(value or "auto").strip().lower()
+    return method if method in _API_METHODS else "auto"
+
+
+def _endpoint_api_method(ep: Any) -> str:
+    return _normalize_api_method(getattr(ep, "api_method", None))
 
 
 def _normalize_endpoint_kind(value: Any) -> str:
@@ -644,19 +657,19 @@ def _delete_orphaned_provider_auth(db, auth_id: Optional[str], exclude_ep_id: Op
     return True
 
 
-def _safe_detect_provider(base_url: str) -> str:
+def _safe_detect_provider(base_url: str, api_method: Any = None) -> str:
     """Best-effort provider detection that must not break endpoint probing."""
     try:
-        return _detect_provider(base_url)
+        return _resolve_provider(base_url, api_method)
     except Exception as exc:
         logger.debug("Provider detection failed for %s: %s", base_url, exc)
         return ""
 
 
-def _safe_build_models_url(base_url: str) -> str:
+def _safe_build_models_url(base_url: str, api_method: Any = None) -> str:
     """Build a /models URL without letting optional provider imports break probes."""
     try:
-        return build_models_url(base_url)
+        return build_models_url(base_url, api_method)
     except ValueError:
         raise
     except Exception as exc:
@@ -664,10 +677,10 @@ def _safe_build_models_url(base_url: str) -> str:
         return f"{(base_url or '').rstrip('/')}/models"
 
 
-def _safe_build_headers(api_key: Optional[str], base_url: str) -> dict:
+def _safe_build_headers(api_key: Optional[str], base_url: str, api_method: Any = None) -> dict:
     """Build auth headers without letting optional provider imports break probes."""
     try:
-        return build_headers(api_key, base_url)
+        return build_headers(api_key, base_url, api_method)
     except Exception as exc:
         logger.debug("Header detection failed for %s: %s", base_url, exc)
         return {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -688,9 +701,10 @@ def _resolve_probe_key(ep) -> Optional[str]:
         return None
 
 
-def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 10, with_tools: bool = False) -> dict:
+def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 10, with_tools: bool = False, api_method: Any = None) -> dict:
     """Send a realistic completion request to a single model. Returns {status, latency_ms, error?}."""
-    provider = _safe_detect_provider(base)
+    method = _normalize_api_method(api_method)
+    provider = _safe_detect_provider(base, method)
     if _is_discovery_only_provider(provider):
         return {"status": "ok", "latency_ms": 0, "skipped": True}
     messages = [
@@ -710,13 +724,24 @@ def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 1
             payload["tools"] = [{"name": "test", "description": "Test tool", "input_schema": {"type": "object", "properties": {}}}]
     elif provider == "ollama":
         from src.llm_core import _build_ollama_payload
-        target_url = build_chat_url(base)
-        h = _safe_build_headers(api_key, base)
+        target_url = build_chat_url(base, method)
+        h = _safe_build_headers(api_key, base, method)
         h["Content-Type"] = "application/json"
         payload = _build_ollama_payload(model_id, messages, 0.0, 5, stream=False, tools=_test_tools)
+    elif provider == "responses":
+        # Generic Responses API: non-streamed minimal request. Tools are a
+        # chat-path concern; the probe only checks the wire format works.
+        from src.llm_core import _build_chatgpt_responses_payload
+        target_url = build_chat_url(base, method)
+        h = _safe_build_headers(api_key, base, method)
+        h["Content-Type"] = "application/json"
+        payload = _build_chatgpt_responses_payload(
+            model_id, messages, 0.0, 16,
+            stream=False, include_max_output_tokens=True,
+        )
     else:
-        target_url = build_chat_url(base)
-        h = _safe_build_headers(api_key, base)
+        target_url = build_chat_url(base, method)
+        h = _safe_build_headers(api_key, base, method)
         h["Content-Type"] = "application/json"
         from src.llm_core import _uses_max_completion_tokens, _restricts_temperature
         _max_key = "max_completion_tokens" if _uses_max_completion_tokens(model_id) else "max_tokens"
@@ -851,13 +876,13 @@ def _ollama_model_names(data: Any) -> List[str]:
     return out
 
 
-def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> List[str]:
+def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5, api_method: Any = None) -> List[str]:
     """Probe a base URL's /models endpoint and return list of model IDs.
     For Anthropic, queries their /v1/models API, falling back to hardcoded list."""
     from src.endpoint_resolver import resolve_url
     from src.llm_core import httpx_get_kimi_aware
     base = resolve_url(_normalize_base(base_url))
-    provider = _safe_detect_provider(base)
+    provider = _safe_detect_provider(base, api_method)
     if provider == "chatgpt-subscription":
         from src.chatgpt_subscription import fetch_available_models
         if api_key:
@@ -865,7 +890,7 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
         return []
     if provider == "anthropic":
         # Try Anthropic's /v1/models endpoint first
-        url = _safe_build_models_url(base)
+        url = _safe_build_models_url(base, api_method)
         headers = {"anthropic-version": "2023-06-01"}
         if api_key:
             headers["x-api-key"] = api_key
@@ -888,8 +913,8 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
                 return []
             logger.warning(f"Anthropic /v1/models failed, using hardcoded list: {e}")
         return list(ANTHROPIC_MODELS)
-    url = _safe_build_models_url(base)
-    headers = _safe_build_headers(api_key, base)
+    url = _safe_build_models_url(base, api_method)
+    headers = _safe_build_headers(api_key, base, api_method)
     try:
         r = httpx_get_kimi_aware(url, headers, timeout=timeout, verify=llm_verify())
         r.raise_for_status()
@@ -1668,20 +1693,20 @@ def setup_model_routes(model_discovery):
                 if ep_id and ep_id not in endpoints_cache:
                     ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
                     if ep:
-                        endpoints_cache[ep_id] = {"base_url": ep.base_url, "api_key": ep.api_key}
+                        endpoints_cache[ep_id] = {"base_url": ep.base_url, "api_key": ep.api_key, "api_method": _endpoint_api_method(ep)}
                 ep_data = endpoints_cache.get(ep_id)
                 if not ep_data:
                     # Try to find by base_url from the model's endpoint field
                     endpoint_url = item.get("endpoint", "")
                     if endpoint_url:
-                        ep_data = {"base_url": endpoint_url, "api_key": item.get("api_key", "")}
+                        ep_data = {"base_url": endpoint_url, "api_key": item.get("api_key", ""), "api_method": _normalize_api_method(item.get("api_method"))}
                     else:
                         results.append({"model": model_id, "status": "fail", "error": "Endpoint not found"})
                         continue
 
                 base = _normalize_base(ep_data["base_url"])
                 _with_tools = item.get("with_tools", False)
-                result = _probe_single_model(base, ep_data.get("api_key"), model_id, timeout=8, with_tools=_with_tools)
+                result = _probe_single_model(base, ep_data.get("api_key"), model_id, timeout=8, with_tools=_with_tools, api_method=ep_data.get("api_method"))
                 result["model"] = model_id
                 result["endpoint_id"] = ep_id
                 results.append(result)
@@ -1708,6 +1733,7 @@ def setup_model_routes(model_discovery):
                     "name": ep.name,
                     "base_url": ep.base_url,
                     "api_key": ep.api_key,
+                    "api_method": _endpoint_api_method(ep),
                 })
         finally:
             db.close()
@@ -1722,7 +1748,7 @@ def setup_model_routes(model_discovery):
             ok_count = 0
             for ep in ep_data:
                 base = _normalize_base(ep["base_url"])
-                all_models = _probe_endpoint(base, ep.get("api_key"))
+                all_models = _probe_endpoint(base, ep.get("api_key"), api_method=ep.get("api_method"))
                 # Update cached_models in DB
                 if all_models:
                     db2 = SessionLocal()
@@ -1743,7 +1769,7 @@ def setup_model_routes(model_discovery):
 
                 for model_id in models:
                     total += 1
-                    result = _probe_single_model(base, ep.get("api_key"), model_id, timeout=8)
+                    result = _probe_single_model(base, ep.get("api_key"), model_id, timeout=8, api_method=ep.get("api_method"))
                     result["type"] = "probe_result"
                     result["endpoint"] = ep["name"]
                     result["model"] = model_id
@@ -1888,6 +1914,7 @@ def setup_model_routes(model_discovery):
                     "model_type": getattr(r, "model_type", None) or "llm",
                     "supports_tools": getattr(r, "supports_tools", None),
                     "endpoint_kind": kind,
+                    "api_method": _endpoint_api_method(r),
                     "category": _classify_endpoint(base, kind),
                     "model_refresh_mode": _endpoint_refresh_mode(r, kind),
                     "model_refresh_interval": getattr(r, "model_refresh_interval", None),
@@ -1911,6 +1938,7 @@ def setup_model_routes(model_discovery):
         model_refresh_interval: str = Form(""),
         model_refresh_timeout: str = Form(""),
         supports_tools: str = Form(""),  # "true"/"false"/"" (unknown)
+        api_method: str = Form("auto"),  # "auto"/"chat_completions"/"responses"/"anthropic"/"ollama"
         pinned_models: str = Form(""),  # admin-pinned IDs: list/JSON/comma/newline
         container_local: str = Form("false"),
         # Default `shared=true` → endpoints are visible to all users (the
@@ -1935,6 +1963,7 @@ def setup_model_routes(model_discovery):
             name = base_url.replace("http://", "").replace("https://", "").split("/")[0]
 
         requested_kind = _normalize_endpoint_kind(endpoint_kind)
+        requested_method = _normalize_api_method(api_method)
         refresh_mode = _normalize_refresh_mode(model_refresh_mode, requested_kind)
         refresh_interval = _parse_positive_int(model_refresh_interval, minimum=30, maximum=86400)
         refresh_timeout = _parse_positive_int(model_refresh_timeout, minimum=1, maximum=60)
@@ -1987,6 +2016,9 @@ def setup_model_routes(model_discovery):
                 if requested_kind != "auto" and _endpoint_kind(existing) == "auto":
                     existing.endpoint_kind = requested_kind
                     changed = True
+                if requested_method != "auto" and _endpoint_api_method(existing) == "auto":
+                    existing.api_method = requested_method
+                    changed = True
                 if model_refresh_mode or (requested_kind == "proxy" and _endpoint_refresh_mode(existing, requested_kind) != refresh_mode):
                     existing.model_refresh_mode = refresh_mode
                     changed = True
@@ -2011,6 +2043,7 @@ def setup_model_routes(model_discovery):
                         base_url,
                         (api_key.strip() or existing.api_key or None),
                         timeout=_explicit_model_list_timeout(base_url, existing_kind_for_probe, refresh_timeout),
+                        api_method=requested_method if requested_method != "auto" else _endpoint_api_method(existing),
                     )
                     if probed_models:
                         existing.cached_models = json.dumps(probed_models)
@@ -2038,12 +2071,13 @@ def setup_model_routes(model_discovery):
                     "status": "online",
                     "existing": True,
                     "endpoint_kind": existing_kind,
+                    "api_method": _endpoint_api_method(existing),
                     "category": _classify_endpoint(existing.base_url, existing_kind),
                 }
         finally:
             _db_dedup.close()
 
-        model_ids = _probe_endpoint(base_url, api_key.strip() or None, timeout=explicit_timeout) if should_probe else []
+        model_ids = _probe_endpoint(base_url, api_key.strip() or None, timeout=explicit_timeout, api_method=requested_method) if should_probe else []
         ping = {"reachable": False, "error": None}
         if (should_probe or requested_kind in ("api", "proxy")) and not model_ids:
             ping = _ping_endpoint(base_url, api_key.strip() or None, timeout=min(explicit_timeout, 10.0))
@@ -2077,6 +2111,7 @@ def setup_model_routes(model_discovery):
                 cached_models=json.dumps(model_ids) if model_ids else None,
                 pinned_models=json.dumps(_pinned) if _pinned else None,
                 supports_tools=_st,
+                api_method=requested_method,
                 owner=_owner_val,
             )
             db.add(ep)
@@ -2127,6 +2162,7 @@ def setup_model_routes(model_discovery):
             "status": "online" if (model_ids or _pinned) else ("loading" if ping.get("loading") else ("empty" if ping.get("reachable") else "offline")),
             "ping_error": ping.get("error") if ping else None,
             "endpoint_kind": requested_kind,
+            "api_method": requested_method,
             "category": _classify_endpoint(base_url, requested_kind),
         }
 
@@ -2137,6 +2173,7 @@ def setup_model_routes(model_discovery):
         api_key: str = Form(""),
         endpoint_kind: str = Form("auto"),
         model_refresh_timeout: str = Form(""),
+        api_method: str = Form("auto"),
     ):
         require_admin(request)
         base_url = _normalize_base(base_url)
@@ -2146,9 +2183,10 @@ def setup_model_routes(model_discovery):
         base_url = resolve_url(base_url)
         base_url = _rewrite_loopback_for_docker(base_url)
         requested_kind = _normalize_endpoint_kind(endpoint_kind)
+        requested_method = _normalize_api_method(api_method)
         configured_timeout = _parse_positive_int(model_refresh_timeout, minimum=1, maximum=60)
         probe_timeout = _explicit_model_list_timeout(base_url, requested_kind, configured_timeout)
-        models = _probe_endpoint(base_url, api_key.strip() or None, timeout=probe_timeout)
+        models = _probe_endpoint(base_url, api_key.strip() or None, timeout=probe_timeout, api_method=requested_method)
         ping = {"reachable": True, "error": None} if models else _ping_endpoint(base_url, api_key.strip() or None, timeout=min(probe_timeout, 10.0))
         return {
             "base_url": base_url,
@@ -2158,6 +2196,7 @@ def setup_model_routes(model_discovery):
             "models": models,
             "count": len(models),
             "endpoint_kind": requested_kind,
+            "api_method": requested_method,
             "category": _classify_endpoint(base_url, requested_kind),
         }
 
@@ -2170,12 +2209,12 @@ def setup_model_routes(model_discovery):
             ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
             if not ep:
                 raise HTTPException(404, "Endpoint not found")
-            ep_data = {"id": ep.id, "name": ep.name, "base_url": ep.base_url, "api_key": ep.api_key}
+            ep_data = {"id": ep.id, "name": ep.name, "base_url": ep.base_url, "api_key": ep.api_key, "api_method": _endpoint_api_method(ep)}
         finally:
             db.close()
 
         base = _normalize_base(ep_data["base_url"])
-        all_models = _probe_endpoint(base, ep_data["api_key"])
+        all_models = _probe_endpoint(base, ep_data["api_key"], api_method=ep_data.get("api_method"))
         chat_models = [m for m in all_models if _is_chat_model(m)]
         skipped = len(all_models) - len(chat_models)
 
@@ -2184,7 +2223,7 @@ def setup_model_routes(model_discovery):
             failed = []
             ok_count = 0
             for mid in chat_models:
-                result = _probe_single_model(base, ep_data["api_key"], mid, timeout=8)
+                result = _probe_single_model(base, ep_data["api_key"], mid, timeout=8, api_method=ep_data.get("api_method"))
                 result["model"] = mid
                 result["type"] = "probe_result"
                 result["endpoint"] = ep_data["name"]
@@ -2452,6 +2491,8 @@ def setup_model_routes(model_discovery):
                     ep.pinned_models = json.dumps(_pinned) if _pinned else None
                 if "endpoint_kind" in body:
                     ep.endpoint_kind = _normalize_endpoint_kind(body.get("endpoint_kind"))
+                if "api_method" in body:
+                    ep.api_method = _normalize_api_method(body.get("api_method"))
                 if "model_refresh_mode" in body:
                     ep.model_refresh_mode = _normalize_refresh_mode(body.get("model_refresh_mode"), _endpoint_kind(ep))
                 if "model_refresh_interval" in body:
@@ -2470,7 +2511,7 @@ def setup_model_routes(model_discovery):
                     ep.api_key = _new_key or None
                 if "base_url" in body and isinstance(body["base_url"], str):
                     _new_base = body["base_url"].strip().rstrip("/")
-                    for _suffix in ("/models", "/chat/completions", "/completions", "/v1/messages"):
+                    for _suffix in ("/models", "/chat/completions", "/completions", "/v1/messages", "/responses", "/api/chat"):
                         if _new_base.endswith(_suffix):
                             _new_base = _new_base[: -len(_suffix)].rstrip("/")
                     _new_base = _normalize_base(_new_base)
@@ -2490,6 +2531,7 @@ def setup_model_routes(model_discovery):
                 "base_url": ep.base_url,
                 "pinned_models": _normalize_model_ids(getattr(ep, "pinned_models", None)),
                 "endpoint_kind": getattr(ep, "endpoint_kind", None) or "auto",
+                "api_method": _endpoint_api_method(ep),
                 "model_refresh_mode": getattr(ep, "model_refresh_mode", None) or "auto",
                 "model_refresh_interval": getattr(ep, "model_refresh_interval", None),
                 "model_refresh_timeout": getattr(ep, "model_refresh_timeout", None),

@@ -9,6 +9,7 @@ The LLM decides when to use tools by writing fenced code blocks.
 import asyncio
 import collections
 import json
+import os
 import re
 import time
 import logging
@@ -73,6 +74,83 @@ def _remember_sticky_tool(session_id: Optional[str], tool_name: str) -> None:
     else:
         _SESSION_STICKY_TOOLS.move_to_end(session_id)
     bucket.add(tool_name)
+
+
+# Per-session integrity-gate state (server memory only, never persisted):
+# "bypass" set by a session-scope approval dialog choice, "tainted" carried
+# from a run that saw external untrusted context without approval, so the
+# next run starts armed. Bounded LRU-ish like _SESSION_STICKY_TOOLS. Lost on
+# restart, which fails closed (next run simply re-arms on fresh evidence).
+_SESSION_GATE_STATE: "collections.OrderedDict[str, dict]" = collections.OrderedDict()
+_SESSION_GATE_CAP = 256
+
+
+def _gate_session_state(session_id: Optional[str]) -> dict:
+    if not session_id:
+        return {"bypass": False, "tainted": False}
+    state = _SESSION_GATE_STATE.get(session_id)
+    if state is None:
+        state = {"bypass": False, "tainted": False}
+        _SESSION_GATE_STATE[session_id] = state
+        while len(_SESSION_GATE_STATE) > _SESSION_GATE_CAP:
+            _SESSION_GATE_STATE.popitem(last=False)
+    else:
+        _SESSION_GATE_STATE.move_to_end(session_id)
+    return state
+
+
+def _tool_gate_enabled() -> bool:
+    """Kill switch for the post-external-context integrity gate (default on).
+
+    Honored so automated contexts (notably the test suite via conftest) can
+    run multi-tool flows without a human to click approval dialogs. Yolo
+    sessions bypass per-run instead; this flag removes the gate entirely.
+    """
+    return os.environ.get("ODYSSEUS_TOOL_GATE", "on").strip().lower() not in (
+        "off", "0", "false", "no",
+    )
+
+
+def _human_stream_active(session_id: Optional[str]) -> bool:
+    """Whether a live SSE stream exists for this session (someone to ask).
+
+    Without a listening client an approval dialog would hang until timeout,
+    so headless runs (scheduler, audits, tests) fail closed immediately
+    instead of waiting on a human that isn't there.
+    """
+    try:
+        from routes.chat_helpers import _is_session_stream_active
+        return bool(session_id and _is_session_stream_active(session_id))
+    except Exception:
+        return False
+
+
+def _safety_net_tool_selection(
+    intent_domains=(),
+    *,
+    sticky: set | None = None,
+    needs_admin: bool = False,
+    doc_editable: bool = False,
+) -> set:
+    """Last-resort tool set when every selection path left _relevant_tools None.
+
+    Without this the send site falls back to ALL ~70 schemas (~15k tokens)
+    for turns where retrieval never ran (empty query, skipped index). The net
+    mirrors the ingredients the normal path would have unioned anyway —
+    always-available + intent domains + session-sticky + doc-edit + admin —
+    so the model sees a focused but sufficient list instead of everything.
+    Guide-only turns deliberately bypass this (unchanged legacy behaviour).
+    """
+    from src.tool_index import ALWAYS_AVAILABLE
+    tools = set(ALWAYS_AVAILABLE)
+    for _domain in intent_domains or ():
+        tools |= _DOMAIN_TOOL_MAP.get(str(_domain), set())
+    tools |= set(sticky or ())
+    if doc_editable:
+        tools |= {"edit_document", "update_document", "suggest_document"}
+    if needs_admin:
+        tools |= _ADMIN_TOOLS
+    return tools
 
 
 
@@ -2756,6 +2834,7 @@ def _compute_final_metrics(
     prep_timings: Optional[Dict[str, float]] = None,
     backend_gen_tps: float = 0,
     backend_prefill_tps: float = 0,
+    last_round_output_tokens: int = 0,
 ) -> dict:
     """Compute token counts, TPS, and build the final metrics dict."""
     if has_real_usage:
@@ -2792,6 +2871,8 @@ def _compute_final_metrics(
         "tps_source": "backend" if (backend_gen_tps and backend_gen_tps > 0) else "computed",
         "total_tokens": input_tokens + output_tokens,
         "context_length": context_length,
+        "context_tokens": ctx_tokens,
+        "context_output_tokens": last_round_output_tokens if has_real_usage else len(full_response) // 4,
         "context_percent": ctx_pct,
         "usage_source": "real" if has_real_usage else "estimated",
         "model": model,
@@ -3191,6 +3272,9 @@ async def stream_agent_loop(
             "agent_rounds": 0,
             "tool_calls": 0,
             "direct_low_signal": True,
+            "context_tokens": real_input_tokens or estimate_tokens(direct_messages),
+            "context_output_tokens": real_output_tokens or max(len(direct_response) // 4, 1),
+            "usage_source": "real" if real_input_tokens else "estimated",
         }
         yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
         yield "data: [DONE]\n\n"
@@ -3341,6 +3425,21 @@ async def stream_agent_loop(
         if _sticky:
             _relevant_tools.update(_sticky)
             logger.info(f"[tool-rag] Session-sticky tools re-included: {sorted(_sticky)}")
+
+    # Safety net: every selection path above can still leave _relevant_tools
+    # None (empty retrieval query, skipped index, unexpected failure). Without
+    # this the send site falls back to ALL schemas (~15k tokens). Seed the
+    # same focused ingredients instead — downstream unions (document,
+    # forced, skills) and disabled/privilege filters still apply normally.
+    # Guide-only turns keep the legacy send-everything behaviour untouched.
+    if not guide_only and _relevant_tools is None:
+        _relevant_tools = _safety_net_tool_selection(
+            (_intent.get("domains") if isinstance(_intent, dict) else None),
+            sticky=_sticky_tools_for(session_id) if session_id else (),
+            needs_admin=bool(_needs_admin),
+            doc_editable=bool(_active_document_relevant or _active_document_editable),
+        )
+        logger.info(f"[tool-rag] Safety-net tool selection: {sorted(_relevant_tools)}")
 
     # If this turn targets the open document, keep editing tools available
     # regardless of which selection path (RAG, keyword, caller-provided) ran.
@@ -3862,6 +3961,8 @@ async def stream_agent_loop(
     real_input_tokens = 0   # Accumulated real usage from API
     real_output_tokens = 0
     last_round_input_tokens = 0  # Last round's input tokens (for context % peak)
+    last_round_output_tokens = 0
+    last_round_real_usage = False
     has_real_usage = False
     backend_gen_tps = 0      # backend-reported true gen speed (llama.cpp timings)
     backend_prefill_tps = 0  # backend-reported prefill speed
@@ -3908,6 +4009,28 @@ async def stream_agent_loop(
         re.IGNORECASE,
     )
     _awaiting_user = False  # set by ask_user → end the turn and wait for a choice
+
+    # Post-external-context integrity gate (src.tool_capabilities): a
+    # run-local security context that arms once untrusted content (tool
+    # output, wrapped external blocks) enters the run, after which effectful
+    # tools need explicit user authorization via the approval dialog.
+    # Disabled wholesale by ODYSSEUS_TOOL_GATE=off (automated contexts).
+    _tool_gate_ctx = None
+    if _tool_gate_enabled():
+        from src.tool_capabilities import ToolRunSecurityContext
+        _tool_gate_ctx = ToolRunSecurityContext()
+        _gate_state = _gate_session_state(session_id)
+        if _gate_state.get("bypass"):
+            _tool_gate_ctx.approval_gate_bypassed = True
+        if _gate_state.get("tainted"):
+            _tool_gate_ctx.external_untrusted_context_seen = True
+        _tool_gate_ctx.observe_messages(messages)
+        try:
+            from src.command_approval import is_session_yolo_enabled
+            if session_id and is_session_yolo_enabled(session_id):
+                _tool_gate_ctx.approval_gate_bypassed = True
+        except Exception:
+            pass
 
     # Document streaming state (persists across rounds)
     _doc_acc = ""          # accumulated tool-call JSON arguments
@@ -3999,6 +4122,15 @@ async def stream_agent_loop(
         agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
+        # Current request, not accumulated billing across tool rounds. Include
+        # schema overhead in the estimate; provider usage replaces it when available.
+        _context_tokens = estimate_tokens(messages)
+        if all_tool_schemas:
+            _context_tokens += estimate_tokens([{"role": "system", "content": json.dumps(all_tool_schemas)}])
+        last_round_input_tokens = _context_tokens
+        last_round_output_tokens = 0
+        last_round_real_usage = False
+        yield f"data: {json.dumps({'type': 'context_usage', 'data': {'used_tokens': _context_tokens, 'model': model, 'usage_source': 'estimated', 'basis': 'request'}})}\n\n"
         logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")
 
         # Primary target + any configured fallback models. stream_llm_with_fallback
@@ -4126,7 +4258,10 @@ async def stream_agent_loop(
                         real_input_tokens += round_input
                         real_output_tokens += u.get("output_tokens", 0)
                         last_round_input_tokens = round_input
+                        last_round_output_tokens = u.get("output_tokens", 0) or 0
                         has_real_usage = True
+                        last_round_real_usage = True
+                        yield f"data: {json.dumps({'type': 'context_usage', 'data': {'used_tokens': round_input + last_round_output_tokens, 'model': actual_model, 'usage_source': 'real', 'basis': 'request'}})}\n\n"
                         # Backend-reported TRUE generation speed (llama.cpp
                         # timings.predicted_per_second) — pure decode, excludes
                         # prefill/network. Preferred over tokens/wall-clock, which
@@ -5039,7 +5174,51 @@ async def stream_agent_loop(
 
                 async def _run_tool():
                     try:
-                        return await execute_tool_block(
+                        # Integrity gate: after external untrusted context has
+                        # entered this run, effectful tools need explicit user
+                        # authorization (approval dialog when a human is
+                        # watching, fail-closed placeholder otherwise).
+                        if _tool_gate_ctx is not None:
+                            _gate_decision = _tool_gate_ctx.decision_for(
+                                block.tool_type, block.content)
+                            if not _gate_decision.allowed:
+                                _gate_reason = (
+                                    _gate_decision.reason
+                                    or f"Tool '{block.tool_type}' needs user authorization."
+                                )
+                                _gate_proceed = False
+                                if workload == "foreground" and _human_stream_active(session_id):
+                                    from src.command_approval import (
+                                        create_tool_gate_approval,
+                                        await_tool_gate_approval,
+                                    )
+                                    _ap_id, _ap_payload = create_tool_gate_approval(
+                                        tool=block.tool_type,
+                                        reason=_gate_reason,
+                                        session_id=session_id or "",
+                                        owner=owner,
+                                        detail=cmd_display,
+                                    )
+                                    await _push_progress({"approval_request": _ap_payload})
+                                    _gate_wait = await await_tool_gate_approval(_ap_id)
+                                    if _gate_wait.get("approved"):
+                                        _gate_proceed = True
+                                        if _gate_wait.get("scope") in ("session", "always"):
+                                            _tool_gate_ctx.approval_gate_bypassed = True
+                                            _gate_session_state(session_id)["bypass"] = True
+                                    else:
+                                        _gate_reason = _gate_wait.get("message") or _gate_reason
+                                if not _gate_proceed:
+                                    logger.info(
+                                        "Tool gate denied %s post-external-context",
+                                        block.tool_type)
+                                    return (
+                                        f"{block.tool_type}: approval required",
+                                        {"approval_required": True,
+                                         "error": _gate_reason,
+                                         "exit_code": 126},
+                                    )
+                        desc, result = await execute_tool_block(
                             block,
                             session_id=session_id,
                             disabled_tools=disabled_tools,
@@ -5048,6 +5227,15 @@ async def stream_agent_loop(
                             progress_cb=_push_progress,
                             workspace=workspace,
                         )
+                        if _tool_gate_ctx is not None:
+                            _tool_gate_ctx.observe_tool_result(
+                                block.tool_type, result, block.content)
+                            if session_id:
+                                _gate_st = _gate_session_state(session_id)
+                                _gate_st["tainted"] = bool(
+                                    _tool_gate_ctx.external_untrusted_context_seen
+                                    and not _tool_gate_ctx.approval_gate_bypassed)
+                        return desc, result
                     finally:
                         # Sentinel so the drainer knows to stop.
                         await _progress_q.put(None)
@@ -5605,11 +5793,17 @@ async def stream_agent_loop(
         context_length, real_input_tokens, real_output_tokens,
         has_real_usage, tool_events, round_texts, model=actual_model,
         last_round_input_tokens=last_round_input_tokens,
+        last_round_output_tokens=last_round_output_tokens,
         prep_timings=prep_timings,
         backend_gen_tps=backend_gen_tps,
         backend_prefill_tps=backend_prefill_tps,
     )
     metrics["requested_model"] = requested_model
+    # Billing can be real even when the final round omitted usage. Keep the
+    # composer's latest-request estimate independently labelled in that case.
+    metrics["context_usage_source"] = "real" if last_round_real_usage else "estimated"
+    if not last_round_real_usage:
+        metrics["context_output_tokens"] = len(round_texts[-1]) // 4 if round_texts else 0
     yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
 
     # Teacher-escalation: inline takeover visible in the chat stream.

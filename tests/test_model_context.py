@@ -135,8 +135,9 @@ class TestEstimateTokens:
             }
         ]
         tokens = estimate_tokens(messages)
-        # 4 overhead + int(19 * 0.3) for the text item; image_url is ignored
-        assert tokens == 4 + int(19 * 0.3)
+        # 4 overhead + int(19 * 0.3) for the text item + flat 1500 vision
+        # allowance per image (image input bills real tokens).
+        assert tokens == 4 + int(19 * 0.3) + 1500
 
     def test_missing_content_key(self):
         messages = [{"role": "assistant"}]

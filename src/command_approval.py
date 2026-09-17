@@ -1375,3 +1375,83 @@ async def check_command_guard(
                 "user_approved": True, "description": description}
 
     return _deny_block_result(description, timed_out=choice is None)
+
+
+def create_tool_gate_approval(
+    *,
+    tool: str,
+    reason: str,
+    session_id: str = "",
+    owner=None,
+    detail: str = "",
+) -> tuple[str, dict]:
+    """Register an integrity-gate approval request; returns (approval_id, event_payload).
+
+    Reuses the dangerous-command approval registry + dialog: the caller emits
+    ``{"approval_request": payload}`` as SSE (agent_loop forwards it so the UI
+    renders the approve/deny card) and the user's choice arrives via the same
+    POST /api/approvals/<id> route. Await with await_tool_gate_approval().
+    """
+    import uuid as _uuid
+
+    approval_id = _uuid.uuid4().hex
+    summary = str(tool or "tool")
+    if detail:
+        summary = f"{summary}: {str(detail)[:200]}"
+    entry = {
+        "event": asyncio.Event(),
+        "choice": None,
+        # Same owner canonicalization as shell approvals so the resolve
+        # route matches single-user/auth-disabled callers.
+        "owner": owner or "",
+        "data": {
+            "command": summary,
+            "description": reason,
+            "session_id": session_id,
+            "kind": "tool_gate",
+        },
+    }
+    _pending_approvals[approval_id] = entry
+    return approval_id, {
+        "approval_id": approval_id,
+        "command": summary,
+        "description": reason,
+        "kind": "tool_gate",
+    }
+
+
+async def await_tool_gate_approval(approval_id: str, timeout=None) -> dict:
+    """Wait for a gate approval created by create_tool_gate_approval.
+
+    Returns {"approved": bool, "scope": choice|None, "message": ...}.
+    Always cleans up the registry entry, including on timeout (fail closed).
+    """
+    entry = _pending_approvals.get(approval_id)
+    if entry is None:
+        return {"approved": False, "scope": None,
+                "message": "Approval request expired before it could be shown."}
+    try:
+        try:
+            await asyncio.wait_for(
+                entry["event"].wait(),
+                timeout=_get_approval_timeout() if timeout is None else timeout,
+            )
+        except asyncio.TimeoutError:
+            pass
+    finally:
+        _pending_approvals.pop(approval_id, None)
+    choice = entry["choice"]
+    if choice in ("once", "session", "always"):
+        return {"approved": True, "scope": choice, "message": None}
+    timed_out = choice is None
+    return {
+        "approved": False,
+        "scope": None,
+        "message": (
+            "Update the plan or ask the user for explicit authorization, then "
+            "retry — the request timed out waiting for approval."
+            if timed_out else
+            "The user denied this action. Do not retry or rephrase it; "
+            "continue with something else or ask what they want instead."
+        ),
+    }

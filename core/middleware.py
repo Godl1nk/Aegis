@@ -18,6 +18,30 @@ INTERNAL_TOOL_HEADER = "X-Odysseus-Internal-Token"
 # Pseudo-username on in-process tool-loopback requests; require_admin trusts it and it is reserved.
 INTERNAL_TOOL_USER = "internal-tool"
 
+# Forwarding headers that mark a request as tunnel/proxy-forwarded rather
+# than a direct loopback connection (mirrors app.py's _is_trusted_loopback:
+# a remote visitor behind cloudflared/a reverse proxy otherwise looks like
+# 127.0.0.1 and would inherit local trust).
+_PROXY_FWD_HEADERS = (
+    "cf-connecting-ip", "cf-ray", "cf-visitor",
+    "x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded",
+)
+
+
+def _is_direct_loopback(request: Request) -> bool:
+    """True only for a direct loopback connection with no forwarding headers."""
+    try:
+        host = request.client.host if request.client else None
+    except Exception:
+        return False
+    if host not in ("127.0.0.1", "::1"):
+        return False
+    try:
+        headers = request.headers or {}
+    except Exception:
+        return False
+    return not any(headers.get(h) for h in _PROXY_FWD_HEADERS)
+
 
 def is_cors_preflight(method: str, headers) -> bool:
     """True for a genuine CORS preflight: an OPTIONS request carrying the
@@ -37,12 +61,23 @@ def require_admin(request: Request):
     # (a) header-direct (caller set X-Odysseus-Internal-Token), or
     # (b) the auth middleware already validated the token and stamped
     #     request.state.current_user = "internal-tool".
+    # Path (a) additionally requires a DIRECT loopback connection: without
+    # it a leaked/static token would grant remote admin (tunnel-forwarded
+    # remotes also present as 127.0.0.1, hence the forwarding-header check).
     try:
         hdr = request.headers.get(INTERNAL_TOOL_HEADER)
         if hdr and secrets.compare_digest(hdr, INTERNAL_TOOL_TOKEN):
+            if not _is_direct_loopback(request):
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "Internal-tool token presented from non-loopback client %s — denied",
+                    getattr(getattr(request, "client", None), "host", "?"))
+                raise HTTPException(403, "Admin only")
             return
         if getattr(request.state, "current_user", None) == INTERNAL_TOOL_USER:
             return
+    except HTTPException:
+        raise
     except Exception:
         pass
 

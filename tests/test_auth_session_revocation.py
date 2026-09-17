@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import json
 import sys
 import types
 from pathlib import Path
@@ -44,6 +45,50 @@ def _make_manager(tmp_path):
 
 async def _immediate_to_thread(fn, *args, **kwargs):
     return fn(*args, **kwargs)
+
+
+def test_session_keys_are_hashed_on_disk_and_roundtrip(tmp_path):
+    mgr = _make_manager(tmp_path)
+    token = mgr.create_session("alice", "old-password")
+    assert token
+    assert mgr.get_username_for_token(token) == "alice"
+    disk = json.loads((tmp_path / "sessions.json").read_text())
+    assert token not in disk
+    assert mgr._hash_token(token) in disk
+    mgr2 = type(mgr)(str(tmp_path / "auth.json"))
+    assert mgr2.validate_token(token) is True
+    assert mgr2.get_username_for_token(token) == "alice"
+    assert mgr2.validate_token(mgr._hash_token(token)) is False
+    mgr2.revoke_token(token)
+    assert mgr2.validate_token(token) is False
+    assert json.loads((tmp_path / "sessions.json").read_text()) == {}
+
+
+def test_legacy_plaintext_sessions_are_dropped(tmp_path):
+    mgr = _make_manager(tmp_path)
+    token = mgr.create_session("alice", "old-password")
+    assert token
+    hashed_key = mgr._hash_token(token)
+    info = mgr._sessions[hashed_key]
+    (tmp_path / "sessions.json").write_text(json.dumps({token: info}))
+    mgr2 = type(mgr)(str(tmp_path / "auth.json"))
+    assert mgr2.validate_token(token) is False
+    assert json.loads((tmp_path / "sessions.json").read_text()) == {}
+
+
+@pytest.mark.parametrize("lookup", ["validate_token", "get_username_for_token"])
+@pytest.mark.parametrize("invalid", ["expired", "deleted_user"])
+def test_invalid_hashed_sessions_are_removed(tmp_path, lookup, invalid):
+    mgr = _make_manager(tmp_path)
+    token = mgr.create_session("alice", "old-password")
+    key = mgr._hash_token(token)
+    if invalid == "expired":
+        mgr._sessions[key]["expiry"] = 0
+    else:
+        del mgr.users["alice"]
+    assert not getattr(mgr, lookup)(token)
+    assert key not in mgr._sessions
+    assert json.loads((tmp_path / "sessions.json").read_text()) == {}
 
 
 def test_revoke_user_sessions_preserves_current_and_persists(tmp_path):

@@ -10,6 +10,7 @@ import settingsModule from './settings.js';
 import spinnerModule from './spinner.js';
 import { bindMenuDismiss } from './escMenuStack.js';
 import { matchModelKey } from './model/matchKey.js';
+import { createAgentTurn } from './agentTurn.js';
 
 const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 const REPORT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>';
@@ -1566,6 +1567,7 @@ function _trackAction(id) {
  * Create a footer row for an AI message with timestamp and action buttons.
  */
 export function createMsgFooter(msgElement) {
+  msgElement = msgElement.closest('.agent-turn') || msgElement;
   const footer = document.createElement('div');
   footer.className = 'msg-footer';
 
@@ -1880,6 +1882,7 @@ export function createUserMsgFooter(msgElement) {
  * Display performance metrics for a message.
  */
 export function displayMetrics(messageElement, metrics) {
+  messageElement = messageElement.closest('.agent-turn') || messageElement;
   messageElement
     .querySelectorAll('.response-metrics, .metrics-divider, .ctx-divider, .ctx-ring')
     .forEach((el) => el.remove());
@@ -2577,8 +2580,9 @@ export function addMessage(role, content, modelName, metadata) {
     var esc = uiModule.esc;
     const textRaw = Array.isArray(content) ? markdownModule.renderContent(content) : content;
 
-    // --- Agent multi-bubble reconstruction from saved metadata ---
+    // --- Reconstruct one response card, retaining the full tool transcript ---
     if (role === 'assistant' && metadata && metadata.tool_events && metadata.tool_events.length > 0) {
+      const turn = createAgentTurn(box);
       const roundTexts = metadata.round_texts || [];
       const toolEvents = metadata.tool_events;
       let pendingAskUser = null;
@@ -2615,7 +2619,7 @@ export function addMessage(role, content, modelName, metadata) {
             roleEl.title = pair.requestedModel + ' -> ' + contModel;
           }
           applyModelColor(roleEl, contModel);
-          if (r === 0) roleEl.appendChild(roleTimestamp(metadata?.timestamp));
+          if (!firstMsgAi) roleEl.appendChild(roleTimestamp(metadata?.timestamp));
           wrap.appendChild(roleEl);
           const body = document.createElement('div');
           body.className = 'body';
@@ -2642,7 +2646,7 @@ export function addMessage(role, content, modelName, metadata) {
           wrap.appendChild(body);
           wrap.dataset.raw = txt;
           if (metadata?._db_id) wrap.dataset.dbId = metadata._db_id;
-          box.appendChild(wrap);
+          turn.appendRound(wrap);
           lastWrap = wrap;
           if (!firstMsgAi) firstMsgAi = wrap;
           lastMsgAi = wrap;
@@ -2650,6 +2654,7 @@ export function addMessage(role, content, modelName, metadata) {
 
         const roundTools = toolsByRound[roundNum] || [];
         if (roundTools.length > 0) {
+          if (txt) turn.archiveRound(lastMsgAi);
           // Reuse previous thread if no text separated us (merge consecutive tool rounds)
           let threadWrap = null;
           if (!txt && lastWrap && lastWrap.classList.contains('agent-thread')) {
@@ -2659,7 +2664,7 @@ export function addMessage(role, content, modelName, metadata) {
             threadWrap.className = 'agent-thread';
             // Extend line up if there's a chat bubble above
             if (txt) threadWrap.classList.add('has-top');
-            box.appendChild(threadWrap);
+            turn.steps.appendChild(threadWrap);
           }
           for (const ev of roundTools) {
             if (ev.ask_user) pendingAskUser = ev.ask_user;
@@ -2721,7 +2726,9 @@ export function addMessage(role, content, modelName, metadata) {
 
           for (const ev of roundTools) {
             if (ev.image_url) {
-              box.appendChild(buildImageBubble(ev.image_url, ev.image_prompt, ev.image_model, ev.image_size, ev.image_quality, ev.image_id));
+              const image = buildImageBubble(ev.image_url, ev.image_prompt, ev.image_model, ev.image_size, ev.image_quality, ev.image_id);
+              image.classList.remove('msg', 'msg-ai');
+              turn.answer.appendChild(image);
             }
           }
         }
@@ -2741,7 +2748,7 @@ export function addMessage(role, content, modelName, metadata) {
           _docBtnSeen.add(ev.doc_id);
           _missed.push(ev);
         }
-        const _host = lastMsgAi || lastWrap;
+        const _host = turn.answer;
         if (_missed.length && _host) {
           const _body = _host.querySelector('.body') || _host;
           for (const ev of _missed) {
@@ -2755,7 +2762,23 @@ export function addMessage(role, content, modelName, metadata) {
         }
       }
 
-      const firstWrap = lastMsgAi || lastWrap;
+      // Older saved tool traces may not have per-round text. Do not lose the
+      // persisted answer just because the richer metadata is incomplete.
+      if (!roundTexts.some(txt => String(txt || '').trim()) && String(textRaw || '').trim()) {
+        const finalBody = document.createElement('div');
+        finalBody.innerHTML = markdownModule.processWithThinking(markdownModule.squashOutsideCode(textRaw));
+        turn.answer.appendChild(finalBody);
+      }
+      if (!firstMsgAi) {
+        const pair = replyModelPair(modelName, metadata);
+        const header = turn.root.querySelector('.role');
+        header.textContent = modelRouteLabel(pair.requestedModel, pair.actualModel);
+        header.appendChild(roleTimestamp(metadata?.timestamp));
+        applyModelColor(header, pair.actualModel || pair.requestedModel);
+      }
+      const answerRaw = turn.answer.querySelector('.agent-turn-round')?.dataset.raw ?? textRaw;
+      turn.finish({ raw: answerRaw, dbId: metadata?._db_id });
+      const firstWrap = turn.root;
       if (firstWrap && firstWrap.classList.contains('msg-ai')) {
         if (metadata?.memories_used?.length) firstWrap._memoriesUsed = metadata.memories_used;
         firstWrap.appendChild(createMsgFooter(firstWrap));
@@ -2778,7 +2801,7 @@ export function addMessage(role, content, modelName, metadata) {
         // page reloads. A later user message means it was already answered.
         renderImageChoiceCard(pendingImageChoice, { scroll: false });
       }
-      return lastWrap;
+      return turn.root;
     }
 
     // --- Wake-task / supervisor system check-in ---

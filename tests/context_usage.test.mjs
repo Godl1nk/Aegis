@@ -1,0 +1,50 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { contextView, mergeDiscoverySnapshot } from '../static/js/contextUsage.js';
+
+test('context percentage and thresholds', () => {
+  for (const [used, expected] of [[0, 'normal'], [699, 'normal'], [700, 'warning'], [850, 'danger'], [1200, 'danger']]) {
+    const view = contextView({ used_tokens: used, context_length: 1000, context_length_known: true });
+    assert.ok(Math.abs(view.percent - used / 10) < 1e-9);
+    assert.equal(view.level, expected);
+  }
+});
+test('unknown context never uses a fallback limit', () => {
+  assert.equal(contextView({ used_tokens: 1000, context_length: 128000, context_length_known: false }).percent, null);
+  assert.equal(contextView(null).percent, null);
+});
+test('draft uses local estimate and marks real count approximate', () => {
+  const data = { used_tokens: 100, context_length: 1000, context_length_known: true, usage_source: 'real' };
+  assert.equal(contextView(data).estimated, false);
+  const view = contextView(data, 'a'.repeat(100));
+  assert.equal(view.used, 134);
+  assert.equal(view.estimated, true);
+  assert.equal(data.used_tokens, 100);
+});
+test('invalid counts cannot produce NaN or a negative ring', () => {
+  assert.equal(contextView({ used_tokens: -100 }).used, 0);
+  assert.equal(contextView({ used_tokens: 'bad' }).used, 0);
+  assert.equal(contextView({ context_length_known: true, context_length: Infinity }).percent, null);
+});
+test('idle discovery replaces the snapshot wholesale', () => {
+  const prev = { used_tokens: 100, model: 'm', trimmed: true };
+  const fresh = { used_tokens: 50, model: 'm', context_length: 1000, context_length_known: true };
+  assert.deepEqual(mergeDiscoverySnapshot(prev, fresh), fresh);
+});
+test('busy merge keeps counts but drops stale status flags', () => {
+  const prev = { used_tokens: 100, model: 'm', trimmed: true, compacted: true };
+  const fresh = { used_tokens: 50, model: 'm', context_length: 1000, context_length_known: true };
+  const merged = mergeDiscoverySnapshot(prev, fresh, { busy: true });
+  assert.equal(merged.used_tokens, 100);
+  assert.equal(merged.context_length, 1000);
+  assert.equal('trimmed' in merged, false);
+  assert.equal('compacted' in merged, false);
+});
+test('busy merge keeps freshly re-asserted flags and nulls switched-model limits', () => {
+  const prev = { used_tokens: 100, model: 'm', trimmed: true };
+  const fresh = { used_tokens: 50, model: 'm', context_length: 1000, context_length_known: true, trimmed: true };
+  assert.equal(mergeDiscoverySnapshot(prev, fresh, { busy: true }).trimmed, true);
+  const switched = mergeDiscoverySnapshot(prev, { ...fresh, model: 'n' }, { busy: true });
+  assert.equal(switched.context_length, null);
+  assert.equal(switched.context_length_known, false);
+});

@@ -288,6 +288,7 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
             tasks = q.order_by(ScheduledTask.created_at.desc()).all()
             task_list = []
             for t in tasks:
+                _t_allow = getattr(t, "allow_shell", None)
                 task_list.append({
                     "id": t.id, "name": t.name, "status": t.status,
                     "task_type": t.task_type or "llm",
@@ -299,6 +300,7 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
                     "next_run": t.next_run.isoformat() + "Z" if t.next_run else None,
                     "last_run": t.last_run.isoformat() + "Z" if t.last_run else None,
                     "run_count": t.run_count or 0,
+                    "allow_shell": _t_allow if _t_allow is not None else True,
                 })
             return {"response": f"Found {len(task_list)} tasks", "tasks": task_list, "exit_code": 0}
 
@@ -342,6 +344,10 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
                 next_run=next_run,
                 status="active",
                 output_target=args.get("output_target", "session"),
+                # Unattended shell/file-write access is explicit opt-in (see
+                # TASK_SHELL_WRITE_TOOLS): omitted/false keeps the task to
+                # reads + safe tools. Legacy rows (NULL) keep old behaviour.
+                allow_shell=bool(args.get("allow_shell")),
             )
             db.add(task)
             db.commit()
@@ -362,6 +368,9 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
                 if args.get(field) is not None:
                     setattr(task, field, args[field])
                     changed.append(field)
+            if args.get("allow_shell") is not None:
+                task.allow_shell = bool(args.get("allow_shell"))
+                changed.append("allow_shell")
             if args.get("task_type") is not None:
                 task.task_type = args["task_type"]
                 changed.append("task_type")

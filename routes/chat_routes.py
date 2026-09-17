@@ -1338,6 +1338,7 @@ def setup_chat_routes(
                     return
 
             messages = _ensure_current_request_is_latest_user(ctx.messages, message)
+            yield f"data: {json.dumps({'type': 'context_usage', 'data': {'used_tokens': estimate_tokens(messages), 'model': sess.model, 'usage_source': 'estimated', 'basis': 'request'}})}\n\n"
 
             # Auto-compact notification
             if ctx.was_compacted:
@@ -1417,6 +1418,8 @@ def setup_chat_routes(
                                     yield f'data: {json.dumps(data)}\n\n'
                                 elif data.get("type") == "usage":
                                     last_metrics = data.get("data", {})
+                                    last_metrics["context_tokens"] = last_metrics.get("input_tokens", 0)
+                                    last_metrics["context_output_tokens"] = last_metrics.get("output_tokens", 0)
                                     _reported_model = last_metrics.get("model")
                                     last_metrics["requested_model"] = _requested_model
                                     last_metrics["model"] = _reported_model or _actual_model or _answered_by or _requested_model
@@ -1467,6 +1470,8 @@ def setup_chat_routes(
                                     "model": _actual_model or _answered_by or _requested_model,
                                     "requested_model": _requested_model,
                                     "usage_source": "estimated",
+                                    "context_tokens": _est_in,
+                                    "context_output_tokens": _est_out,
                                 }
                                 yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
                             if full_response:
@@ -1594,6 +1599,7 @@ def setup_chat_routes(
                                     "ask_user",
                                     "plan_update",
                                     "image_model_choice",
+                                    "context_usage",
                                 ):
                                     if data.get("type") == "agent_step":
                                         _agent_rounds = max(_agent_rounds, data.get("round", 1))

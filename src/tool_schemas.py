@@ -429,7 +429,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_knowledge",
-            "description": "Manage durable web-knowledge entries: validate and learn a claim with provenance and expiry, or search, list, and delete entries.",
+            "description": "Manage durable web knowledge. Learn one concise claim with source_urls to reuse fetched evidence without another search. One strongly supporting trusted host can suffice; other sources need corroboration. Also search, list, or delete entries.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -443,7 +443,14 @@ FUNCTION_TOOL_SCHEMAS = [
                     },
                     "query": {
                         "type": "string",
-                        "description": "Web-validation query for learn, or retrieval query for search.",
+                        "description": "Fallback web query for learn when source_urls are absent, or retrieval query for search.",
+                    },
+                    "source_urls": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 5,
+                        "description": "For learn: public source URLs already read. The server fetches or reuses cached page evidence; no extra discovery search is performed.",
                     },
                     "knowledge_id": {
                         "type": "string",
@@ -586,7 +593,8 @@ FUNCTION_TOOL_SCHEMAS = [
                     "trigger_event": {"type": "string", "enum": ["session_created", "message_sent", "document_created", "memory_added", "research_completed", "email_received", "skill_added"],
                                       "description": "Event name (for trigger_type=event)"},
                     "trigger_count": {"type": "integer", "description": "Fire every N events (for trigger_type=event)"},
-                    "output_target": {"type": "string", "description": "Where results go. Defaults to 'session' (results land in a dedicated chat session the user reads) — this is the right choice for 'summarize for me' / 'send to me'. Do NOT go hunting for the user's email address; only use an email MCP tool name here if the user explicitly asked to be emailed AND an address is already known."}
+                    "output_target": {"type": "string", "description": "Where results go. Defaults to 'session' (results land in a dedicated chat session the user reads) — this is the right choice for 'summarize for me' / 'send to me'. Do NOT go hunting for the user's email address; only use an email MCP tool name here if the user explicitly asked to be emailed AND an address is already known."},
+                    "allow_shell": {"type": "boolean", "description": "Let this task's unattended agent use shell/file-write tools (bash, python, write_file, edit_file). Default false: tasks run with reads + safe tools only. Pass true ONLY when the user explicitly asks the task to run commands or change files."}
                 },
                 "required": ["action"]
             }

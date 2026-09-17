@@ -127,10 +127,11 @@ def open_browser(url):
 if __name__ == "__main__":
     import uvicorn
     # Import the FastAPI app from app.py
-    from app import app
+    from app import app, assert_safe_bind
 
     bind_host = os.getenv("APP_BIND", "127.0.0.1")
     bind_port = int(os.getenv("APP_PORT", "7000"))
+    assert_safe_bind(bind_host)
     url = f"http://{bind_host}:{bind_port}"
 
     if getattr(sys, 'frozen', False):

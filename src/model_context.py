@@ -501,6 +501,12 @@ def estimate_tokens(messages: List[Dict]) -> int:
             for item in content:
                 if isinstance(item, dict) and item.get("type") == "text":
                     total += int(len(item.get("text", "")) * 0.3)
+                elif isinstance(item, dict) and item.get("type") == "image_url":
+                    # Vision input bills real tokens (~1-2k per image depending
+                    # on size/detail) while the base64 payload would otherwise
+                    # read as ~0. Flat allowance keeps vision chats honest for
+                    # the meter and the compaction/trim gates.
+                    total += 1500
         # Tool calls carry real payload too: a tool-only assistant turn is stored
         # with content=None and the actual args (e.g. a create_document body) in
         # tool_calls[].function.arguments. Ignoring them made large tool arguments

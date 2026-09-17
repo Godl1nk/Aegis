@@ -501,7 +501,10 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
             timestamp = datetime.fromisoformat(cached_data["timestamp"])
             if datetime.now() - timestamp < timedelta(hours=2):
                 logger.debug(f"Content cache hit for URL: {url}")
-                return cached_data["data"]
+                # Old cache entries lack redirect provenance. Refresh once so
+                # downstream source trust uses the actual fetched host.
+                if cached_data["data"].get("final_url"):
+                    return cached_data["data"]
             else:
                 cache_file.unlink(missing_ok=True)
                 content_cache_index.pop(cache_key, None)
@@ -544,6 +547,8 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
     # Size bookkeeping shared by every content branch below. getattr keeps
     # plain httpx.Response stand-ins (tests) working without the cap fields.
     _size_fields = {
+        "final_url": str(getattr(response, "url", "")),
+        "fetched_at": int(datetime.now().timestamp()),
         "truncated": getattr(response, "truncated", False),
         "fetched_bytes": len(response.content),
         "total_bytes": getattr(response, "declared_bytes", None),

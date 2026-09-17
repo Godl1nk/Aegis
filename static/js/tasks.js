@@ -1190,6 +1190,15 @@ function _showForm(existing, initTaskType, initTriggerType) {
         </span>
       </label>
 
+      <label class="task-form-notif-toggle" title="Unattended shell/file-write access (bash, python, write_file, edit_file). Only enable for tasks you trust to run commands and change files on their own.">
+        <input type="checkbox" id="task-form-shell" ${existing?.allow_shell ? 'checked' : ''}>
+        <span class="task-form-notif-switch" aria-hidden="true"></span>
+        <span class="task-form-notif-copy">
+          <span>Allow shell access</span>
+          <span>Let this task run commands and edit files unattended. Off = reads and safe tools only.</span>
+        </span>
+      </label>
+
       <div class="task-form-actions">
         <button id="task-form-cancel" class="memory-toolbar-btn"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-1px;margin-right:4px;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button>
         <button id="task-form-save" class="memory-toolbar-btn active"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px;"><polyline points="20 6 9 17 4 12"/></svg>${existing?.id ? 'Save' : 'Create'}</button>
@@ -1625,6 +1634,12 @@ function _showForm(existing, initTaskType, initTriggerType) {
     // Notifications toggle — defaults to true if absent.
     const notifEl = document.getElementById('task-form-notif');
     if (notifEl) payload.notifications_enabled = !!notifEl.checked;
+
+    // Unattended shell/file-write access — defaults to OFF (reads + safe
+    // tools only). Legacy tasks report allow_shell true and keep it unless
+    // explicitly unticked here.
+    const shellEl = document.getElementById('task-form-shell');
+    if (shellEl) payload.allow_shell = !!shellEl.checked;
 
     // Task type specifics
     if (taskType === 'llm' || taskType === 'research') {

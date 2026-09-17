@@ -73,19 +73,13 @@ def parse_skill_source(url: str) -> ResolvedSource:
     if not raw:
         raise SkillImportError("URL is required")
 
-    # skills.sh often links to GitHub; try to unwrap ?url= or redirect target later.
-    if "skills.sh" in raw and "github.com" not in raw:
-        ok, reason = check_outbound_url(raw)
-        if not ok:
-            raise SkillImportError(reason)
-        with httpx.Client(follow_redirects=True, timeout=20.0) as client:
-            r = client.get(raw)
+    if _github_host(raw) == "skills.sh":
+        with httpx.Client(timeout=20.0) as client:
+            r = _checked_get(client, raw, allow_skills=True)
             if r.status_code >= 400:
                 raise _github_response_error(r)
             final = str(r.url)
-            _assert_github_url(final, context="redirect target")
-            # Page may embed a github link; prefer final URL if redirected.
-            if "github.com" in final:
+            if _github_host(final) in _GITHUB_HOSTS:
                 raw = final
             else:
                 m = re.search(r"https?://github\.com/[^\s\"')]+", r.text or "")
@@ -163,15 +157,33 @@ def _github_response_error(response: httpx.Response) -> SkillImportError:
     return SkillImportError(f"GitHub request failed ({status})")
 
 
+def _checked_get(
+    client: httpx.Client, url: str, headers: Dict[str, str] | None = None,
+    *, allow_skills: bool = False,
+) -> httpx.Response:
+    current = url
+    for _ in range(5):
+        if not (allow_skills and _github_host(current) == "skills.sh"):
+            _assert_github_url(current, context="URL")
+        ok, reason = check_outbound_url(current, block_private=True)
+        if not ok:
+            raise SkillImportError(reason)
+        r = client.get(current, headers=headers, follow_redirects=False)
+        if r.status_code in (301, 302, 303, 307, 308):
+            loc = r.headers.get("location")
+            if not loc:
+                raise SkillImportError("GitHub redirect missing Location header")
+            current = str(httpx.URL(current).join(loc))
+            continue
+        return r
+    raise SkillImportError("too many redirects")
+
+
 def _fetch_bytes(url: str) -> bytes:
-    ok, reason = check_outbound_url(url)
-    if not ok:
-        raise SkillImportError(reason)
-    with httpx.Client(follow_redirects=True, timeout=30.0) as client:
-        r = client.get(url, headers={"Accept": "application/vnd.github+json"})
+    with httpx.Client(timeout=30.0) as client:
+        r = _checked_get(client, url)
         if r.status_code >= 400:
             raise _github_response_error(r)
-        _assert_github_url(str(r.url), context="redirect target")
         if len(r.content) > MAX_FILE_BYTES:
             raise SkillImportError(f"file too large: {url}")
         return r.content
@@ -189,14 +201,10 @@ def _list_github_dir(src: ResolvedSource, rel_dir: str, out: Dict[str, str], *, 
     if depth > 4 or len(out) >= MAX_FILES:
         return
     url = _api_contents_url(src, rel_dir)
-    ok, reason = check_outbound_url(url)
-    if not ok:
-        raise SkillImportError(reason)
-    with httpx.Client(follow_redirects=True, timeout=30.0) as client:
-        r = client.get(url, headers={"Accept": "application/vnd.github+json"})
+    with httpx.Client(timeout=30.0) as client:
+        r = _checked_get(client, url, headers={"Accept": "application/vnd.github+json"})
         if r.status_code >= 400:
             raise _github_response_error(r)
-        _assert_github_url(str(r.url), context="redirect target")
         entries = r.json()
     if not isinstance(entries, list):
         raise SkillImportError("expected a directory on GitHub")

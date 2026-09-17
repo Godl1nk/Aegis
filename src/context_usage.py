@@ -1,0 +1,32 @@
+"""Read-only context accounting for the composer (no prompt-building side effects)."""
+
+from src.context_compactor import COMPACT_THRESHOLD
+from src.model_context import estimate_tokens, get_context_length_known
+
+
+def session_context_usage(session):
+    context_length, known = get_context_length_known(session.endpoint_url, session.model)
+    messages = session.get_context_messages()
+    result = {
+        "model": session.model,
+        "context_length": context_length if known else None,
+        "context_length_known": known,
+        "used_tokens": estimate_tokens(messages),
+        "usage_source": "estimated",
+        "basis": "history",
+        "compact_threshold": COMPACT_THRESHOLD,
+        "compacted": any((m.get("metadata") or {}).get("compacted") for m in messages),
+    }
+    # Only the most recent assistant request can be reused. Never sum the
+    # cumulative billing input_tokens from a multi-round agent turn.
+    latest = messages[-1] if messages else {}
+    metadata = latest.get("metadata") or {}
+    context_tokens = metadata.get("context_tokens")
+    output_tokens = metadata.get("context_output_tokens", 0)
+    if (latest.get("role") == "assistant" and metadata.get("model") == session.model
+            and isinstance(context_tokens, (int, float)) and context_tokens >= 0
+            and isinstance(output_tokens, (int, float)) and output_tokens >= 0):
+        result.update(used_tokens=context_tokens + output_tokens,
+                      usage_source=metadata.get("context_usage_source", metadata.get("usage_source", "real")), basis="request",
+                      trimmed=bool(metadata.get("context_trimmed")))
+    return result

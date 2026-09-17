@@ -2381,6 +2381,56 @@ body.bg-pattern-sparkles {
     #chat-form { display:none; }
 
     /* Unified chat input bar */
+    .composer-context {
+      --context-color: var(--muted, #888);
+      --context-fill: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+      min-height: 32px;
+      padding: 3px 5px;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--context-color);
+      font: inherit;
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      cursor: help;
+    }
+    .composer-context[data-level="normal"] { --context-color: var(--green, #98c379); }
+    .composer-context[data-level="warning"] { --context-color: var(--yellow, #e5b567); }
+    .composer-context[data-level="danger"] { --context-color: var(--red, #e06c75); }
+    .composer-context:hover { background: var(--panel); }
+    .composer-context:focus-visible { outline: 2px solid var(--context-color); outline-offset: 2px; }
+    .composer-context circle { fill: none; stroke-width: 2.5; }
+    .composer-context .context-track { stroke: var(--border, #555); }
+    .composer-context .context-fill {
+      stroke: currentColor;
+      stroke-dasharray: var(--context-fill) 100;
+      transform: rotate(-90deg);
+      transform-origin: center;
+    }
+    .composer-context-details {
+      position: fixed;
+      z-index: 10000;
+      width: min(330px, calc(100vw - 16px));
+      max-height: min(440px, 70vh);
+      overflow-y: auto;
+      box-sizing: border-box;
+      padding: 14px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--panel);
+      color: var(--fg);
+      box-shadow: 0 8px 24px #0004;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .composer-context-details .context-heading { font-weight: 600; margin-bottom: 8px; }
+    .composer-context-details .context-note { opacity: 0.75; margin-top: 8px; }
+    .composer-context-details .context-status { color: var(--yellow, #e5b567); margin-top: 8px; }
     .chat-input-bar {
       background: var(--input-bg, var(--panel));
       border: 1px solid var(--input-border, var(--border));
@@ -9892,7 +9942,23 @@ body.fullwidth-chat .chat-history {
   50% { opacity: 1; }
 }
 
-/* ===== AGENT MULTI-BUBBLE ===== */
+/* ===== ONE CARD PER AGENT RESPONSE ===== */
+.msg.agent-turn { display: flex; flex-direction: column; gap: 8px; }
+.agent-turn > .role { order: 0; }
+.agent-turn > .agent-turn-activity { order: 1; margin: 0; }
+.agent-turn > .agent-turn-answer { order: 2; min-width: 0; }
+.agent-turn > .msg-footer { order: 3; }
+.agent-turn-answer:empty { display: none; }
+.agent-turn-round > .role { display: none; }
+.agent-turn-round { margin: 0; padding: 0; border: 0; min-width: 0; }
+.agent-turn-activity > summary { cursor: pointer; font-size: 12px; overflow-wrap: anywhere; }
+.agent-turn-steps { padding: 8px 0 0; }
+.agent-turn-steps > .agent-turn-round { margin-bottom: 8px; }
+.agent-turn .agent-thread { width: auto; max-width: 100%; margin: 4px 0; }
+.agent-turn .agent-thinking-dots { margin: 4px 0; }
+.agent-turn-activity[hidden] { display: none; }
+
+/* Legacy transcript bubbles (older renderers / non-agent callers). */
 .msg.msg-tool {
   display: none; /* legacy — hidden, replaced by agent-thread */
 }
@@ -18586,6 +18652,47 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
   text-underline-offset: 2px;
 }
 .skill-form-raw-btn:hover { color: var(--fg); }
+.skill-tool-picker {
+  flex: none;
+  min-width: 0;
+  margin: 4px 0 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.skill-tool-picker legend { font-size: 12px; font-weight: 600; padding: 0 4px; }
+.skill-tool-picker summary { cursor: pointer; overflow-wrap: anywhere; font-size: 12px; }
+.skill-tool-picker .memory-search-input { width: 100%; box-sizing: border-box; margin: 10px 0; }
+.skill-tool-options { max-height: 200px; overflow-y: auto; display: grid; gap: 4px; }
+.skill-tool-option { display: flex; align-items: center; gap: 8px; padding: 6px; font-size: 12px; cursor: pointer; overflow-wrap: anywhere; }
+.skill-tool-option input { flex: none; width: 16px; height: 16px; accent-color: var(--accent, var(--red)); }
+.skill-tool-option:hover { background: color-mix(in srgb, var(--fg) 5%, transparent); }
+.skill-tool-status:empty { display: none; }
+.knowledge-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 8px; }
+.knowledge-panel h2 { margin: 0; }
+.knowledge-stats { color: var(--accent, var(--red)); font-size: 12px; }
+.knowledge-list { overflow-y: auto; min-height: 0; flex: 1; display: flex; flex-direction: column; gap: 10px; }
+.knowledge-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; flex: none; min-width: 0; }
+.knowledge-card-header, .knowledge-actions, .knowledge-pagination { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.knowledge-badge { border-radius: 4px; padding: 2px 6px; font-size: 11px; border: 1px solid var(--border); }
+.knowledge-badge.fresh { color: var(--accent, var(--red)); }
+.knowledge-badge.expired { font-weight: 600; }
+.knowledge-claim { white-space: pre-wrap; overflow-wrap: anywhere; margin: 10px 0; }
+.knowledge-details { font-size: 12px; overflow-wrap: anywhere; }
+.knowledge-details summary { cursor: pointer; }
+.knowledge-details dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; }
+.knowledge-details dt { opacity: .65; }
+.knowledge-details dd { margin: 0; }
+.knowledge-sources { padding-left: 18px; }
+.knowledge-sources li { margin-bottom: 6px; }
+.knowledge-actions { margin-top: 10px; justify-content: flex-end; }
+.knowledge-pagination { justify-content: space-between; flex: none; font-size: 12px; }
+.knowledge-outcome:empty, #knowledge-status:empty { display: none; }
+.knowledge-empty { padding: 20px 4px; }
+@media (max-width: 480px) {
+  .knowledge-details dl { grid-template-columns: 1fr; }
+  .knowledge-details dd { margin-bottom: 5px; }
+}
 .skill-md-editor {
   flex: 1 1 auto;
   min-height: 0;

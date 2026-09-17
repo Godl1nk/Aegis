@@ -10,6 +10,7 @@ import uiModule from './ui.js';
 import sessionModule from './sessions.js';
 import chatRenderer from './chatRenderer.js';
 import chatStream from './chatStream.js';
+import { updateContextUsage } from './contextUsage.js';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
 import spinnerModule from './spinner.js';
@@ -24,6 +25,7 @@ import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
 import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composerArrowUpRecall.js';
 import workspaceModule from './workspace.js';
+import { createAgentTurn, mergeAgentTurnActivity } from './agentTurn.js';
 
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
@@ -440,8 +442,8 @@ import workspaceModule from './workspace.js';
     };
   }
 
-  function _showImageGenerationPlaceholder(prompt, toolName = '') {
-    const chatBox = document.getElementById('chat-history');
+  function _showImageGenerationPlaceholder(prompt, toolName = '', host = null) {
+    const chatBox = host || document.getElementById('chat-history');
     if (!chatBox) return null;
     let displayPrompt = (prompt || '').trim();
     if (displayPrompt.startsWith('{')) {
@@ -477,7 +479,7 @@ import workspaceModule from './workspace.js';
       return _imageGenerationPlaceholder;
     }
     const wrap = document.createElement('div');
-    wrap.className = 'msg msg-ai generated-image-loading-wrap';
+    wrap.className = host ? 'generated-image-loading-wrap' : 'msg msg-ai generated-image-loading-wrap';
     const body = document.createElement('div');
     body.className = 'body';
     const card = document.createElement('div');
@@ -870,6 +872,8 @@ import workspaceModule from './workspace.js';
         if (el._spinner) el._spinner.destroy();
         el.remove();
       });
+      // Stop actions belong to the response card, not its first archived round.
+      currentHolder = currentHolder?.closest('.agent-turn') || currentHolder;
       // No text accumulated — remove the empty holder with spinner
       if (currentHolder && !currentAccumulated) {
         if (currentSpinner) { currentSpinner.destroy(); currentSpinner = null; }
@@ -1129,6 +1133,9 @@ import workspaceModule from './workspace.js';
     // round's reasoning in its own <think>…</think> instead of leaking rounds 2+ as text.
     let _thinkOpen = false;
     let holder = null;
+    let agentTurn = null;
+    let agentFinalRaw = null;
+    let turnCompleted = false;
     let finalMeta = null;
     let spinner = null;
     let timedOut = false;
@@ -1682,7 +1689,7 @@ import workspaceModule from './workspace.js';
       // Streaming TTS: synthesize sentence-by-sentence during streaming
       streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
       if (streamingTTS) window.aiTTSManager.streamingStart();
-      // Multi-bubble agent tracking
+      // Per-round render targets inside a single agent response card.
       let roundHolder = holder;       // Current AI text bubble (changes per round)
       let roundText = '';             // Text accumulated for current round
       let currentToolBubble = null;   // Current tool execution bubble
@@ -1693,8 +1700,16 @@ import workspaceModule from './workspace.js';
       let _sourcesData = null;        // Raw sources data for rebuilding
       let _sourcesType = '';          // 'web' or 'research'
       let _findingsData = null;      // Raw findings data for collapsible box
+      function _ensureAgentTurn() {
+        if (!agentTurn) {
+          agentTurn = createAgentTurn(box, holder);
+          agentTurn.root.classList.add('streaming');
+        }
+        return agentTurn;
+      }
       // _keepResearchOn removed — clarification state now persisted server-side via DB mode
       function _metricsTargetForTurn() {
+        if (agentTurn) return agentTurn.root;
         const visibleRound = (roundHolder && roundHolder.style.display !== 'none') ? roundHolder : null;
         const visibleText = visibleRound ? (visibleRound.querySelector('.body')?.textContent || '').trim() : '';
         if (lastToolThread && lastToolThread.isConnected && (!visibleRound || !visibleText || visibleText === 'Done.')) {
@@ -1717,10 +1732,10 @@ import workspaceModule from './workspace.js';
         return contentDiv;
       }
       function _ensureVisibleRoundForDelta() {
-        if (!roundHolder || roundHolder.style.display !== 'none') return;
+        if (roundHolder && roundHolder.style.display !== 'none') return;
         const box = document.getElementById('chat-history');
         if (!box) {
-          roundHolder.style.display = '';
+          if (roundHolder) roundHolder.style.display = '';
           return;
         }
         const newWrap = document.createElement('div');
@@ -1736,7 +1751,7 @@ import workspaceModule from './workspace.js';
         const newBody = document.createElement('div');
         newBody.className = 'body';
         newWrap.appendChild(newBody);
-        box.appendChild(newWrap);
+        if (agentTurn) agentTurn.appendRound(newWrap); else box.appendChild(newWrap);
         if (lastToolThread && lastToolThread.isConnected) lastToolThread.classList.add('has-bottom');
         roundHolder = newWrap;
         roundText = '';
@@ -1797,7 +1812,7 @@ import workspaceModule from './workspace.js';
       function _showThinkingSpinner(label) {
         if (document.querySelector('.agent-thinking-dots')) return;
         const _thinkMsg = document.createElement('div');
-        _thinkMsg.className = 'msg msg-ai agent-thinking-dots';
+        _thinkMsg.className = agentTurn ? 'agent-thinking-dots' : 'msg msg-ai agent-thinking-dots';
         const _thinkBody = document.createElement('div');
         _thinkBody.className = 'body';
         const _ts = spinnerModule.create(label || 'Thinking', 'right', 'wave');
@@ -1805,7 +1820,7 @@ import workspaceModule from './workspace.js';
         _ts.start(120);
         _thinkMsg._spinner = _ts;
         _thinkMsg.appendChild(_thinkBody);
-        document.getElementById('chat-history').appendChild(_thinkMsg);
+        (agentTurn?.answer || document.getElementById('chat-history')).appendChild(_thinkMsg);
         uiModule.scrollHistory();
       }
 
@@ -2634,7 +2649,7 @@ import workspaceModule from './workspace.js';
                   contBtn.className = 'continue-btn';
                   contBtn.title = 'Continue the task';
                   contBtn.textContent = 'Continue ▸';
-                  const _holder = currentHolder;
+                  const _holder = agentTurn?.root || currentHolder;
                   contBtn.addEventListener('click', () => {
                     note.remove();
                     _hideUserBubble = true;
@@ -2647,7 +2662,7 @@ import workspaceModule from './workspace.js';
                     }
                   });
                   note.appendChild(contBtn);
-                  _chatBox.appendChild(note);
+                  (agentTurn?.answer || _chatBox).appendChild(note);
                   try { note.scrollIntoView({ block: 'end', behavior: 'smooth' }); } catch (_) { uiModule.scrollHistory && uiModule.scrollHistory(); }
                 }
               } else if (json.type === 'model_actual') {
@@ -2730,12 +2745,16 @@ import workspaceModule from './workspace.js';
               } else if (json.type === 'memories_used') {
                 if (_isBg) continue;
                 holder._memoriesUsed = json.data;
+              } else if (json.type === 'context_usage') {
+                if (!_isBg) updateContextUsage(streamSessionId, json.data);
               } else if (json.type === 'compacted') {
                 if (!_isBg) {
+                  updateContextUsage(streamSessionId, { compacted: true });
                   uiModule.showToast('Context compacted — older messages summarized');
                 }
               } else if (json.type === 'context_trimmed') {
                 if (!_isBg) {
+                  updateContextUsage(streamSessionId, { trimmed: true });
                   const d = json.data || {};
                   const before = Number(d.messages_before || 0);
                   const after = Number(d.messages_after || 0);
@@ -2744,6 +2763,15 @@ import workspaceModule from './workspace.js';
                 }
               } else if (json.type === 'metrics') {
                 metrics = json.data;
+                if (!_isBg && metrics) updateContextUsage(streamSessionId, {
+                  model: metrics.model,
+                  // Agent input_tokens are cumulative billing, not context.
+                  used_tokens: metrics.context_tokens != null
+                    ? metrics.context_tokens + (metrics.context_output_tokens || 0)
+                    : metrics.context_percent != null && metrics.context_length
+                      ? Math.round(metrics.context_percent * metrics.context_length / 100) : metrics.input_tokens,
+                  usage_source: metrics.context_usage_source || metrics.usage_source || 'real', basis: 'request',
+                });
                 if (!_isBg && holder && metrics) {
                   holder._requestedModel = metrics.requested_model || holder._requestedModel || modelName;
                   holder._actualModel = metrics.model || holder._actualModel || holder._requestedModel;
@@ -2763,6 +2791,7 @@ import workspaceModule from './workspace.js';
                 // can be edited/deleted immediately, without reloading the chat.
                 if (_isBg) continue;
                 if (currentHolder && json.id) currentHolder.dataset.dbId = json.id;
+                if (agentTurn && json.id) agentTurn.root.dataset.dbId = json.id;
 
               } else if (json.type === 'tool_start') {
                 if (_isBg || _backgroundStreams.has(streamSessionId)) continue;
@@ -2813,13 +2842,16 @@ import workspaceModule from './workspace.js';
                   }
                 }
 
+                // Keep completed rounds and tool output in one collapsed log.
+                _ensureAgentTurn().archiveRound(roundHolder);
+
                 // Track tool name for contextual spinner labels
                 _lastToolName = json.tool || '';
 
                 // --- Image tools get a dedicated "Creating image" card, not the
                 // generic tool node. Suppress the thread node and continue.
                 if (_isImageToolName(json.tool)) {
-                  _showImageGenerationPlaceholder(json.command || '', (json.tool || '').toLowerCase());
+                  _showImageGenerationPlaceholder(json.command || '', (json.tool || '').toLowerCase(), agentTurn.answer);
                   currentToolBubble = null;
                   _cancelThinkingTimer();
                   _removeThinkingSpinner();
@@ -2828,7 +2860,7 @@ import workspaceModule from './workspace.js';
 
                 // --- Thread timeline: group tools in a thread container ---
                 const cmd = json.command || '';
-                const chatBox = document.getElementById('chat-history');
+                const chatBox = agentTurn.steps;
                 // Find existing thread to append to — check last few children
                 // (agent_step may insert an empty msg-ai between tool rounds)
                 let threadWrap = null;
@@ -2841,7 +2873,7 @@ import workspaceModule from './workspace.js';
                   // Skip hidden (empty) bubbles and thinking spinners
                   if (child.style.display === 'none' || child.classList.contains('agent-thinking-dots')) continue;
                   // Stop if we hit a visible message bubble (has real content between tools)
-                  if (child.classList.contains('msg')) break;
+                  if (child.classList.contains('msg') || child.classList.contains('agent-turn-round')) break;
                 }
                 if (threadWrap) {
                   // Continuing an existing thread — remove has-bottom (agent_step may have set it
@@ -2870,6 +2902,7 @@ import workspaceModule from './workspace.js';
                 node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${toolIcon}</span><span class="agent-thread-tool">${esc(toolLabel)}</span><span class="agent-thread-wave">▁▂▃</span></div><div class="agent-thread-content">${cmdHtml}</div>`;
                 // Expand/collapse via delegated click handler (init at module bottom).
                 threadWrap.appendChild(node);
+                agentTurn.update();
                 currentToolBubble = node;
                 // Animate the wave
                 const waveEl = node.querySelector('.agent-thread-wave');
@@ -2943,7 +2976,8 @@ import workspaceModule from './workspace.js';
                 if (_isBg || _backgroundStreams.has(streamSessionId)) continue;
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
-                const host = (currentToolBubble && currentToolBubble.querySelector('.agent-thread-content')) || currentToolBubble || document.getElementById('chat-history');
+                // Never hide an approval needed to continue inside Activity.
+                const host = agentTurn?.answer || (currentToolBubble && currentToolBubble.querySelector('.agent-thread-content')) || currentToolBubble || document.getElementById('chat-history');
                 _renderApprovalCard(json, host);
 
               } else if (json.type === 'tool_output') {
@@ -3009,6 +3043,7 @@ import workspaceModule from './workspace.js';
                   currentToolBubble.className = 'agent-thread-node' + (ok ? '' : ' error') + (_wasOpen ? ' open' : '');
                   currentToolBubble.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(json.tool)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${cmdHtml2}${outHtml}${diffHtml}</div>`;
                   chatRenderer.compactAgentToolThread(currentToolBubble.closest('.agent-thread'));
+                  agentTurn?.update();
                   // Reset so thinking spinner between tools says "Thinking" not the old tool's label
                   _lastToolName = '';
                   uiModule.scrollHistory();
@@ -3026,11 +3061,12 @@ import workspaceModule from './workspace.js';
                     _imagePayload.image_quality,
                     _imagePayload.image_id,
                   );
+                  if (agentTurn) imageBubble.classList.remove('msg', 'msg-ai');
                   if (_imageGenerationPlaceholder && _imageGenerationPlaceholder.isConnected) {
                     _imageGenerationPlaceholder.replaceWith(imageBubble);
                     _imageGenerationPlaceholder = null;
                   } else {
-                    chatBox.appendChild(imageBubble);
+                    (agentTurn?.answer || chatBox).appendChild(imageBubble);
                   }
                   uiModule.scrollHistory();
                   // Notify gallery to refresh if open
@@ -3167,7 +3203,7 @@ import workspaceModule from './workspace.js';
                   // leaving the bubble with just a thinking box). Without this
                   // the button was silently dropped and a closed document had
                   // no way back short of the Library.
-                  const _target = _nodes[_nodes.length - 1]
+                  const _target = agentTurn?.answer || _nodes[_nodes.length - 1]
                     || (_scope && _scope.querySelector('.body'))
                     || _scope;
                   if (_target) {
@@ -3252,7 +3288,7 @@ import workspaceModule from './workspace.js';
                 const newBody = document.createElement('div');
                 newBody.className = 'body';
                 newWrap.appendChild(newBody);
-                box.appendChild(newWrap);
+                _ensureAgentTurn().appendRound(newWrap);
                 roundHolder = newWrap;
                 roundText = '';
                 // Destroy any previous spinner before creating new one
@@ -3273,7 +3309,7 @@ import workspaceModule from './workspace.js';
                 budgetDiv.style.cssText = 'font-size:11px;opacity:0.6;font-style:italic;padding:4px 8px;margin:4px 0;';
                 budgetDiv.textContent = `Tool budget reached (${json.used}/${json.limit} calls). Agent stopped.`;
                 const chatBox = document.getElementById('chat-history');
-                chatBox.appendChild(budgetDiv);
+                (agentTurn?.answer || chatBox).appendChild(budgetDiv);
 
               } else if (json.type === 'teacher_takeover') {
                 if (_isBg) continue;
@@ -3289,7 +3325,7 @@ import workspaceModule from './workspace.js';
                 const teacherName = json.teacher_model || 'teacher';
                 const why = json.student_failure ? ` &mdash; <span style="opacity:0.7">${esc(json.student_failure)}</span>` : '';
                 banner.innerHTML = `<strong>Teacher takeover:</strong> escalating to <code>${esc(teacherName)}</code>${why}`;
-                chatBox.appendChild(banner);
+                (agentTurn?.answer || chatBox).appendChild(banner);
                 // Reset round bubble state so the teacher's first text starts a new bubble
                 roundHolder = null;
                 roundText = '';
@@ -3304,7 +3340,7 @@ import workspaceModule from './workspace.js';
                 note.className = 'skill-saved-note';
                 note.style.cssText = 'margin:6px 0;padding:6px 10px;border-left:3px solid #4a8a4a;background:rgba(74,138,74,0.07);font-size:12px;color:var(--fg);border-radius:4px;';
                 note.innerHTML = `<strong>Skill learned:</strong> <code>${esc(json.name || '')}</code>${json.category ? ` <span style="opacity:0.6">[${esc(json.category)}]</span>` : ''}`;
-                chatBox.appendChild(note);
+                (agentTurn?.answer || chatBox).appendChild(note);
                 uiModule.scrollHistory();
 
               } else if (json.type === 'escalation_failed' || json.type === 'skill_save_failed') {
@@ -3315,7 +3351,7 @@ import workspaceModule from './workspace.js';
                 note.style.cssText = 'margin:6px 0;padding:6px 10px;border-left:3px solid #8a4a4a;background:rgba(138,74,74,0.07);font-size:12px;color:var(--fg);border-radius:4px;';
                 const label = json.type === 'escalation_failed' ? 'Teacher could not solve it' : 'Skill not saved';
                 note.innerHTML = `<strong>${label}:</strong> <span style="opacity:0.75">${esc(json.reason || '')}</span>`;
-                chatBox.appendChild(note);
+                (agentTurn?.answer || chatBox).appendChild(note);
                 uiModule.scrollHistory();
 
               } else if (json.error) {
@@ -3342,6 +3378,7 @@ import workspaceModule from './workspace.js';
         // auto-recovering it (the generic "closed" text matched as recoverable).
         throw new Error(_streamErrText || 'Stream closed before completion');
       }
+      turnCompleted = true;
 
       _renderStream();
       if (spinner && spinner.element) { try { spinner.destroy(); } catch (_) {} spinner = null; }
@@ -3377,9 +3414,9 @@ import workspaceModule from './workspace.js';
         // resume mechanism as the user-stop "[Message interrupted]" button.
         try {
           const _usedTools = !!(lastToolThread && lastToolThread.isConnected);
-          const _stallHost = _usedTools
+          const _stallHost = agentTurn?.answer || (_usedTools
             ? lastToolThread
-            : ((roundHolder && roundHolder.querySelector('.body')) || holder.querySelector('.body') || holder);
+            : ((roundHolder && roundHolder.querySelector('.body')) || holder.querySelector('.body') || holder));
           const _proseLen = (accumulated || '').replace(/<[^>]*>/g, '').trim().length;
           if (_usedTools && _proseLen < 24 && !_stallHost.querySelector('.agent-continue-btn')) {
             const _stall = document.createElement('div');
@@ -3416,6 +3453,7 @@ import workspaceModule from './workspace.js';
 
         // Finalize the last round's bubble — flatten stream-content wrapper for clean DOM
         const finalDisplay = _streamDisplayText(roundText, { final: _docFenceOpened });
+        if (agentTurn) agentFinalRaw = finalDisplay;
         if (finalDisplay.trim()) {
           var _body4 = roundHolder.querySelector('.body');
           // Preserve sources expanded state before final render
@@ -3519,7 +3557,7 @@ import workspaceModule from './workspace.js';
             item.innerHTML = `<strong>${_esc(src.filename)}</strong> <span class="rag-similarity">${(src.similarity * 100).toFixed(1)}%</span><div class="rag-snippet">${_esc(src.snippet)}</div>`;
             details.appendChild(item);
           });
-          holder.querySelector('.body').appendChild(details);
+          (agentTurn?.answer || holder.querySelector('.body')).appendChild(details);
         }
 
         // Hide first bubble if it has no visible text content (e.g. agent went straight to tools)
@@ -3530,7 +3568,7 @@ import workspaceModule from './workspace.js';
         }
 
         // Attach footer to the last visible bubble (roundHolder for multi-round agent, holder for single)
-        const footerTarget = (roundHolder && roundHolder !== holder && roundHolder.style.display !== 'none') ? roundHolder : holder;
+        const footerTarget = agentTurn?.root || ((roundHolder && roundHolder !== holder && roundHolder.style.display !== 'none') ? roundHolder : holder);
         if (!footerTarget.querySelector('.msg-footer')) {
           footerTarget.appendChild(createMsgFooter(footerTarget));
         }
@@ -3539,9 +3577,10 @@ import workspaceModule from './workspace.js';
           _appendViewReportLink(footerTarget, streamSessionId);
         }
         // Also store raw on the footer target so copy/TTS work
-        if (footerTarget !== holder) footerTarget.dataset.raw = accumulated;
-        if (addAITTSButton && accumulated && window.aiTTSManager?._provider !== 'disabled' && window.aiTTSManager?.available) {
-          addAITTSButton(footerTarget, accumulated);
+        const responseRaw = agentTurn ? finalDisplay : accumulated;
+        if (footerTarget !== holder) footerTarget.dataset.raw = responseRaw;
+        if (addAITTSButton && responseRaw && window.aiTTSManager?._provider !== 'disabled' && window.aiTTSManager?.available) {
+          addAITTSButton(footerTarget, responseRaw);
         }
         // TTS auto-play: streaming mode flushes remaining text, non-streaming enqueues full message
         if (accumulated && window.aiTTSManager && window.aiTTSManager.autoPlay) {
@@ -3580,7 +3619,7 @@ import workspaceModule from './workspace.js';
 
         // Merge with previous stopped message if this was a continue
         if (_pendingContinue) {
-          const prevEl = _pendingContinue;
+          const prevEl = mergeAgentTurnActivity(_pendingContinue, footerTarget);
           _pendingContinue = null;
           const prevBody = prevEl.querySelector('.body');
           const newBody = footerTarget.querySelector('.body');
@@ -3696,7 +3735,7 @@ import workspaceModule from './workspace.js';
             // reattaches the live stream via _checkServerStream → resumeStream.
             const _reconnectSid = streamSessionId;
             currentAbort = null;
-            if (holder && holder.parentNode) holder.remove();
+            if (holder && holder.parentNode) (agentTurn?.root || holder).remove();
             // Defer so this stream's finally() clears isStreaming first —
             // resumeStream / _checkServerStream refuse while a stream is still
             // marked active for the session.
@@ -3728,19 +3767,20 @@ import workspaceModule from './workspace.js';
           // User-initiated stop (or browser navigation abort).
           // Stopped before any text arrived — keep the bubble as a
           // "Cancelled by user" record (so it survives a refresh).
-          if (holder && !accumulated) {
-            _renderCancelledBubble(holder);
+          const stoppedHolder = agentTurn?.root || holder;
+          if (stoppedHolder && !accumulated && !stoppedHolder.querySelector('.stopped-indicator')) {
+            _renderCancelledBubble(stoppedHolder);
           }
 
           // But just in case the stop button didn't render it, render it here
-          if (holder && accumulated && !currentHolder) {
-            holder.dataset.raw = accumulated;
-            holder.querySelector('.body').innerHTML = markdownModule.processWithThinking(
+          if (stoppedHolder && accumulated && !currentHolder && !stoppedHolder.querySelector('.stopped-indicator')) {
+            stoppedHolder.dataset.raw = accumulated;
+            stoppedHolder.querySelector('.body').innerHTML = markdownModule.processWithThinking(
               markdownModule.squashOutsideCode(accumulated)
             );
 
             if (window.hljs) {
-              holder.querySelectorAll('pre code').forEach((block) => {
+              stoppedHolder.querySelectorAll('pre code').forEach((block) => {
                 window.hljs.highlightElement(block);
               });
             }
@@ -3757,7 +3797,7 @@ import workspaceModule from './workspace.js';
             continueBtn.addEventListener('click', () => {
               stoppedIndicator.remove();
               _hideUserBubble = true;
-              _pendingContinue = holder;
+              _pendingContinue = stoppedHolder;
               const cutoff = accumulated;
               const msgInput = uiModule.el('message');
               if (msgInput) {
@@ -3767,14 +3807,14 @@ import workspaceModule from './workspace.js';
               }
             });
             stoppedIndicator.appendChild(continueBtn);
-            holder.querySelector('.body').appendChild(stoppedIndicator);
+            stoppedHolder.querySelector('.body').appendChild(stoppedIndicator);
 
             // Tell server to mark this message as stopped
             const _sid2 = sessionModule.getCurrentSessionId();
             if (_sid2) fetch(`${API_BASE}/api/session/${_sid2}/mark-stopped`, { method: 'POST' }).catch(e => console.warn('mark-stopped failed:', e));
 
-            if (!holder.querySelector('.msg-footer')) {
-              holder.appendChild(createMsgFooter(holder));
+            if (!stoppedHolder.querySelector('.msg-footer')) {
+              stoppedHolder.appendChild(createMsgFooter(stoppedHolder));
             }
 
             uiModule.scrollHistory();
@@ -3817,7 +3857,7 @@ import workspaceModule from './workspace.js';
           }
           if (_serverStillRunning) {
             console.warn('[stream-recover] Fetch died but server run is still active — reconnecting instead of re-prompting.');
-            if (holder && holder.parentNode) holder.remove();
+            if (holder && holder.parentNode) (agentTurn?.root || holder).remove();
             const _reSid = streamSessionId;
             // Defer so this stream's finally clears isStreaming first
             // (selectSession → resumeStream refuse while marked streaming).
@@ -3833,7 +3873,7 @@ import workspaceModule from './workspace.js';
           // server run is really gone, up to the cap. Deterministic errors
           // (unsupported tools, 4xx/5xx, parse failures) surface right away
           // instead of burning the nudge budget on a guaranteed-to-fail retry.
-          else if (!(_isRecoverableStreamErr(err) && _tryAutoRecover(holder, accumulated, streamSessionId))) {
+          else if (!(_isRecoverableStreamErr(err) && _tryAutoRecover(agentTurn?.root || holder, accumulated, streamSessionId))) {
             const errorHolder = document.querySelector('.msg-ai:last-of-type .body');
             if (errorHolder) {
               let errMsg = `Error: ${err.message}`;
@@ -3848,6 +3888,10 @@ import workspaceModule from './workspace.js';
       }
     } finally {
       clearResponseTimeout();
+      if (agentTurn?.root.isConnected) {
+        agentTurn.finish({ raw: agentFinalRaw ?? accumulated, dbId: holder?.dataset.dbId, interrupted: !turnCompleted });
+        agentTurn.sync(holder);
+      }
       clearProcessingProbe();
       clearFirstTokenWaitTimers();
       // Catch-all teardown of the "Thinking" spinner. The success and catch

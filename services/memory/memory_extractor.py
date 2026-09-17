@@ -528,7 +528,9 @@ async def audit_memories(
     try:
         from src.llm_core import llm_call_async
 
-        existing = memory_manager.load(owner=owner)
+        # Source-backed knowledge has its own validation workflow. Never let
+        # a personal-memory tidy rewrite claims while retaining old evidence.
+        existing = [m for m in memory_manager.load(owner=owner) if m.get("kind") != "knowledge"]
         if not existing:
             logger.info("Memory audit: nothing to audit")
             return {"before": 0, "after": 0}
@@ -652,14 +654,15 @@ async def audit_memories(
         removed_ids = [e["id"] for e in existing if e.get("id") not in final_ids]
         if owner:
             all_entries = memory_manager.load_all()
-            other_entries = [e for e in all_entries if e.get("owner") != owner and (e.get("owner") is not None)]
+            other_entries = [e for e in all_entries if e.get("kind") == "knowledge"
+                             or (e.get("owner") != owner and e.get("owner") is not None)]
             # Also keep legacy entries that weren't part of this audit
             for e in all_entries:
                 if e.get("owner") is None and e["id"] not in final_ids and e["id"] not in {o["id"] for o in other_entries}:
                     other_entries.append(e)
             saved_entries = final_entries + other_entries
         else:
-            saved_entries = final_entries
+            saved_entries = final_entries + [e for e in memory_manager.load_all() if e.get("kind") == "knowledge"]
         memory_manager.save(saved_entries)
         if owner and removed_ids and hasattr(memory_manager, "delete_entry"):
             for rid in removed_ids:

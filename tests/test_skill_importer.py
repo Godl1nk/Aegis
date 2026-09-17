@@ -1,4 +1,5 @@
 """Skill URL importer — GitHub path parsing."""
+import httpx
 import pytest
 
 from services.memory.skill_importer import (
@@ -9,6 +10,86 @@ from services.memory.skill_importer import (
     _list_github_dir,
     parse_skill_source,
 )
+
+
+@pytest.fixture
+def importer_requests(monkeypatch):
+    calls = []
+    responses = []
+
+    def get(client, url, *, headers=None, follow_redirects=None):
+        assert follow_redirects is False
+        calls.append(url)
+        status, response_headers, text = responses.pop(0)
+        return httpx.Response(
+            status, headers=response_headers, text=text,
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr("src.url_safety._default_resolver", lambda host: ["93.184.216.34"])
+    return calls, responses
+
+
+def test_skills_page_extracts_github_link(importer_requests):
+    calls, responses = importer_requests
+    responses.append((200, {}, '<a href="https://github.com/o/r">Skill</a>'))
+    src = parse_skill_source("https://skills.sh/o/r")
+    assert (src.owner, src.repo) == ("o", "r")
+    assert calls == ["https://skills.sh/o/r"]
+
+
+def test_skills_relative_redirect_then_github(importer_requests):
+    calls, responses = importer_requests
+    responses.extend([
+        (302, {"location": "/new"}, ""),
+        (302, {"location": "https://github.com/o/r"}, ""),
+        (200, {}, ""),
+    ])
+    src = parse_skill_source("https://skills.sh/old")
+    assert (src.owner, src.repo) == ("o", "r")
+    assert calls == ["https://skills.sh/old", "https://skills.sh/new", "https://github.com/o/r"]
+
+
+@pytest.mark.parametrize("target", [
+    "http://169.254.169.254/", "http://127.0.0.1/", "https://example.com/",
+])
+def test_skills_redirect_rejected_before_request(importer_requests, target):
+    calls, responses = importer_requests
+    responses.append((302, {"location": target}, ""))
+    with pytest.raises(SkillImportError, match="must stay on GitHub"):
+        parse_skill_source("https://skills.sh/o/r")
+    assert calls == ["https://skills.sh/o/r"]
+
+
+@pytest.mark.parametrize("url", [
+    "https://example.com/skills.sh", "https://skills.sh.example.com/o/r",
+])
+def test_skills_substring_does_not_trigger_fetch(importer_requests, url):
+    calls, _ = importer_requests
+    with pytest.raises(SkillImportError):
+        parse_skill_source(url)
+    assert calls == []
+
+
+@pytest.mark.parametrize("host", ["skills.sh", "raw.githubusercontent.com"])
+def test_importer_rejects_private_dns_before_request(monkeypatch, importer_requests, host):
+    calls, _ = importer_requests
+    monkeypatch.setattr("src.url_safety._default_resolver", lambda host: ["127.0.0.1"])
+    with pytest.raises(SkillImportError, match="private/loopback"):
+        if host == "skills.sh":
+            parse_skill_source("https://skills.sh/o/r")
+        else:
+            _fetch_bytes("https://raw.githubusercontent.com/o/r/main/SKILL.md")
+    assert calls == []
+
+
+def test_skills_redirect_limit(importer_requests):
+    calls, responses = importer_requests
+    responses.extend([(302, {"location": "/loop"}, "")] * 5)
+    with pytest.raises(SkillImportError, match="too many redirects"):
+        parse_skill_source("https://skills.sh/loop")
+    assert len(calls) == 5
 
 
 def test_parse_github_blob_skill_md():
@@ -49,7 +130,8 @@ def test_rejects_non_github():
 def test_fetch_bytes_rejects_cross_host_redirect(monkeypatch):
     class _Resp:
         url = "https://evil.example/secret"
-        status_code = 200
+        status_code = 302
+        headers = {"location": "https://evil.example/secret"}
         content = b"x"
 
         def raise_for_status(self):
@@ -65,15 +147,26 @@ def test_fetch_bytes_rejects_cross_host_redirect(monkeypatch):
         def __exit__(self, *args):
             return False
 
-        def get(self, url, headers=None):
+        def get(self, url, headers=None, follow_redirects=False):
             return _Resp()
 
     monkeypatch.setattr("services.memory.skill_importer.httpx.Client", _Client)
     monkeypatch.setattr(
         "services.memory.skill_importer.check_outbound_url",
-        lambda url: (True, ""),
+        lambda url, *, block_private=False: (True, ""),
     )
-    with pytest.raises(SkillImportError, match="redirect target"):
+    with pytest.raises(SkillImportError, match="must stay on GitHub"):
+        _fetch_bytes("https://raw.githubusercontent.com/o/r/main/SKILL.md")
+
+
+def test_fetch_bytes_rejects_metadata_redirect(monkeypatch):
+    class _Resp:
+        status_code = 302
+        headers = {"location": "http://169.254.169.254/latest/meta-data"}
+        content = b""
+
+    _mock_httpx_client(monkeypatch, _Resp())
+    with pytest.raises(SkillImportError, match="must stay on GitHub"):
         _fetch_bytes("https://raw.githubusercontent.com/o/r/main/SKILL.md")
 
 
@@ -91,7 +184,7 @@ def test_list_github_dir_accepts_api_github_response(monkeypatch):
     )
     monkeypatch.setattr(
         "services.memory.skill_importer.check_outbound_url",
-        lambda url: (True, ""),
+        lambda url, *, block_private=False: (True, ""),
     )
 
     class _Resp:
@@ -118,7 +211,7 @@ def test_list_github_dir_accepts_api_github_response(monkeypatch):
         def __exit__(self, *args):
             return False
 
-        def get(self, url, headers=None):
+        def get(self, url, headers=None, follow_redirects=False):
             return _Resp()
 
     monkeypatch.setattr("services.memory.skill_importer.httpx.Client", _Client)
@@ -140,13 +233,13 @@ def _mock_httpx_client(monkeypatch, response):
         def __exit__(self, *args):
             return False
 
-        def get(self, url, headers=None):
+        def get(self, url, headers=None, follow_redirects=False):
             return response
 
     monkeypatch.setattr("services.memory.skill_importer.httpx.Client", _Client)
     monkeypatch.setattr(
         "services.memory.skill_importer.check_outbound_url",
-        lambda url: (True, ""),
+        lambda url, *, block_private=False: (True, ""),
     )
 
 

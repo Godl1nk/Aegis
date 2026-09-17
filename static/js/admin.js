@@ -520,6 +520,9 @@ async function loadEndpoints() {
       const justAddedClass = (_recentlyAddedEpId && String(ep.id) === _recentlyAddedEpId) ? ' adm-ep-just-added' : '';
       const category = ep.category || (_isLocalEndpoint(ep.base_url) ? 'local' : 'api');
       const kindLabel = ep.endpoint_kind && ep.endpoint_kind !== 'auto' ? ep.endpoint_kind.toUpperCase() : '';
+      const _apiMethod = (ep.api_method || 'auto').toLowerCase();
+      const _apiMethodLabel = { chat_completions: 'CHAT', responses: 'RESPONSES', anthropic: 'ANTHROPIC', ollama: 'OLLAMA' }[_apiMethod] || '';
+      const _apiMethodOpts = [['auto', 'Auto'], ['chat_completions', 'Chat Completions'], ['responses', 'Responses'], ['anthropic', 'Anthropic'], ['ollama', 'Ollama native']].map(([v, l]) => `<option value="${v}"${v === _apiMethod ? ' selected' : ''}>${l}</option>`).join('');
       const keyLabel = ep.has_key
         ? (ep.api_key_fingerprint ? ` (key ${esc(ep.api_key_fingerprint)})` : ' (key set)')
         : '';
@@ -531,11 +534,13 @@ async function loadEndpoints() {
               <span class="admin-user-name">${esc(ep.name)}</span>
               ${ep.model_type === 'image' ? '<span class="admin-badge" style="background:color-mix(in srgb, var(--accent) 20%, transparent);color:var(--accent);">Image</span>' : ''}
               ${kindLabel ? `<span class="admin-badge">${esc(kindLabel)}</span>` : ''}
+              ${_apiMethodLabel ? `<span class="admin-badge" title="Forced API wire format (Auto = detect from URL)">${esc(_apiMethodLabel)}</span>` : ''}
               ${statusBadge}
               ${ep.is_enabled ? '' : '<span class="admin-badge admin-badge-off">disabled</span>'}
               ${hasModels ? `<span style="font-size:10px;opacity:0.4;${category === 'api' ? 'flex-basis:100%;' : ''}">Click to manage models</span>` : ''}
             </div>
             <div style="display:flex;gap:4px;align-items:center;">
+              <select class="admin-btn-sm" data-adm-api-method-ep="${ep.id}" title="Which HTTP API to speak — Auto detects from the URL; force one when the server needs a specific wire format. Responses/Anthropic/Ollama carry text only (no function tools)." style="max-width:118px;">${_apiMethodOpts}</select>
               <button class="admin-btn-sm" data-adm-type-ep="${ep.id}" data-adm-type-next="${ep.model_type === 'image' ? 'llm' : 'image'}" title="${ep.model_type === 'image' ? 'Serve chat models (remove from the image-model picker)' : 'Mark as an image-generation endpoint (appears in the image-model picker)'}">${ep.model_type === 'image' ? 'Mark LLM' : 'Mark image'}</button>
               <button class="admin-btn-sm" data-adm-toggle-ep="${ep.id}">${ep.is_enabled ? 'Disable' : 'Enable'}</button>
               <button class="admin-btn-delete" data-adm-del-ep="${ep.id}" data-adm-ep-online="${ep.online ? '1' : '0'}">Delete</button>
@@ -580,6 +585,20 @@ async function loadEndpoints() {
     };
     queryAll('[data-adm-toggle-ep]').forEach(btn => {
       btn.addEventListener('click', async (e) => { e.stopPropagation(); await fetch(`/api/model-endpoints/${btn.dataset.admToggleEp}`, { method: 'PATCH' }); loadEndpoints(); });
+    });
+    // Per-endpoint API wire-format override (Auto/Chat/Responses/Anthropic/Ollama).
+    queryAll('[data-adm-api-method-ep]').forEach(sel => {
+      sel.addEventListener('click', (e) => e.stopPropagation());
+      sel.addEventListener('change', async (e) => {
+        e.stopPropagation();
+        await fetch(`/api/model-endpoints/${sel.dataset.admApiMethodEp}`, {
+          method: 'PATCH',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ api_method: sel.value }),
+        });
+        loadEndpoints();
+      });
     });
     // LLM ↔ Image role toggle: image endpoints surface in the image-model
     // picker (Settings → AI Defaults → Image Generation, and the in-chat
@@ -655,7 +674,7 @@ async function loadEndpoints() {
         // Don't let interactions inside the expanded panel re-fire the
         // expand/collapse handler — the search box was getting closed
         // because clicking it bubbled up to here.
-        if (e.target.closest('.admin-btn-sm, .admin-btn-delete, .mcp-tools-list, .mcp-tools-header, .mcp-tools-search, input, label')) return;
+        if (e.target.closest('.admin-btn-sm, .admin-btn-delete, .mcp-tools-list, .mcp-tools-header, .mcp-tools-search, input, label, select')) return;
         const epId = header.dataset.admEpHeader;
         const panel = row.querySelector(`[data-adm-ep-models-panel="${epId}"]`);
         if (!panel) return;
@@ -1083,11 +1102,13 @@ function initEndpointForm() {
       apiTestBtn.textContent = 'Testing...';
       if (apiCancelTestBtn) apiCancelTestBtn.classList.remove('hidden');
       try {
-        const fd = new FormData();
-        fd.append('base_url', url);
-        fd.append('endpoint_kind', _apiEndpointKind());
-        fd.append('model_refresh_timeout', '30');
-        if (apiKey) fd.append('api_key', apiKey);
+      const fd = new FormData();
+      fd.append('base_url', url);
+      fd.append('endpoint_kind', _apiEndpointKind());
+      fd.append('model_refresh_timeout', '30');
+      const _apiMethodSel = el('adm-epApiMethod');
+      if (_apiMethodSel && _apiMethodSel.value && _apiMethodSel.value !== 'auto') fd.append('api_method', _apiMethodSel.value);
+      if (apiKey) fd.append('api_key', apiKey);
         const res = await fetch('/api/model-endpoints/test', {
           method: 'POST',
           body: fd,
@@ -1146,6 +1167,8 @@ function initEndpointForm() {
       }
       const epType = el('adm-epType');
       if (epType) fd.append('model_type', epType.value);
+      const _apiMethodAdd = el('adm-epApiMethod');
+      if (_apiMethodAdd && _apiMethodAdd.value && _apiMethodAdd.value !== 'auto') fd.append('api_method', _apiMethodAdd.value);
       if (provider.value && /openrouter\.ai|ollama\.com/i.test(provider.value)) fd.append('require_models', 'true');
       else fd.append('skip_probe', 'false');
       const res = await fetch('/api/model-endpoints', { method: 'POST', body: fd, credentials: 'same-origin' });
@@ -1156,6 +1179,7 @@ function initEndpointForm() {
         el('adm-epApiKey').value = ''; provider.value = '';
         if (kindSel) kindSel.value = 'proxy';
         if (epType) epType.value = 'llm';
+        if (_apiMethodAdd) _apiMethodAdd.value = 'auto';
         if (d.id) _recentlyAddedEpId = String(d.id);
         await loadEndpoints();
         await _selectAddedModelInChat(d);
@@ -2929,6 +2953,116 @@ function initBackup() {
   });
 }
 
+/* ── Updates ── */
+async function loadUpdateStatus() {
+  const box = el('adm-updStatus');
+  const updBtn = el('adm-updUpdateBtn');
+  const rbBtn = el('adm-updRollbackBtn');
+  if (!box) return;
+  let st;
+  try {
+    const res = await fetch('/api/admin/updates/status', { credentials: 'same-origin' });
+    if (!res.ok) throw new Error('status ' + res.status);
+    st = await res.json();
+  } catch (e) { box.textContent = 'Update status unavailable.'; return; }
+  const short = (sha) => sha ? String(sha).slice(0, 12) : 'unknown';
+  const cur = st.current || {};
+  const latest = st.latest;
+  const env = (st.environment || {});
+  const envBits = [env.docker ? 'docker' : null, env.frozen ? 'desktop app' : null, env.source ? 'source install' : null].filter(Boolean).join(' · ');
+  let html = `Installed: v${esc(cur.version || '?')} (${esc(short(cur.commit))})${envBits ? ` · ${esc(envBits)}` : ''}`;
+  if (st.unknown_baseline) html += ' — baseline unknown, installing records it';
+  if (latest && latest.sha) {
+    html += `<br>Latest on main: ${esc(latest.message || short(latest.sha))} (${esc(short(latest.sha))})`;
+    if (latest.version) html += ` · v${esc(latest.version)}`;
+  } else if (st.checked_at) {
+    html += '<br>Remote version unreachable on last check.';
+  }
+  if (st.staged) html += `<br>Staged update: ${esc(short(st.staged.commit))} — press install to apply.`;
+  box.innerHTML = html;
+  const showUpdate = !!(latest && latest.sha && (st.unknown_baseline || st.update_available || (st.staged && st.staged.commit === latest.sha)));
+  if (updBtn) updBtn.style.display = showUpdate ? '' : 'none';
+  if (rbBtn) rbBtn.style.display = st.can_rollback ? '' : 'none';
+}
+
+function initUpdates() {
+  const msg = el('adm-updMsg');
+  const updBtn = el('adm-updUpdateBtn');
+  const say = (text, cls) => { if (msg) { msg.textContent = text; msg.className = cls || ''; } };
+  const post = async (path, body) => {
+    const res = await fetch(path, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data && data.detail) || ('request failed (' + res.status + ')'));
+    return data;
+  };
+  const checkBtn = el('adm-updCheckBtn');
+  if (checkBtn) checkBtn.addEventListener('click', async () => {
+    checkBtn.disabled = true; say('Checking GitHub…');
+    try {
+      const st = await post('/api/admin/updates/check');
+      say(st.update_available || st.unknown_baseline ? 'Update available.' : 'Already on the latest commit.', 'admin-success');
+    } catch (e) { say('Check failed: ' + e.message, 'admin-error'); }
+    checkBtn.disabled = false;
+    await loadUpdateStatus();
+  });
+  if (updBtn) updBtn.addEventListener('click', async () => {
+    const ok = uiModule && uiModule.styledConfirm
+      ? await uiModule.styledConfirm('Download and install the latest update? Your data, logs and .env are preserved; the app restarts to finish.', { confirmText: 'Update', danger: false })
+      : window.confirm('Download and install the latest update?');
+    if (!ok) return;
+    updBtn.disabled = true; say('Downloading update package…');
+    const _fmtMB = (b) => b ? ` (${(b / 1048576).toFixed(1)}MB backed up)` : '';
+    const _applyOnce = async (force) => post('/api/admin/updates/apply', { commit: dl.commit, force });
+    try {
+      const dl = await post('/api/admin/updates/download');
+      say(`Downloaded ${String(dl.commit).slice(0, 12)} — backing up and applying…`);
+      let ap;
+      try {
+        ap = await _applyOnce(false);
+      } catch (e) {
+        if (/stream\(s\) active/.test(e.message)) {
+          const forceIt = uiModule && uiModule.styledConfirm
+            ? await uiModule.styledConfirm(e.message + ' Apply anyway? In-flight turns may error.', { confirmText: 'Apply anyway', danger: true })
+            : window.confirm(e.message + ' Apply anyway?');
+          if (!forceIt) { say('Update cancelled — streams were active.'); updBtn.disabled = false; await loadUpdateStatus(); return; }
+          say('Applying (forced)…');
+          ap = await _applyOnce(true);
+        } else { throw e; }
+      }
+      const backupNote = ap.backup ? ` Backup at ${ap.backup}${_fmtMB(ap.backup_bytes)}.` : '';
+      if (ap.mode === 'docker') {
+        say('Staged for Docker. Finish on the host: ' + (ap.host_command || 'rebuild the stack') , 'admin-success');
+      } else if (ap.pending_restart) {
+        say('Installed.' + backupNote + ' Restart the app to finish.', 'admin-success');
+      } else {
+        say('Installed.' + backupNote + ' Restarting…', 'admin-success');
+        setTimeout(() => window.location.reload(), 8000);
+      }
+    } catch (e) { say('Update failed: ' + e.message, 'admin-error'); }
+    updBtn.disabled = false;
+    await loadUpdateStatus();
+  });
+  const rbBtn = el('adm-updRollbackBtn');
+  if (rbBtn) rbBtn.addEventListener('click', async () => {
+    const ok = uiModule && uiModule.styledConfirm
+      ? await uiModule.styledConfirm('Roll back to the previously installed version?', { confirmText: 'Roll back', danger: true })
+      : window.confirm('Roll back to the previous version?');
+    if (!ok) return;
+    rbBtn.disabled = true; say('Rolling back…');
+    try {
+      await post('/api/admin/updates/rollback');
+      say('Rolled back — restarting…', 'admin-success');
+      setTimeout(() => window.location.reload(), 8000);
+    } catch (e) { say('Rollback failed: ' + e.message, 'admin-error'); }
+    rbBtn.disabled = false;
+    await loadUpdateStatus();
+  });
+}
+
 /* ── Danger Zone ── */
 function initDangerZone() {
   // Per-category Danger Zone wipes. Each button declares its target
@@ -3235,7 +3369,7 @@ function initAll() {
   modalEl = el('settings-modal');
   const inits = [
     initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
-    initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView,
+    initCalDAV, initBackup, initUpdates, initDangerZone, initTokenForm, initLogsView,
     initUploadLimits,
     () => settingsModule.initIntegrations()
   ];
@@ -3254,6 +3388,7 @@ function refreshAll() {
   loadTokens();
   loadLogs(false);
   loadUploadLimits();
+  loadUpdateStatus();
 }
 
 /* ═══════════════════════════════════════════

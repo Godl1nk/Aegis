@@ -1131,7 +1131,10 @@ function loadMermaid() {
 
 function initMermaid() {
   if (!window.mermaid || window.__odysseusMermaidReady) return;
-  window.mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+  // Strict mode: diagram `click ... javascript:` / href links are
+  // neutralized and HTML labels are not rendered as live DOM. Diagram
+  // source is model-controlled, so 'loose' was stored XSS on click.
+  window.mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict', htmlLabels: false });
   window.__odysseusMermaidReady = true;
 }
 // Kept for any caller that still pokes it; safe no-op until the lib is loaded.

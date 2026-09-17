@@ -1,8 +1,8 @@
 """Source-grounded durable web knowledge for the agent.
 
-Knowledge is persisted only after conservative, deterministic checks: at
-least two independent fetched domains must contain the claim's meaningful
-terms and exact numeric values. High-stakes claims are never auto-learned.
+Knowledge is persisted after deterministic evidence checks, not semantic proof.
+One explicitly trusted host can suffice with strong support; otherwise two
+independent fetched domains are required. High-stakes claims are not learned.
 """
 
 from __future__ import annotations
@@ -12,10 +12,11 @@ import hashlib
 import json
 import re
 import time
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from services.search import comprehensive_web_search
-from src.settings import get_setting
+from services.search.content import fetch_webpage_content
+from src.settings import DEFAULT_SETTINGS, get_setting
 
 
 _STOPWORDS = {
@@ -56,12 +57,8 @@ _FRESH_RE = re.compile(
     r"\b(?:latest|current|newest|version|release|president|ceo|schedule|law|rule)\b",
     re.IGNORECASE,
 )
-_CONTENT_RE = re.compile(
-    r"\[CONTENT\s+(\d+)\]\s+From:\s*([^\n]+)\n"
-    r"Title:\s*([^\n]*)\n-+\n(.*?)"
-    r"(?=\n\[CONTENT\s+\d+\]\s+From:|\Z)",
-    re.IGNORECASE | re.DOTALL,
-)
+_MAX_EVIDENCE_CHARS = 20000
+_SINGLE_SOURCE_SUPPORT = 0.8
 
 
 def _get_memory_dependencies():
@@ -114,12 +111,14 @@ def _root_domain(url: str) -> str:
     return ".".join(parts[-2:])
 
 
-def _support_score(claim: str, content: str) -> float:
+def _support_score(claim: str, content: str, *, opposite: bool = False) -> float:
     claim_tokens = _meaningful_tokens(claim)
     if not claim_tokens:
         return 0.0
     numbers = set(re.findall(r"\b\d+(?:\.\d+)?\b", claim))
     claim_is_negated = bool(_NEGATION_RE.search(claim))
+    if opposite:
+        claim_is_negated = not claim_is_negated
     chunks = [
         chunk.strip()
         for chunk in re.split(r"(?<=[.!?])\s+|\n+", content or "")
@@ -157,30 +156,82 @@ def _ttl_days(claim: str, query: str) -> int:
     return max(1, min(configured, 365))
 
 
-def _supporting_sources(claim: str, context: str, sources: list[dict]) -> list[dict]:
+def _source_urls(value) -> list[str]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 5:
+        raise ValueError("source_urls must contain 1-5 public HTTP(S) URLs")
+    urls = []
+    for raw in value:
+        if not isinstance(raw, str) or len(raw) > 2000 or re.search(r"[\s\\]", raw):
+            raise ValueError("source_urls must contain valid HTTP(S) URLs")
+        parsed = urlparse(raw)
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or parsed.port not in {None, 80, 443}):
+            raise ValueError("source_urls must contain public HTTP(S) URLs without credentials")
+        if _contains_private_data(unquote(raw)):
+            raise ValueError("Private or secret source URLs cannot be used for knowledge validation")
+        url = parsed._replace(fragment="").geturl()
+        if url not in urls:
+            urls.append(url)
+    return urls
+
+
+def _trusted_source(url: str) -> bool:
+    hosts = get_setting("knowledge_single_source_hosts", DEFAULT_SETTINGS["knowledge_single_source_hosts"])
+    if not isinstance(hosts, list):
+        return False
+    # Exact hosts only, never suffix matches or all subdomains of shared hosts.
+    allowed = {str(host).strip().lower().removeprefix("www.") for host in hosts}
+    try:
+        parsed = urlparse(url)
+        return (parsed.scheme == "https" and parsed.port in {None, 443}
+                and parsed.username is None and parsed.password is None
+                and (parsed.hostname or "").lower().removeprefix("www.") in allowed)
+    except ValueError:
+        return False
+
+
+async def _fetched_evidence(urls: list[str]) -> list[dict]:
+    async def fetch(url):
+        try:
+            # Shares the guarded public-page cache with web_search/web_fetch.
+            result = await asyncio.to_thread(fetch_webpage_content, url, timeout=8)
+            if not result.get("success") or result.get("error") or result.get("truncated"):
+                return None
+            final_url = result.get("final_url")
+            if not final_url or not result.get("content"):
+                return None
+            final_url = _source_urls([final_url])[0]
+            return {
+                "url": final_url,
+                "title": str(result.get("title") or "")[:300],
+                "content": str(result["content"])[:_MAX_EVIDENCE_CHARS],
+                "retrieved_at": result.get("fetched_at") or int(time.time()),
+            }
+        except Exception:
+            return None
+    return [row for row in await asyncio.gather(*(fetch(url) for url in urls)) if row]
+
+
+def _supporting_sources(claim: str, evidence: list[dict]) -> list[dict]:
     try:
         threshold = float(get_setting("knowledge_support_threshold", 0.55) or 0.55)
     except (TypeError, ValueError):
         threshold = 0.55
     threshold = max(0.4, min(threshold, 0.9))
-    by_index = {
-        idx: source for idx, source in enumerate(sources, 1)
-        if isinstance(source, dict)
-    }
     accepted = []
     seen_domains = set()
     seen_content_hashes = set()
-    for match in _CONTENT_RE.finditer(context or ""):
-        index = int(match.group(1))
-        fetched_url = match.group(2).strip()
-        title = match.group(3).strip()
-        content = match.group(4).strip()
-        source = by_index.get(index, {})
-        url = str(source.get("url") or fetched_url).strip()
+    scored = [(_support_score(claim, source["content"]), source) for source in evidence]
+    scored.sort(key=lambda pair: (
+        pair[0] >= _SINGLE_SOURCE_SUPPORT and _trusted_source(pair[1]["url"]), pair[0]
+    ), reverse=True)
+    for score, source in scored:
+        content = source["content"]
+        url = source["url"]
         domain = _root_domain(url)
         if not domain or domain in seen_domains:
             continue
-        score = _support_score(claim, content)
         if score < threshold:
             continue
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -190,10 +241,11 @@ def _supporting_sources(claim: str, context: str, sources: list[dict]) -> list[d
         seen_content_hashes.add(content_hash)
         accepted.append({
             "url": url,
-            "title": str(source.get("title") or title)[:300],
+            "title": source["title"],
             "domain": domain,
-            "support_score": round(score, 3),
+            "support_score": score,  # Do not round a near-miss up to the trust threshold.
             "content_hash": content_hash,
+            "retrieved_at": source["retrieved_at"],
         })
     return accepted
 
@@ -304,34 +356,60 @@ class KnowledgeTool:
             }
 
         try:
-            search_context, sources = await asyncio.wait_for(
-                asyncio.to_thread(
-                    comprehensive_web_search,
-                    query,
-                    max_pages=6,
-                    return_sources=True,
-                ),
-                timeout=45,
-            )
+            minimum = int(get_setting("knowledge_min_sources", 1))
+        except (TypeError, ValueError, OverflowError):
+            minimum = 2
+        minimum = max(1, min(minimum, 5))
+        try:
+            urls = _source_urls(args["source_urls"]) if "source_urls" in args else None
+        except ValueError as exc:
+            return {"error": str(exc), "exit_code": 1, "validated": False}
+
+        async def gather_evidence():
+            selected = urls
+            if selected is None:
+                # Compatibility for older skills. One bounded discovery pass,
+                # then use actual fetched pages, never snippets or model text.
+                page_limit = max(3, minimum)
+                _, sources = await asyncio.to_thread(
+                    comprehensive_web_search, query, max_pages=page_limit, return_sources=True,
+                )
+                selected = []
+                for source in (sources or [])[:page_limit]:
+                    try:
+                        selected.extend(_source_urls([source.get("url")]))
+                    except (ValueError, AttributeError):
+                        continue
+                selected = list(dict.fromkeys(selected))
+            return await _fetched_evidence(selected)
+
+        try:
+            evidence = await asyncio.wait_for(gather_evidence(), timeout=20)
         except asyncio.TimeoutError:
-            return {"error": "Knowledge validation search timed out", "exit_code": 1}
+            return {"error": "Knowledge validation timed out; not saved. Do not retry this turn.", "exit_code": 1, "validated": False}
         except Exception as exc:
             return {"error": f"Knowledge validation search failed: {exc}", "exit_code": 1}
 
-        supporting = _supporting_sources(claim, search_context, sources or [])
-        try:
-            minimum = int(get_setting("knowledge_min_sources", 2) or 2)
-        except (TypeError, ValueError):
-            minimum = 2
-        minimum = max(2, min(minimum, 5))
-        if len(supporting) < minimum:
+        if any(_support_score(claim, row["content"], opposite=True) >= _SINGLE_SOURCE_SUPPORT for row in evidence):
+            return {"error": "Fetched evidence may contradict this claim; not saved. Review the sources instead of retrying.", "exit_code": 1, "validated": False}
+        supporting = _supporting_sources(claim, evidence)
+        primary_supported = any(
+            _trusted_source(ref["url"]) and ref["support_score"] >= _SINGLE_SOURCE_SUPPORT
+            for ref in supporting
+        )
+        required = minimum if primary_supported else max(2, minimum)
+        if len(supporting) < required:
             return {
                 "error": (
                     f"Claim not saved: only {len(supporting)} independent fetched source(s) "
-                    f"supported it; {minimum} required."
+                    f"supported it; {required} required for this evidence. "
+                    "One source is sufficient only when the configured minimum is 1 and a trusted host strongly supports the claim. "
+                    "Do not retry learning this turn."
                 ),
                 "exit_code": 1,
                 "validated": False,
+                "supporting_sources": len(supporting),
+                "required_sources": required,
             }
 
         if vector and getattr(vector, "healthy", False) and hasattr(manager, "load_by_ids"):
@@ -372,8 +450,6 @@ class KnowledgeTool:
             and sum(ref["support_score"] for ref in supporting) / len(supporting) >= 0.75
             else "medium"
         )
-        for ref in supporting:
-            ref["retrieved_at"] = validated_at
         entry = manager.upsert_knowledge(
             owner=owner,
             text=claim,
@@ -390,7 +466,7 @@ class KnowledgeTool:
             except Exception:
                 pass
         return {
-            "results": f"Validated and saved knowledge from {len(supporting)} independent sources: {claim}",
+            "results": f"Validated and saved knowledge from {len(supporting)} fetched source(s): {claim}",
             "knowledge_id": entry["id"],
             "validated": True,
             "confidence": confidence,

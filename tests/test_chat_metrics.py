@@ -212,3 +212,13 @@ def test_metrics_fall_back_to_wallclock_without_backend_timings():
     assert m["tokens_per_second"] == 4.2
     assert m["tps_source"] == "computed"
     assert "prefill_tps" not in m
+
+
+def test_context_metrics_are_per_request_not_cumulative():
+    m = _metrics(context_length=10000, real_input_tokens=40000,
+                 real_output_tokens=5000, last_round_input_tokens=6000,
+                 last_round_output_tokens=400)
+    assert m["input_tokens"] == 40000  # billing remains cumulative
+    assert m["context_tokens"] == 6000
+    assert m["context_output_tokens"] == 400
+    assert m["context_percent"] == 60

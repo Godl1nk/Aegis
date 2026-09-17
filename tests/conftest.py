@@ -17,6 +17,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # file-backed DB across processes - tests needing that must set DATABASE_URL.
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
+# The post-external-context integrity gate (src/agent_loop.py) pauses
+# effectful tools for an approval dialog when a human stream is present.
+# Headless tests have no one to click it, so multi-tool flows would stall to
+# the approval timeout and then fail closed. Disable the gate for the suite;
+# tests/test_tool_gate_enforcement.py covers the enabled behaviour directly
+# with ODYSSEUS_TOOL_GATE=on.
+os.environ.setdefault("ODYSSEUS_TOOL_GATE", "off")
+
 # Pre-import real heavy modules BEFORE any test file's module-level stubs can
 # replace them with MagicMock. Some test files (e.g. test_llm_core_sanitize_*)
 # stub sqlalchemy/core.database at module scope with `if mod not in sys.modules`,

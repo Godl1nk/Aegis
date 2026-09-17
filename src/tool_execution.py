@@ -64,12 +64,27 @@ _SENSITIVE_BASENAMES: set[str] = {
     ".zshrc", ".zprofile", ".zshenv",
     ".profile", ".tcshrc", ".cshrc",
     ".env", ".netrc",
+    # App credential + state stores: password hashes, live sessions, the
+    # Fernet app key, persisted settings. The agent works through dedicated
+    # tools (memory/skills/settings managers) — never raw file reads.
+    "auth.json", "sessions.json",
+    ".app_key",
 }
 
 _SENSITIVE_FILE_PATTERNS: tuple[str, ...] = (
     "authorized_keys", "id_rsa", "id_ed25519", "id_ecdsa",
     "known_hosts",
 )
+
+# Filename suffixes blocked anywhere (database payloads, settings stores).
+_SENSITIVE_FILE_SUFFIXES: tuple[str, ...] = (
+    ".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm",
+)
+
+# Exact sensitive basenames that may appear at any depth.
+_SENSITIVE_BASENAMES_EXTRA: frozenset[str] = frozenset({
+    "auth.json", "sessions.json", ".app_key",
+})
 
 # Case-folded views used for matching. On a case-insensitive filesystem
 # (Windows, default macOS) ".SSH/AUTHORIZED_KEYS" and ".env" resolve to the
@@ -100,7 +115,18 @@ def _is_sensitive_path(resolved: str) -> bool:
             return True
 
     # Check filename against known sensitive files.
-    return filename in _SENSITIVE_FILE_PATTERNS_CF
+    if filename in _SENSITIVE_FILE_PATTERNS_CF:
+        return True
+    if filename in _SENSITIVE_BASENAMES_EXTRA:
+        return True
+    # Database payloads and transient journals, whatever the stem.
+    if any(filename.endswith(suffix) for suffix in _SENSITIVE_FILE_SUFFIXES):
+        return True
+    # Persisted app settings only inside data/ trees — a bare
+    # "settings.json" in a user project stays readable.
+    if filename == "settings.json" and "data" in parts:
+        return True
+    return False
 
 
 def _tool_path_roots() -> list[str]:

@@ -127,3 +127,42 @@ def test_body_extra_survives_a_markdown_round_trip():
     again = Skill.from_markdown(back.to_markdown())
     assert again.body_extra == back.body_extra
     assert again.verification == back.verification
+
+
+@pytest.mark.asyncio
+async def test_required_tools_save_and_clear_without_losing_other_fields(api):
+    sm, put = api
+    _add(sm, "tools", requires_toolsets=["legacy_tool"], pitfalls=["preserve this"])
+    await put(_request("alice"), "tools", SkillUpdateRequest(
+        requires_toolsets=["legacy_tool", "web_search", "manage_knowledge"],
+    ))
+    sk = next(s for s in sm.load(owner="alice") if s["name"] == "tools")
+    assert sk["requires_toolsets"] == ["legacy_tool", "web_search", "manage_knowledge"]
+    assert sk["pitfalls"] == ["preserve this"]
+    await put(_request("alice"), "tools", SkillUpdateRequest(requires_toolsets=[]))
+    sk = next(s for s in sm.load(owner="alice") if s["name"] == "tools")
+    assert sk["requires_toolsets"] == []
+
+
+@pytest.mark.asyncio
+async def test_tool_catalog_includes_knowledge_and_disabled_tools(tmp_path, monkeypatch):
+    import src.settings as settings
+    import src.tool_security as security
+    monkeypatch.setattr(settings, "get_setting", lambda key, default=None: ["web_search"] if key == "disabled_tools" else default)
+    monkeypatch.setattr(security, "blocked_tools_for_owner", lambda owner: {"web_fetch"})
+    catalog = _route(setup_skills_routes(SkillsManager(str(tmp_path))), "/api/skills/tool-options", "GET")
+    result = await catalog(_request("alice"))
+    tools = {tool["name"]: tool for tool in result["tools"]}
+    assert "manage_knowledge" in tools
+    assert tools["web_search"]["unavailable"] is True
+    assert tools["web_fetch"]["unavailable"] is True
+    assert tools["manage_knowledge"]["unavailable"] is False
+
+
+@pytest.mark.asyncio
+async def test_tool_catalog_requires_authenticated_browser_user(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    catalog = _route(setup_skills_routes(SkillsManager(str(tmp_path))), "/api/skills/tool-options", "GET")
+    with pytest.raises(HTTPException) as error:
+        await catalog(_request(None))
+    assert error.value.status_code == 401

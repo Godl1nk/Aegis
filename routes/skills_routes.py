@@ -1123,6 +1123,24 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         idx = skills_manager.index_for(owner=user)
         return {"index": idx, "count": len(idx)}
 
+    @router.get("/tool-options")
+    async def skill_tool_options(request: Request):
+        """Executable native tool names, including tools without prompt prose."""
+        from src.auth_helpers import require_user
+        from src.tool_policy import known_tool_names
+        from src.tool_index import BUILTIN_TOOL_DESCRIPTIONS
+        from src.settings import get_setting
+        from src.tool_security import blocked_tools_for_owner
+
+        user = require_user(request)
+        unavailable = set(get_setting("disabled_tools", []) or [])
+        unavailable.update(blocked_tools_for_owner(user or None))
+        return {"tools": [
+            {"name": name, "description": BUILTIN_TOOL_DESCRIPTIONS.get(name, ""),
+             "unavailable": name in unavailable}
+            for name in sorted(n for n in known_tool_names() if isinstance(n, str))
+        ]}
+
     @router.get("/slash-catalog")
     async def get_slash_catalog(request: Request):
         """Return skills that are available as slash commands.

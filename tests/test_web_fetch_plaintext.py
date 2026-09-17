@@ -108,3 +108,40 @@ def test_html_still_uses_parser(monkeypatch, no_cache):
     r = content_mod.fetch_webpage_content("https://example.com/page")
     assert r["title"] == "Hi"
     assert "Hello world body text" in r["content"]
+
+
+def test_fetch_records_final_redirect_url(monkeypatch, no_cache):
+    response = _FakeResponse("Fetched evidence", "text/plain")
+    response.url = "https://destination.example/docs"
+    monkeypatch.setattr(content_mod, "_get_public_url", lambda *a, **kw: response)
+    result = content_mod.fetch_webpage_content("https://origin.example/redirect")
+    assert result["url"] == "https://origin.example/redirect"
+    assert result["final_url"] == "https://destination.example/docs"
+    assert result["fetched_at"] > 0
+
+
+def test_old_cache_without_redirect_provenance_is_refreshed(monkeypatch, tmp_path):
+    import json
+    from datetime import datetime
+    from src.constants import WEB_FETCH_SOFT_MAX_BYTES
+
+    url = "https://example.com/docs"
+    monkeypatch.setattr(content_mod, "CONTENT_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(content_mod, "content_cache_index", {})
+    key = content_mod.generate_cache_key(f"{url}#cap={WEB_FETCH_SOFT_MAX_BYTES}")
+    (tmp_path / f"{key}.cache").write_text(json.dumps({
+        "timestamp": datetime.now().isoformat(),
+        "data": {"url": url, "success": True, "content": "Old unprovenanced text"},
+    }), encoding="utf-8")
+    calls = []
+    def network(*args, **kwargs):
+        calls.append(args)
+        response = _FakeResponse("Refreshed evidence", "text/plain")
+        response.url = url
+        return response
+    monkeypatch.setattr(content_mod, "_get_public_url", network)
+    first = content_mod.fetch_webpage_content(url)
+    second = content_mod.fetch_webpage_content(url)
+    assert first["content"] == second["content"] == "Refreshed evidence"
+    assert first["final_url"] == second["final_url"] == url
+    assert len(calls) == 1

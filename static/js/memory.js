@@ -383,7 +383,7 @@ async function syncPrefToggle(elementId, prefKey, onMsg, offMsg, dimBelow = true
 export async function loadMemories() {
   _ensureNewMemoryCategorySelect();
   try {
-    const response = await fetch(`${window.location.origin}/api/memory`);
+    const response = await fetch(`${window.location.origin}/api/memory?exclude_knowledge=true`);
 
     if (!response.ok) {
       console.error('Memory fetch failed with status:', response.status);
@@ -545,7 +545,7 @@ export async function tidyMemories() {
     }
 
     // Fetch the new state
-    const freshRes = await fetch(`${window.location.origin}/api/memory`);
+    const freshRes = await fetch(`${window.location.origin}/api/memory?exclude_knowledge=true`);
     const freshData = await freshRes.json();
     const afterList = freshData.memory || freshData || [];
     const afterMap = new Map(afterList.map(m => [m.id, m]));
@@ -1583,6 +1583,8 @@ document.addEventListener('DOMContentLoaded', () => {
       // Lazy-load skills tab (cascade=true → play the domino-in entrance)
       if (target === 'skills') {
         import('./skills.js').then(m => { if (m.loadSkills) m.loadSkills(true); else if (m.default?.loadSkills) m.default.loadSkills(true); });
+      } else if (target === 'knowledge') {
+        import('./knowledge.js').then(m => m.loadKnowledge()).catch(() => uiModule.showError('Could not load Knowledge'));
       } else if (target === 'journey') {
         // force=true: skills/memories learned since the last open must show
         // up on the timeline without a page reload (same staleness class as

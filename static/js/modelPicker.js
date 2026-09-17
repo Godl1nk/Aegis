@@ -5,6 +5,7 @@ import { providerLogo } from './providers.js';
 import uiModule from './ui.js';
 import settingsModule from './settings.js';
 import { sortModelObjects } from './modelSort.js';
+import { setContextSession } from './contextUsage.js';
 
 const API_BASE = window.location.origin;
 
@@ -722,6 +723,7 @@ export function updateModelPicker() {
   // Hide model picker when group chat is active
   const wrap = document.getElementById('model-picker-wrap');
   if (window.groupModule && window.groupModule.isActive()) {
+    setContextSession(null);
     if (wrap) { wrap.style.display = 'none'; }
     return;
   }
@@ -814,6 +816,7 @@ export function updateModelPicker() {
   label.dataset.modelId = modelId || '';
   label.dataset.endpointUrl = endpointUrl || '';
   label.dataset.endpointId = endpointId || '';
+  setContextSession({ sessionId: currentSessionId, model: modelId, endpointUrl });
   if (wrap) {
     wrap.dataset.modelId = modelId || '';
     wrap.dataset.endpointUrl = endpointUrl || '';

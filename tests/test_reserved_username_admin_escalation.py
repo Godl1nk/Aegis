@@ -19,6 +19,20 @@ from fastapi import HTTPException
 from tests.helpers.import_state import clear_module
 
 
+def _seed_hashed_session(sessions_path, token, username):
+    """Write a sessions.json entry in the current hashed-key format so the
+    test exercises session validation (not the legacy-plaintext drop)."""
+    import json
+
+    clear_module("core.auth")
+    from core.auth import AuthManager
+
+    sessions_path.write_text(
+        json.dumps({AuthManager._hash_token(token): {"username": username, "expiry": 9999999999}}),
+        encoding="utf-8",
+    )
+
+
 def _fresh_auth_manager(tmp_path):
     # Same import dance as test_security_regressions: drop any cached stub so
     # we exercise the real module from disk rather than a conftest mock.
@@ -82,10 +96,7 @@ def test_legacy_reserved_username_session_cannot_authenticate(tmp_path):
         '{"users": {"internal-tool": {"password_hash": "unused", "is_admin": false}}}',
         encoding="utf-8",
     )
-    sessions_path.write_text(
-        '{"tok": {"username": "internal-tool", "expiry": 9999999999}}',
-        encoding="utf-8",
-    )
+    _seed_hashed_session(sessions_path, "tok", "internal-tool")
     mgr = _fresh_auth_manager(tmp_path)
 
     assert mgr.validate_token("tok") is False
@@ -100,10 +111,7 @@ def test_legacy_reserved_username_session_cannot_pass_admin_gate(tmp_path, monke
         '"admin": {"password_hash": "unused", "is_admin": true}}}',
         encoding="utf-8",
     )
-    sessions_path.write_text(
-        '{"tok": {"username": "internal-tool", "expiry": 9999999999}}',
-        encoding="utf-8",
-    )
+    _seed_hashed_session(sessions_path, "tok", "internal-tool")
     mgr = _fresh_auth_manager(tmp_path)
     clear_module("core.middleware")
     from core.middleware import require_admin

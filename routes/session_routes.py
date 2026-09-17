@@ -3,6 +3,7 @@ import re
 import html
 import json
 import uuid
+import asyncio
 from datetime import datetime
 from fastapi import APIRouter, Form, HTTPException, Response, Request
 import logging
@@ -1291,7 +1292,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
 
     @router.get("/session/{session_id}/context_info")
     async def get_context_info(request: Request, session_id: str):
-        """Get the real context length for a session's model from the endpoint."""
+        """Read-only context snapshot; never builds a prompt or invokes an LLM."""
         _verify_session_owner(request, session_id)
         session = session_manager.get_session(session_id)
         if not session:
@@ -1299,9 +1300,10 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
         if not session.endpoint_url or not session.model:
             return {"context_length": None}
         try:
-            from src.model_context import get_context_length
-            ctx = get_context_length(session.endpoint_url, session.model)
-            return {"context_length": ctx, "model": session.model}
+            from src.context_usage import session_context_usage
+            # Model discovery may perform blocking HTTP calls. Keep it off the
+            # event loop so opening the meter cannot stall other chat streams.
+            return await asyncio.to_thread(session_context_usage, session)
         except Exception:
             return {"context_length": None}
 

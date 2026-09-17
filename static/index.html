@@ -259,6 +259,7 @@
         <div class="memory-tabs">
           <button class="memory-tab active" data-memory-tab="browse"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.5-3 5.7V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.3C6.2 13.5 5 11.4 5 9a7 7 0 0 1 7-7z"/><line x1="10" y1="22" x2="14" y2="22"/></svg>Memories <span id="memory-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span></button>
           <button class="memory-tab" data-memory-tab="skills"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Skills <span id="skills-count" class="memory-count" style="font-size:0.8em;opacity:0.6;font-weight:normal;margin-left:4px">0</span></button>
+          <button class="memory-tab" data-memory-tab="knowledge">Knowledge</button>
           <button class="memory-tab" data-memory-tab="journey"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Journey</button>
           <button class="memory-tab" data-memory-tab="summary"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M4 5h16"/><path d="M4 12h16"/><path d="M4 19h10"/></svg>Summary</button>
           <button class="memory-tab" data-memory-tab="add"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>Add</button>
@@ -376,8 +377,31 @@
               <input type="text" id="new-skill-tags" placeholder=" " class="memory-add-input skill-hint-input" aria-label="Tags" />
               <span class="skill-rich-ph"><span class="k">Tags</span> — comma-separated, e.g. python, build, vllm</span>
             </div>
+            <div id="new-skill-tools"></div>
             <div style="display:flex;justify-content:flex-end;">
               <button id="add-skill-btn" class="confirm-btn confirm-btn-primary">Add Skill</button>
+            </div>
+          </div>
+        </div>
+        <!-- Knowledge is loaded on demand, separately from personal memories. -->
+        <div class="memory-tab-panel hidden" data-memory-panel="knowledge">
+          <div class="admin-card knowledge-panel">
+            <h2>Knowledge</h2>
+            <p class="memory-desc">Source-backed facts learned from the web, separate from your personal memories. Only relevant, unexpired entries are eligible for recall. Validation is evidence checking, not a guarantee of truth.</p>
+            <div id="knowledge-stats" class="knowledge-stats" aria-live="polite"></div>
+            <div class="memory-toolbar">
+              <input id="knowledge-search" type="search" class="memory-search-input" placeholder="Search stored claims…" aria-label="Search knowledge">
+              <div class="memory-toolbar-row">
+                <select id="knowledge-filter" class="memory-sort-select" aria-label="Knowledge freshness"><option value="all">All entries</option><option value="fresh">Fresh</option><option value="expired">Expired / needs review</option></select>
+                <button id="knowledge-refresh" type="button" class="memory-toolbar-btn">Refresh</button>
+              </div>
+            </div>
+            <p id="knowledge-status" class="memory-desc" role="status"></p>
+            <div id="knowledge-list" class="knowledge-list" aria-label="Stored knowledge"></div>
+            <div class="knowledge-pagination">
+              <button id="knowledge-prev" type="button" class="memory-toolbar-btn" disabled>Previous</button>
+              <span id="knowledge-page" aria-live="polite"></span>
+              <button id="knowledge-next" type="button" class="memory-toolbar-btn" disabled>Next</button>
             </div>
           </div>
         </div>
@@ -1242,6 +1266,10 @@
           </button>
         </div>
         <div class="chat-input-right">
+          <button type="button" id="composer-context" class="composer-context" aria-label="Context usage unavailable">
+            <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><circle class="context-track" cx="12" cy="12" r="9"/><circle class="context-fill" cx="12" cy="12" r="9" pathLength="100"/></svg>
+            <span class="context-percent">—</span>
+          </button>
           <!-- Agent / Chat mode toggle -->
           <div class="mode-toggle">
             <button type="button" class="mode-toggle-btn active" id="mode-agent-btn" aria-pressed="true">Agent</button>
@@ -2377,6 +2405,13 @@
                     <option value="llm" selected>LLM</option>
                     <option value="image">Image</option>
                   </select>
+                  <select id="adm-epApiMethod" class="settings-select" title="Which HTTP API to speak — Auto detects from the URL; force one when the server needs a specific wire format" style="flex:0 0 auto;min-width:118px;height:32px;box-sizing:border-box;">
+                    <option value="auto" selected>API: Auto</option>
+                    <option value="chat_completions">Chat Completions</option>
+                    <option value="responses">Responses</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="ollama">Ollama native</option>
+                  </select>
                   <div style="position:relative;flex:1;display:flex;align-items:center;">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);opacity:0.55;pointer-events:none;"><path d="M21 2l-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/><path d="M15.5 7.5l3 3"/></svg>
                     <input id="adm-epApiKey" type="password" placeholder="API key, e.g. sk-proj-AbCdEf…" autocomplete="off" style="flex:1;padding-left:28px;height:32px;box-sizing:border-box;">
@@ -2566,6 +2601,17 @@
               <input type="file" id="adm-importFile" accept=".json" style="display:none;">
             </div>
             <div id="adm-backupMsg" style="margin-top:6px;"></div>
+          </div>
+          <div class="admin-card">
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>Updates</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Fetch and install Aegis updates from GitHub (main branch). Every apply takes a full backup (data, .env, replaced source) with automatic restore on failure; custom files are moved into the backup, and the previous version stays available for rollback.</div>
+            <div id="adm-updStatus" style="font-size:12px;margin-bottom:8px;">Loading update status…</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <button class="admin-btn-sm" id="adm-updCheckBtn">Check now</button>
+              <button class="admin-btn-add" id="adm-updUpdateBtn" style="display:none;">Download &amp; install update</button>
+              <button class="admin-btn-sm" id="adm-updRollbackBtn" style="display:none;">Roll back</button>
+            </div>
+            <div id="adm-updMsg" style="margin-top:6px;font-size:11px;"></div>
           </div>
           <div class="admin-card admin-danger-card">
             <h2 style="color:#e55;">Danger Zone</h2>

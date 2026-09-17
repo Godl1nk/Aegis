@@ -169,22 +169,24 @@ class MemoryV2Store:
         except OSError:
             pass
 
-    def load_all(self) -> list[dict]:
+    def load_all(self, *, exclude_knowledge=False) -> list[dict]:
         from core.database import MemoryItem
 
         self.migrate_from_json_once()
         with self._db() as db:
-            rows = (
+            query = (
                 db.query(MemoryItem)
                 .filter(MemoryItem.status == "active")
                 .order_by(MemoryItem.timestamp.desc())
-                .all()
             )
+            if exclude_knowledge:
+                query = query.filter((MemoryItem.kind != "knowledge") | MemoryItem.kind.is_(None))
+            rows = query.all()
             return [self._item_to_dict(row) for row in rows]
 
-    def load(self, owner: Optional[str] = None) -> list[dict]:
+    def load(self, owner: Optional[str] = None, *, exclude_knowledge=False) -> list[dict]:
         if owner is None:
-            return self.load_all()
+            return self.load_all(exclude_knowledge=exclude_knowledge)
 
         # Keep tenant filtering in SQLite. The previous implementation loaded
         # every active row for every owner and then filtered in Python on every
@@ -194,15 +196,17 @@ class MemoryV2Store:
 
         self.migrate_from_json_once()
         with self._db() as db:
-            rows = (
+            query = (
                 db.query(MemoryItem)
                 .filter(
                     MemoryItem.owner == owner,
                     MemoryItem.status == "active",
                 )
                 .order_by(MemoryItem.timestamp.desc())
-                .all()
             )
+            if exclude_knowledge:
+                query = query.filter((MemoryItem.kind != "knowledge") | MemoryItem.kind.is_(None))
+            rows = query.all()
             return [self._item_to_dict(row) for row in rows]
 
     def load_by_ids(self, ids: Iterable[str], owner: Optional[str] = None) -> list[dict]:
@@ -319,6 +323,56 @@ class MemoryV2Store:
                 if len(rows) < batch_size:
                     break
             return fresh
+
+    def query_knowledge(self, owner, *, query="", freshness="all", offset=0, limit=25):
+        """Page/search knowledge in SQLite without loading an owner's library."""
+        from core.database import MemoryItem
+        from sqlalchemy import BigInteger, case, cast, func
+
+        self.migrate_from_json_once()
+        now = int(time.time())
+        # Hand-edited or legacy malformed metadata must not break the page.
+        metadata = case((func.json_valid(MemoryItem.metadata_json) == 1,
+                         MemoryItem.metadata_json), else_="{}")
+        expiry = case((func.json_type(metadata, "$.expires_at").in_(["integer", "real"]),
+                       cast(func.json_extract(metadata, "$.expires_at"), BigInteger)), else_=0)
+        fresh = expiry > now
+        with self._db() as db:
+            base = db.query(MemoryItem).filter(
+                MemoryItem.owner == owner, MemoryItem.kind == "knowledge",
+                MemoryItem.status == "active",
+            )
+            total, fresh_count = base.with_entities(
+                func.count(MemoryItem.id), func.coalesce(func.sum(case((fresh, 1), else_=0)), 0),
+            ).one()
+            filtered = base
+            if query.strip():
+                filtered = filtered.filter(MemoryItem.text.contains(query.strip(), autoescape=True))
+            if freshness == "fresh":
+                filtered = filtered.filter(fresh)
+            elif freshness == "expired":
+                filtered = filtered.filter(expiry <= now)
+            matched = filtered.count()
+            rows = filtered.add_columns(expiry).order_by(MemoryItem.timestamp.desc(), MemoryItem.id).offset(offset).limit(limit).all()
+            items = []
+            for row, expires_at in rows:
+                item = self._item_to_dict(row)
+                item["freshness"] = "fresh" if expires_at > now else "expired"
+                items.append(item)
+            return {"knowledge": items, "total": total, "matched": matched,
+                    "fresh": int(fresh_count), "expired": total - int(fresh_count),
+                    "offset": offset, "limit": limit}
+
+    def delete_knowledge(self, memory_id, owner):
+        """Owner/kind-scoped delete, without a global memory load or rewrite."""
+        from core.database import MemoryItem
+
+        with self._db() as db:
+            count = db.query(MemoryItem).filter(
+                MemoryItem.id == memory_id, MemoryItem.owner == owner,
+                MemoryItem.kind == "knowledge", MemoryItem.status == "active",
+            ).update({MemoryItem.status: "deleted"}, synchronize_session=False)
+            return bool(count)
 
     def upsert_knowledge(
         self,

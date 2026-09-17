@@ -5,9 +5,10 @@ user-configured integration base_url. Before this guard, a base_url (or a
 hostname resolving) to the cloud metadata range was requested server-side
 with the integration's auth headers attached. execute_api_call now validates
 the joined URL with src.url_safety.check_outbound_url before connecting:
-link-local/metadata is always rejected; RFC-1918/loopback only when
-INTEGRATION_API_BLOCK_PRIVATE_IPS=true (LAN integrations are the primary
-use case, so private stays allowed by default).
+link-local/metadata is always rejected. RFC-1918/loopback is blocked by
+default too — the LLM only needs these hosts if the user configured them;
+set INTEGRATION_API_BLOCK_PRIVATE_IPS=false to restore the local-first
+default for LAN integrations (Home Assistant, Miniflux, ntfy).
 """
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -84,16 +85,14 @@ async def test_public_ip_base_url_still_requests():
 
 
 @pytest.mark.asyncio
-async def test_private_base_url_allowed_by_default_blocked_with_knob(monkeypatch):
-    # Local-first default: LAN integrations (Home Assistant etc.) must work.
+async def test_private_base_url_blocked_by_default_allowed_with_optout(monkeypatch):
     monkeypatch.delenv("INTEGRATION_API_BLOCK_PRIVATE_IPS", raising=False)
-    result, client = await _call("http://192.168.1.50")
-    assert result.get("exit_code") == 0
-    client.request.assert_called_once()
-
-    # Locked-down deployments opt in to a full private/loopback block.
-    monkeypatch.setenv("INTEGRATION_API_BLOCK_PRIVATE_IPS", "true")
     result, client = await _call("http://192.168.1.50")
     assert result["exit_code"] == 1
     assert "rejected" in result["error"].lower()
     client.request.assert_not_called()
+
+    monkeypatch.setenv("INTEGRATION_API_BLOCK_PRIVATE_IPS", "false")
+    result, client = await _call("http://192.168.1.50")
+    assert result.get("exit_code") == 0
+    client.request.assert_called_once()

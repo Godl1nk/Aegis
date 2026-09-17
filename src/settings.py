@@ -234,7 +234,13 @@ DEFAULT_SETTINGS = {
     # Source-grounded durable web knowledge. Learning is conservative: claims
     # need independent fetched sources and expire instead of becoming timeless.
     "knowledge_auto_learn_enabled": True,
-    "knowledge_min_sources": 2,
+    # 1 permits a strongly supported claim from one explicitly trusted host;
+    # other hosts still need two independent sources. Set 2+ to force quorum.
+    "knowledge_min_sources": 1,
+    "knowledge_single_source_hosts": [
+        "home.cern", "white-rabbit.web.cern.ch", "sqlite.org",
+        "docs.python.org", "developer.mozilla.org",
+    ],
     "knowledge_support_threshold": 0.55,
     "knowledge_default_ttl_days": 180,
     # Reminders

@@ -142,10 +142,11 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         return {"ok": True, "count": len([m for m in all_mem if m.get("owner") == user])}
 
     @router.get("")
-    def api_get_memory(request: Request):
+    def api_get_memory(request: Request, exclude_knowledge: bool = False):
         """Return all memory entries with their metadata."""
         user = _owner(request)
-        return {"memory": memory_manager.load(owner=user)}
+        kwargs = {"exclude_knowledge": True} if exclude_knowledge else {}
+        return {"memory": memory_manager.load(owner=user, **kwargs)}
 
     @router.post("/search")
     def search_memories(request: Request, query: str = Form(...), session_id: str = Form(None), category: str = Form(None)):
@@ -575,6 +576,8 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
         for i, memory in enumerate(all_mem):
             if memory["id"] == memory_id:
                 _verify_memory_owner(memory, user)
+                if memory.get("kind") == "knowledge":
+                    raise HTTPException(409, "Use Brain > Knowledge to revalidate or delete source-backed claims")
                 all_mem[i]["text"] = text.strip()
                 if category:
                     all_mem[i]["category"] = category

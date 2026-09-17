@@ -402,17 +402,14 @@ async def execute_api_call(
 
     url = _join_integration_url(base_url, path)
 
-    # SSRF guard — same check used by the gallery endpoint, embeddings,
-    # CardDAV, and the reminder webhook sender. Link-local / metadata
-    # addresses (169.254.x.x — the cloud credential-exfil vector) are always
-    # rejected; INTEGRATION_API_BLOCK_PRIVATE_IPS=true also blocks RFC-1918 /
-    # loopback for locked-down deployments. Private stays allowed by default
-    # because LAN integrations (Home Assistant, Miniflux, ntfy) are the
-    # primary use case.
+    # SSRF guard: link-local/metadata is always rejected; RFC-1918/loopback
+    # is blocked by default too (opt out with
+    # INTEGRATION_API_BLOCK_PRIVATE_IPS=false for LAN integrations such as
+    # Home Assistant, Miniflux, ntfy).
     from src.url_safety import check_outbound_url
     block_private = os.getenv(
-        "INTEGRATION_API_BLOCK_PRIVATE_IPS", "false"
-    ).lower() == "true"
+        "INTEGRATION_API_BLOCK_PRIVATE_IPS", "true"
+    ).strip().lower() != "false"
     ok, reason = check_outbound_url(url, block_private=block_private)
     if not ok:
         return {"error": f"URL rejected: {reason}", "exit_code": 1}

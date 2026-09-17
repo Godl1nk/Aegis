@@ -156,14 +156,17 @@ class MemoryManager:
 
         return []
 
-    def load(self, owner: str = None) -> List[Dict]:
+    def load(self, owner: str = None, *, exclude_knowledge=False) -> List[Dict]:
         """Load memory entries, optionally filtered by owner."""
         if self._v2 is not None:
             try:
-                return self._validate_entries(self._v2.load(owner=owner))
+                kwargs = {"exclude_knowledge": True} if exclude_knowledge else {}
+                return self._validate_entries(self._v2.load(owner=owner, **kwargs))
             except Exception as e:
                 logger.warning("Memory V2 scoped load failed, falling back to JSON: %s", e)
         entries = self.load_all()
+        if exclude_knowledge:
+            entries = [e for e in entries if e.get("kind") != "knowledge"]
         if owner is None:
             return entries
         return [e for e in entries if e.get("owner") == owner]
@@ -243,6 +246,41 @@ class MemoryManager:
                 rows.append(entry)
         rows.sort(key=lambda entry: int(entry.get("timestamp") or 0), reverse=True)
         return rows[:max(1, int(limit))]
+
+    def query_knowledge(self, owner=None, *, query="", freshness="all", offset=0, limit=25):
+        limit = max(1, min(int(limit), 100))
+        offset = max(0, int(offset))
+        if self._v2 is not None:
+            return self._v2.query_knowledge(owner, query=query, freshness=freshness, offset=offset, limit=limit)
+        # Compatibility only: JSON storage has no indexed/paged query engine.
+        now = int(time.time())
+        rows = []
+        for entry in self.load(owner=owner):
+            if entry.get("owner") != owner or entry.get("kind") != "knowledge" or entry.get("status", "active") != "active":
+                continue
+            row = dict(entry)
+            try:
+                expiry = row.get("expires_at")
+                fresh = isinstance(expiry, (int, float)) and int(expiry) > now
+            except (ValueError, TypeError, OverflowError):
+                fresh = False
+            row["freshness"] = "fresh" if fresh else "expired"
+            rows.append(row)
+        total = len(rows)
+        fresh_count = sum(row["freshness"] == "fresh" for row in rows)
+        rows = [row for row in rows if query.strip().casefold() in str(row.get("text", "")).casefold()
+                and (freshness == "all" or row["freshness"] == freshness)]
+        rows.sort(key=lambda row: (-int(row.get("timestamp") or 0), str(row.get("id", ""))))
+        return {"knowledge": rows[offset:offset + limit], "total": total, "matched": len(rows),
+                "fresh": fresh_count, "expired": total - fresh_count, "offset": offset, "limit": limit}
+
+    def delete_knowledge(self, memory_id, owner=None):
+        if self._v2 is not None:
+            return self._v2.delete_knowledge(memory_id, owner)
+        rows = self.load_by_ids([memory_id], owner=owner)
+        if not rows or rows[0].get("owner") != owner or rows[0].get("kind") != "knowledge":
+            return False
+        return self.delete_entry(memory_id, owner=owner)
 
     def upsert_knowledge(self, **kwargs) -> Dict:
         if self._v2 is not None:

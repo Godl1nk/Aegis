@@ -36,16 +36,27 @@ TASK_DEFAULT_SHELL_TOOLS = frozenset({
     "grep", "glob", "ls", "get_workspace",
 })
 
+# The effectful subset: shell execution + file writes. A scheduled task runs
+# unattended with no human to approve, so these require explicit per-task
+# opt-in (allow_shell). Reads stay available; legacy tasks (allow_shell
+# NULL) keep the old behaviour.
+TASK_SHELL_WRITE_TOOLS = frozenset({"bash", "python", "write_file", "edit_file"})
 
-def compose_task_relevant_tools(rag_tools, assistant_always, disabled_tools):
+
+def compose_task_relevant_tools(rag_tools, assistant_always, disabled_tools,
+                                allow_shell=None):
     """Compose the relevant-tools set offered to a scheduled task's agent.
 
     Unions the RAG-retrieved tools, the assistant's always-available set, and
     the default shell/file group, then removes anything the task's crew
     explicitly disabled via its `enabled_tools` allowlist. Per-owner admin
     gating is applied later by stream_agent_loop (blocked_tools_for_owner).
+    allow_shell=False strips the effectful shell/file-write tools; None
+    (legacy rows) preserves the old include-everything behaviour.
     """
     tools = set(rag_tools) | set(assistant_always) | set(TASK_DEFAULT_SHELL_TOOLS)
+    if allow_shell is False:
+        tools -= TASK_SHELL_WRITE_TOOLS
     if disabled_tools:
         tools -= set(disabled_tools)
     return tools
@@ -1620,7 +1631,8 @@ class TaskScheduler:
             if tool_idx:
                 rag_tools = tool_idx.get_tools_for_query(task.prompt or "", k=8)
                 relevant_tools = compose_task_relevant_tools(
-                    rag_tools, ASSISTANT_ALWAYS_AVAILABLE, disabled_tools
+                    rag_tools, ASSISTANT_ALWAYS_AVAILABLE, disabled_tools,
+                    allow_shell=getattr(task, "allow_shell", None),
                 )
                 logger.info(f"[assistant] RAG selected {len(rag_tools)} tools + {len(ASSISTANT_ALWAYS_AVAILABLE)} always-available + shell/file defaults = {len(relevant_tools)} total for '{task.name}'")
         except Exception as e:

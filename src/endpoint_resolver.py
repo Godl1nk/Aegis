@@ -12,7 +12,10 @@ from typing import Optional, Tuple, Dict
 from urllib.parse import urlparse, urlunparse
 
 from core.database import SessionLocal, ModelEndpoint
-from src.llm_core import _detect_provider, _host_match, _is_kimi_code_url, KIMI_CODE_USER_AGENT, _ollama_api_root
+from src.llm_core import (
+    _host_match, _is_kimi_code_url, KIMI_CODE_USER_AGENT,
+    _ollama_api_root, _resolve_provider, _normalize_api_method,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -230,22 +233,66 @@ def _anthropic_api_root(base: str) -> str:
     return base
 
 
-def build_chat_url(base: str) -> str:
-    """Return the correct chat endpoint URL for a given base."""
+def _ep_api_method(ep) -> str:
+    """Explicit API method configured on an endpoint row ("auto" default)."""
+    return _normalize_api_method(getattr(ep, "api_method", None))
+
+
+def _sniff_api_method(base: str) -> str:
+    """Read an API method already encoded in a URL's path suffix.
+
+    Lets build_chat_url() rebuild a stored chat URL idempotently: call sites
+    that only have the chat URL (no endpoint row) keep the method without
+    threading api_method through. Returns "auto" when no suffix matches.
+    """
+    try:
+        path = (urlparse(base).path or "").rstrip("/")
+    except Exception:
+        return "auto"
+    if path.endswith("/responses"):
+        return "responses"
+    if path.endswith("/v1/messages"):
+        return "anthropic"
+    if path.endswith("/api/chat"):
+        return "ollama"
+    return "auto"
+
+
+def build_chat_url(base: str, api_method=None) -> str:
+    """Return the correct chat endpoint URL for a given base.
+
+    An explicit api_method ("responses", "anthropic", "ollama",
+    "chat_completions") forces that wire format; "auto"/None keeps today's
+    URL inference, plus preserves a method already encoded in the input URL.
+    """
+    method = _normalize_api_method(api_method)
+    if method == "auto":
+        sniffed = _sniff_api_method(base)
+        if sniffed != "auto":
+            method = sniffed
     base = _prepare_endpoint_base(base)
-    provider = _detect_provider(base)
+    provider = _resolve_provider(base, method)
     if provider == "anthropic":
-        return _append_endpoint_path(_anthropic_api_root(base), "/v1/messages")
+        root = _anthropic_api_root(base)
+        if method == "anthropic" and root.endswith("/v1"):
+            # Explicit override on a custom host: accept the OpenAI-style
+            # "/v1" base too, so both "https://host" and "https://host/v1"
+            # land on ".../v1/messages". (Host-inferred Anthropic keeps the
+            # existing _anthropic_api_root behaviour.)
+            root = root[:-len("/v1")].rstrip("/")
+        return _append_endpoint_path(root, "/v1/messages")
     if provider == "ollama":
         return _append_endpoint_path(_ollama_api_root(base), "/chat")
     if provider == "chatgpt-subscription":
+        return _append_endpoint_path(base, "/responses")
+    if provider == "responses":
         return _append_endpoint_path(base, "/responses")
     if _pathless_host(base, "api.openai.com"):
         base = _append_endpoint_path(base, "/v1")
     return _append_endpoint_path(base, "/chat/completions")
 
 
-def build_models_url(base: str) -> Optional[str]:
+def build_models_url(base: str, api_method=None) -> Optional[str]:
     """Return the provider-specific model-list endpoint URL for a base.
 
     For OpenAI-compatible servers (LM Studio, llama.cpp, vLLM,
@@ -257,9 +304,13 @@ def build_models_url(base: str) -> Optional[str]:
     their semantics).
     """
     base = _prepare_endpoint_base(base)
-    provider = _detect_provider(base)
+    method = _normalize_api_method(api_method)
+    provider = _resolve_provider(base, method)
     if provider == "anthropic":
-        return _append_endpoint_path(_anthropic_api_root(base), "/v1/models")
+        root = _anthropic_api_root(base)
+        if method == "anthropic" and root.endswith("/v1"):
+            root = root[:-len("/v1")].rstrip("/")
+        return _append_endpoint_path(root, "/v1/models")
     if provider == "ollama":
         return _append_endpoint_path(_ollama_api_root(base), "/tags")
     if provider == "chatgpt-subscription":
@@ -277,9 +328,10 @@ def build_models_url(base: str) -> Optional[str]:
     return _append_endpoint_path(base, "/models")
 
 
-def build_headers(api_key: Optional[str], base: str) -> Dict[str, str]:
-    """Build auth headers for an endpoint."""
-    provider = _detect_provider(base)
+def build_headers(api_key: Optional[str], base: str, api_method=None) -> Dict[str, str]:
+    """Build auth headers for an endpoint, honoring an explicit API method
+    (needed so a custom host forced onto "anthropic" gets x-api-key)."""
+    provider = _resolve_provider(base, api_method)
     headers: Dict[str, str] = {}
     if provider == "anthropic":
         if api_key:
@@ -373,8 +425,9 @@ def resolve_endpoint(
         except Exception as e:
             logger.warning("Could not resolve endpoint runtime credentials: %s", e)
             return fallback_url, fallback_model, fallback_headers
-        chat_url = build_chat_url(base)
-        headers = build_headers(api_key, base)
+        method = _ep_api_method(ep)
+        chat_url = build_chat_url(base, method)
+        headers = build_headers(api_key, base, method)
 
         # Discard a configured model the user has since disabled on the
         # endpoint (e.g. a stale `default_model` left pointing at a now-hidden
@@ -423,8 +476,9 @@ def resolve_endpoint_by_id(
         except Exception as e:
             logger.warning("Could not resolve endpoint runtime credentials: %s", e)
             return None
-        chat_url = build_chat_url(base)
-        headers = build_headers(api_key, base)
+        method = _ep_api_method(ep)
+        chat_url = build_chat_url(base, method)
+        headers = build_headers(api_key, base, method)
         m = (model or "").strip()
         # Drop a model the user disabled on the endpoint, then pick the first
         # enabled chat model rather than a hidden one.

@@ -662,9 +662,15 @@ app.include_router(setup_session_routes(session_manager, session_config, webhook
 from routes.admin_wipe_routes import setup_admin_wipe_routes
 app.include_router(setup_admin_wipe_routes(session_manager))
 
+# Admin self-updates (Settings → System → Updates)
+from routes.admin_update_routes import setup_admin_update_routes
+app.include_router(setup_admin_update_routes())
+
 # Memory
 from routes.memory.memory_routes import setup_memory_routes
 memory_router = setup_memory_routes(memory_manager, session_manager, memory_vector=memory_vector)
+from routes.knowledge_routes import setup_knowledge_routes
+app.include_router(setup_knowledge_routes(memory_manager, memory_vector))
 app.include_router(memory_router)
 from routes.skills_routes import setup_skills_routes
 app.include_router(setup_skills_routes(skills_manager))
@@ -1283,10 +1289,32 @@ async def _shutdown_event():
     logger.info("Application shutdown complete")
 
 
+def assert_safe_bind(bind_host: str) -> None:
+    """Refuse to serve an unauthenticated (or loopback-trusted) listener on
+    a non-loopback interface. Explicitly set AEGIS_INSECURE_BIND=1 to proceed
+    anyway (never do this on a network you don't fully trust)."""
+    insecure_bind = bind_host not in ("127.0.0.1", "::1", "localhost")
+    auth_off = os.getenv("AUTH_ENABLED", "true").lower() == "false"
+    if insecure_bind and (auth_off or LOCALHOST_BYPASS) and not os.getenv("AEGIS_INSECURE_BIND"):
+        raise SystemExit(
+            "Refusing to start: APP_BIND=%s with %s exposes unauthenticated "
+            "access to the network. Bind loopback, enable auth (AUTH_ENABLED=true, "
+            "LOCALHOST_BYPASS=false), or set AEGIS_INSECURE_BIND=1 to override." % (
+                bind_host,
+                "AUTH_ENABLED=false" if auth_off else "LOCALHOST_BYPASS=true",
+            )
+        )
+
+
 if __name__ == "__main__":
     import uvicorn
 
     bind_host = os.getenv("APP_BIND", "127.0.0.1")
     bind_port = int(os.getenv("APP_PORT", "7000"))
+
+    # Fail closed on dangerous combinations instead of serving them: an
+    # unauthenticated (or loopback-trusted) listener must never sit on a
+    # non-loopback interface.
+    assert_safe_bind(bind_host)
 
     uvicorn.run(app, host=bind_host, port=bind_port, log_level="info")

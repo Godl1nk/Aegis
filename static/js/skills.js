@@ -9,6 +9,7 @@ import uiModule from './ui.js';
 import * as spinnerModule from './spinner.js';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 import { topPortalZ } from './toolWindowZOrder.js';
+import { createRequiredToolPicker } from './skillTools.js';
 
 const API = window.location.origin;
 let skills = [];
@@ -1146,6 +1147,7 @@ function _openSkillForm(card, name) {
   form.appendChild(_skillField('procedure', 'How', 'the steps, commands, or rules — one per line',
     (sk.procedure || []).join('\n'), { multiline: true, rows: 10, grow: true }));
   form.appendChild(_skillField('tags', 'Tags', 'comma-separated, e.g. python, build, vllm', (sk.tags || []).join(', ')));
+  form.appendChild(createRequiredToolPicker(sk.requires_toolsets || []));
 
   const raw = document.createElement('button');
   raw.type = 'button';
@@ -1210,6 +1212,7 @@ async function _saveSkillForm(card, name) {
     procedure: val('procedure')
       .split('\n').map(s => s.replace(/^\s*(?:[-*]|\d+[.)])\s+/, '').trim()).filter(Boolean),
     tags: val('tags').split(',').map(t => t.trim()).filter(Boolean),
+    requires_toolsets: form.querySelector('.skill-tool-picker').getSelectedTools(),
   };
   if (newName && newName !== name) payload.name = newName;
 
@@ -2086,6 +2089,7 @@ async function addSkill() {
         when_to_use: whenToUse,
         procedure,
         tags,
+        requires_toolsets: document.querySelector('#new-skill-tools .skill-tool-picker')?.getSelectedTools() || [],
         status: 'draft',
       }),
     });
@@ -2094,6 +2098,7 @@ async function addSkill() {
      'new-skill-problem', 'new-skill-procedure', 'new-skill-solution', 'new-skill-tags',
      'new-skill-category']
       .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+    document.querySelector('#new-skill-tools .skill-tool-picker')?.resetSelection();
     await loadSkills();
     uiModule.showToast('Skill added (draft)');
   } catch (err) {
@@ -2102,6 +2107,7 @@ async function addSkill() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('new-skill-tools')?.appendChild(createRequiredToolPicker());
   document.getElementById('skill-import-url-btn')?.addEventListener('click', importSkillFromUrl);
   document.getElementById('skill-import-url')?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') importSkillFromUrl();

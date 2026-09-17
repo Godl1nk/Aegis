@@ -891,7 +891,55 @@ def _detect_provider(url: str) -> str:
         return "cerebras"
     if _host_match(url, "mistral.ai"):
         return "mistral"
+    # Explicit per-endpoint API-method overrides (see API_METHODS) build chat
+    # URLs with a distinctive path suffix, so the override survives here with
+    # no signature changes at call sites: detection runs on the final chat
+    # URL everywhere (llm_call_async, stream_llm, _stream_target_url).
+    # Host-specific matches above stay authoritative; these only cover custom
+    # hosts the admin forced onto a method.
+    try:
+        path = (urlparse(url).path or "").rstrip("/")
+    except Exception:
+        path = ""
+    if path.endswith("/responses"):
+        return "responses"
+    if path.endswith("/v1/messages"):
+        return "anthropic"
+    if path.endswith("/api/chat"):
+        return "ollama"
     return "openai"
+
+
+# Per-endpoint API methods selectable in the admin UI (stored on
+# ModelEndpoint.api_method, "auto" = today's URL inference). Values map to
+# the internal provider dispatch used for URL/payload/parse selection.
+API_METHODS = ("auto", "chat_completions", "responses", "anthropic", "ollama")
+
+_API_METHOD_PROVIDERS = {
+    "chat_completions": "openai",
+    "responses": "responses",
+    "anthropic": "anthropic",
+    "ollama": "ollama",
+}
+
+
+def _normalize_api_method(value) -> str:
+    """Validate an api_method option, falling back to "auto"."""
+    method = str(value or "auto").strip().lower()
+    return method if method in API_METHODS else "auto"
+
+
+def _resolve_provider(url: str, api_method=None) -> str:
+    """Effective provider for a URL, honoring an explicit API method.
+
+    Used when building URLs/headers from a stored base URL (where the path
+    suffix the method implies is not present yet). Everywhere else the built
+    chat URL already carries the suffix, so plain _detect_provider agrees.
+    """
+    method = _normalize_api_method(api_method)
+    if method in _API_METHOD_PROVIDERS:
+        return _API_METHOD_PROVIDERS[method]
+    return _detect_provider(url)
 
 
 def _is_self_hosted_openai_compatible(url: str) -> bool:
@@ -1063,6 +1111,15 @@ def _normalize_chatgpt_subscription_url(url: str) -> str:
     return base + "/responses"
 
 
+def _normalize_responses_url(url: str) -> str:
+    """Chat URL for a generic Responses-API endpoint (standard OpenAI wire
+    shape, Bearer auth) — same path rule as the subscription Codex API."""
+    base = (url or "").strip().rstrip("/")
+    if base.endswith("/responses"):
+        return base
+    return base + "/responses"
+
+
 def _message_content_as_text(content) -> str:
     if isinstance(content, str):
         return content
@@ -1101,6 +1158,7 @@ def _build_chatgpt_responses_payload(
     max_tokens: int,
     *,
     stream: bool = False,
+    include_max_output_tokens: bool = False,
 ) -> Dict:
     from src.chatgpt_subscription import build_responses_input
 
@@ -1117,7 +1175,34 @@ def _build_chatgpt_responses_payload(
     # ChatGPT Subscription Codex API does not support max_output_tokens —
     # passing it returns HTTP 400 "Unsupported parameter: max_output_tokens".
     # Do not include it in the payload.
+    if include_max_output_tokens and max_tokens and max_tokens > 0:
+        # Generic Responses-API endpoints (real OpenAI shape) do accept it.
+        payload["max_output_tokens"] = max_tokens
     return payload
+
+
+def _parse_responses_response(data: Dict) -> str:
+    """Extract assistant text from a non-streamed Responses-API response.
+
+    Walks ``output`` items for message content blocks (``output_text`` /
+    ``refusal``), ignoring function-call and reasoning items. Returns ""
+    when nothing textual is present so callers surface empty rather than
+    crash on the schema.
+    """
+    try:
+        items = (data or {}).get("output") or []
+    except Exception:
+        return ""
+    texts: List[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for block in item.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") in ("output_text", "refusal") and isinstance(block.get("text"), str):
+                texts.append(block["text"])
+    return "".join(texts)
 
 
 def _format_chatgpt_subscription_error(status_code: int, text: str) -> str:
@@ -1886,6 +1971,13 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
             presence_penalty=presence_penalty, frequency_penalty=frequency_penalty,
         )
         _apply_reasoning_preference(payload, provider, model, url, messages_copy)
+    elif provider == "responses":
+        target_url = _normalize_responses_url(url)
+        h = _provider_headers("openai", headers)
+        payload = _build_chatgpt_responses_payload(
+            model, messages_copy, temperature, max_tokens,
+            stream=False, include_max_output_tokens=True,
+        )
     else:
         target_url = _normalize_openai_chat_url(url)
         if provider == "copilot":
@@ -1928,6 +2020,8 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
             response = _parse_anthropic_response(data)
         elif provider == "ollama":
             response = _parse_ollama_response(data)
+        elif provider == "responses":
+            response = _parse_responses_response(data)
         else:
             msg = data["choices"][0]["message"]
             content = msg.get("content")
@@ -2060,10 +2154,12 @@ async def llm_call_async(
         logger.debug(f"Returning cached response for key: {cache_key}")
         return cached_response
 
-    if provider == "chatgpt-subscription":
+    if provider in ("chatgpt-subscription", "responses"):
         # ChatGPT/Codex requires streamed Responses requests even for callers
         # that want a plain string (auto-title, memory extraction, etc.).
-        # Reuse stream_llm's validated Codex SSE path and collect deltas.
+        # Generic "responses" endpoints speak the same SSE shape, so they
+        # share this collect path. Reuse stream_llm's validated SSE path and
+        # collect deltas.
         parts: List[str] = []
         async for chunk in stream_llm(
             url,
@@ -2095,7 +2191,8 @@ async def llm_call_async(
                     continue
                 if event_is_error or data.get("error") or (data.get("status") and data.get("text")):
                     status = int(data.get("status") or 502)
-                    text = data.get("text") or data.get("error") or "ChatGPT Subscription request failed"
+                    default_err = "ChatGPT Subscription request failed" if provider == "chatgpt-subscription" else "Responses API request failed"
+                    text = data.get("text") or data.get("error") or default_err
                     raise HTTPException(status, text)
                 delta = data.get("delta")
                 if isinstance(delta, str):
@@ -2217,6 +2314,8 @@ def _stream_target_url(url: str) -> str:
         return _normalize_ollama_url(url)
     if provider == "chatgpt-subscription":
         return _normalize_chatgpt_subscription_url(url)
+    if provider == "responses":
+        return _normalize_responses_url(url)
     return _normalize_openai_chat_url(url)
 
 
@@ -2375,6 +2474,15 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         target_url = _normalize_chatgpt_subscription_url(url)
         h = _provider_headers(provider, headers)
         payload = _build_chatgpt_responses_payload(model, messages_copy, temperature, max_tokens, stream=True)
+    elif provider == "responses":
+        # Generic Responses API: standard OpenAI wire shape with Bearer auth
+        # (unlike the subscription Codex API). max_output_tokens is valid here.
+        target_url = _normalize_responses_url(url)
+        h = _provider_headers("openai", headers)
+        payload = _build_chatgpt_responses_payload(
+            model, messages_copy, temperature, max_tokens,
+            stream=True, include_max_output_tokens=True,
+        )
     else:
         target_url = _normalize_openai_chat_url(url)
         payload = {
@@ -2428,7 +2536,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     degenerate_guard = _DegenerateStreamGuard(model)
 
     # ── ChatGPT Subscription / Codex Responses streaming ──
-    if provider == "chatgpt-subscription":
+    # Generic "responses" endpoints speak the same Responses SSE shape
+    # (response.output_text.delta / response.completed).
+    if provider in ("chatgpt-subscription", "responses"):
         event_name = ""
         input_tokens = 0
         output_tokens = 0
@@ -2438,7 +2548,10 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
-                    friendly = _format_chatgpt_subscription_error(r.status_code, raw)
+                    if provider == "chatgpt-subscription":
+                        friendly = _format_chatgpt_subscription_error(r.status_code, raw)
+                    else:
+                        friendly = _format_upstream_error(r.status_code, raw, target_url)
                     yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
                     return
                 async for line in r.aiter_lines():
