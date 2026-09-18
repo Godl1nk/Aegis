@@ -1117,22 +1117,74 @@ def _docker_managed_context(env: dict) -> dict | None:
     return {"root": HOST_PROJECT_MOUNT, "project": project}
 
 
-def _spawn_host_rebuild(project_root: str, project: str, commit: str) -> str:
+REBUILD_CLAIM_MAX_AGE_S = 90 * 60
+REBUILD_CLAIM_NAME = "rebuild.inflight"
+
+
+def _rebuild_claim_path(data_dir: str | None = None) -> str:
+    return os.path.join(_staging_dir(data_dir), REBUILD_CLAIM_NAME)
+
+
+def _read_rebuild_claim(data_dir: str | None = None) -> dict | None:
+    """Live rebuild claim, or None when absent, unreadable, or stale.
+
+    A claim is written when a detached rebuild launches and removed when its
+    compose run exits; a leftover older than the max age is a dead CLI (kill
+    -9, power loss) and is treated as absent — the next spawn overwrites it.
+    """
+    try:
+        with open(_rebuild_claim_path(data_dir), encoding="utf-8") as f:
+            info = json.load(f)
+        if not isinstance(info, dict) or not info.get("commit"):
+            return None
+        age = time.time() - float(info.get("t") or 0)
+    except Exception:
+        return None
+    return info if age < REBUILD_CLAIM_MAX_AGE_S else None
+
+
+def _write_rebuild_claim(data_dir: str | None, commit: str) -> None:
+    path = _rebuild_claim_path(data_dir)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"commit": commit, "t": time.time()}, f)
+    os.replace(tmp, path)
+
+
+def _clear_rebuild_claim(data_dir: str | None) -> None:
+    try:
+        os.remove(_rebuild_claim_path(data_dir))
+    except OSError:
+        pass
+
+
+def _spawn_host_rebuild(project_root: str, project: str, commit: str,
+                        data_dir: str | None = None) -> str:
     """Fire-and-forget `docker compose up -d --build` in the host project.
 
     Fully detached: this container is recreated mid-command and must not
     take the CLI down with it. Build output goes to logs/rebuild.log, which
-    is bind-mounted and survives the recreate.
+    is bind-mounted and survives the recreate. The compose wrapper removes
+    the rebuild claim on exit (success or failure) so a later update is
+    never blocked by this one; a claim whose CLI was hard-killed ages out
+    instead (see _read_rebuild_claim). Launch failures propagate to the
+    caller, which owns claim cleanup (_apply_docker clears it).
     """
     from core.platform_compat import detached_popen_kwargs
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", project):
+        raise UpdateError(f"Refusing rebuild: unexpected compose project name {project!r}")
     log_path = os.path.join(project_root, "logs", "rebuild.log")
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    cmd = ["docker", "compose", "-p", project, "up", "-d", "--build", "--remove-orphans"]
+    claim = _rebuild_claim_path(data_dir)
+    env = dict(os.environ, _AEGIS_PROJECT=project, _AEGIS_CLAIM=claim)
+    cmd = ["sh", "-c",
+           'docker compose -p "$_AEGIS_PROJECT" up -d --build --remove-orphans; '
+           'code=$?; rm -f "$_AEGIS_CLAIM"; exit $code']
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     with open(log_path, "ab") as logf:
         logf.write(f"[{stamp}] one-click rebuild for update {commit}\n".encode())
         subprocess.Popen(cmd, cwd=project_root, stdout=logf, stderr=subprocess.STDOUT,
-                         stdin=subprocess.DEVNULL, **detached_popen_kwargs())
+                         stdin=subprocess.DEVNULL, env=env, **detached_popen_kwargs())
     return log_path
 
 
@@ -1169,6 +1221,15 @@ def _apply_docker(staged: dict, state: dict, env: dict, data_dir: str | None,
         # rebuild. installed_commit is deliberately NOT recorded here: the
         # stamped tree resolves the baseline when the new image boots, and
         # recording now would claim success if the rebuild then fails.
+        # Single-flight first: a second apply while a rebuild runs would
+        # stack another stop/start cycle on the same stack (each cycle can
+        # strand the previous orchestrator mid-handoff). Refuse instead.
+        live_claim = _read_rebuild_claim(data_dir)
+        if live_claim is not None:
+            raise UpdateError(
+                "A rebuild is already in progress"
+                f" ({(live_claim.get('commit') or '')[:12]}); check logs/rebuild.log "
+                "instead of stacking another one.")
         result = _apply_files(staged, state, env, data_dir, root=managed["root"],
                               record_installed=False, auto_restart=False)
         try:
@@ -1176,12 +1237,13 @@ def _apply_docker(staged: dict, state: dict, env: dict, data_dir: str | None,
                 f.write(staged["commit"])
         except OSError:
             pass
-        log_path = _spawn_host_rebuild(managed["root"], managed["project"], staged["commit"])
+        _write_rebuild_claim(data_dir, staged["commit"])
         try:
-            state["rebuilding"] = {"commit": staged["commit"], "t": time.time()}
-            _save_state(state, data_dir)
+            log_path = _spawn_host_rebuild(managed["root"], managed["project"],
+                                           staged["commit"], data_dir)
         except Exception:
-            pass
+            _clear_rebuild_claim(data_dir)
+            raise
         result.update({"applied": "rebuilding", "mode": "docker", "rebuild_log": log_path,
                        "note": "Rebuilding now — the page will drop for a few minutes."})
         return result
@@ -1411,28 +1473,13 @@ def maybe_auto_update(data_dir: str | None = None, now_hour: int | None = None) 
     if not latest:
         return {"acted": False, "reason": "remote-unreachable"}
     if not res.get("update_available"):
-        # check_for_updates saved state after our earlier load; re-read so
-        # clearing the entry cannot clobber its checked_at/latest_known.
-        fresh = load_state(data_dir)
-        if fresh.pop("rebuilding", None) is not None:
-            try:
-                _save_state(fresh, data_dir)
-            except Exception:
-                pass
         return {"acted": False, "reason": "up-to-date"}
     state = load_state(data_dir)
     staged = state.get("staged") or {}
-    rebuilding = state.get("rebuilding") or {}
-    if rebuilding.get("commit") == latest:
-        # A rebuild was launched but this container is still the old one
-        # (slow build, or it failed). Give it up to two hours, then retry
-        # rather than stacking a rebuild every tick.
-        try:
-            recent = (time.time() - float(rebuilding.get("t") or 0)) < 2 * 3600
-        except (TypeError, ValueError):
-            recent = False
-        if recent:
-            return {"acted": False, "reason": "rebuild-in-flight"}
+    if _read_rebuild_claim(data_dir) is not None:
+        # A rebuild launched earlier is still running (or died without
+        # cleaning up recently) — do not stack another stop/start cycle.
+        return {"acted": False, "reason": "rebuild-in-flight"}
     staged_current = (staged.get("commit") == latest
                       and os.path.exists(staged.get("path", "")))
     if staged_current and _docker_legacy_needs_host():
