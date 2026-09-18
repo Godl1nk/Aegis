@@ -1,5 +1,23 @@
 // One DOM message per agent response. Round nodes keep their identity so the
 // streaming renderer can keep updating them without rebuilding the transcript.
+const ACTIVITY_OPEN_PREFIX = 'aegis:agent-activity-open:';
+
+export function readActivityOpen(dbId) {
+  if (!dbId) return null;
+  try {
+    const v = localStorage.getItem(ACTIVITY_OPEN_PREFIX + dbId);
+    return v == null ? null : v === '1';
+  } catch (_) {
+    return null;
+  }
+}
+
+export function writeActivityOpen(dbId, open) {
+  if (!dbId) return;
+  try {
+    localStorage.setItem(ACTIVITY_OPEN_PREFIX + dbId, open ? '1' : '0');
+  } catch (_) {}
+}
 function updateActivity(root, finished) {
   const activity = root.querySelector('.agent-turn-activity');
   const steps = root.querySelector('.agent-turn-steps');
@@ -42,6 +60,22 @@ export function createAgentTurn(parent, firstRound = null) {
   steps.className = 'agent-turn-steps';
   activity.append(summary, steps);
   activity.hidden = true;
+  // Activity stays showing: open by default, and an explicit toggle is
+  // remembered per message across reloads. Only trusted (real-click) toggles
+  // count — programmatic opens (e.g. finish on interrupt) must not overwrite
+  // the user's choice.
+  let userToggledActivity = false;
+  const applyStoredActivityOpen = () => {
+    if (userToggledActivity) return;
+    const saved = readActivityOpen(root.dataset.dbId);
+    activity.open = saved !== null ? saved : true;
+  };
+  activity.open = true;
+  activity.addEventListener('toggle', (e) => {
+    if (!e.isTrusted) return;
+    userToggledActivity = true;
+    if (root.dataset.dbId) writeActivityOpen(root.dataset.dbId, activity.open);
+  });
   // Keep the answer first in DOM for existing copy/edit/variant actions;
   // CSS places activity before it visually.
   root.append(role, answer, activity);
@@ -59,7 +93,10 @@ export function createAgentTurn(parent, firstRound = null) {
       role.title = sourceRole.title;
       if (timestamp && !role.querySelector('.role-timestamp')) role.append(timestamp);
     }
-    if (round.dataset.dbId) root.dataset.dbId = round.dataset.dbId;
+    if (round.dataset.dbId && round.dataset.dbId !== root.dataset.dbId) {
+      root.dataset.dbId = round.dataset.dbId;
+      applyStoredActivityOpen();
+    }
     if (round._memoriesUsed) root._memoriesUsed = round._memoriesUsed;
   }
 
@@ -88,7 +125,10 @@ export function createAgentTurn(parent, firstRound = null) {
     finished = true;
     sync();
     if (raw != null) root.dataset.raw = raw;
-    if (dbId) root.dataset.dbId = dbId;
+    if (dbId && dbId !== root.dataset.dbId) {
+      root.dataset.dbId = dbId;
+      applyStoredActivityOpen();
+    }
     root.classList.remove('streaming');
     root.querySelectorAll('.agent-turn-round.streaming').forEach(node => node.classList.remove('streaming'));
     // Stop/error paths can attach a footer to the original round. Keep one

@@ -48,7 +48,7 @@ function checkHistory() {
   assert(card.dataset.dbId === 'qa-response', 'Persisted message ID belongs to the response card');
   assert(card.querySelectorAll('.msg-footer').length === 1, 'One footer for all tool rounds');
   assert(card.querySelectorAll('.agent-thread-node').length === 4, 'All tool calls retained');
-  assert(!card.querySelector('.agent-turn-activity').open, 'Activity collapsed by default');
+  assert(card.querySelector('.agent-turn-activity').open, 'Activity stays showing by default');
   assert(card.querySelector('.agent-turn-activity > summary').textContent.includes('1 failed'), 'Failure count remains visible');
   assert(card.querySelector('.body').textContent.includes(finalText), 'Final answer stays outside Activity');
   assert(!card.querySelector('.body').textContent.includes('Intermediate update'), 'Intermediate prose stays in Activity');
