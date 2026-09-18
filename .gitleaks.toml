@@ -1,0 +1,8 @@
+# Local gitleaks allowlist: findings triaged as non-secrets.
+# Each entry documents WHY the match is safe; remove an entry and the
+# Secret scan workflow goes red again until the finding is re-triaged.
+# (Committed SHAs are immutable, so pinning a commit can only ever ignore
+# what was verified below.)
+[[allowlists]]
+description = "2026-06-08 triaged: const MIGRATION_KEY = 'aegis-emoji-migrated-v1' in static/app.js is a localStorage flag name, not a credential (matched the generic-api-key shape)."
+commits = ["9c36f364b494a18b3d0b7a13d17a6e14e22ecd77"]
