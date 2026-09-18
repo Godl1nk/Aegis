@@ -16,3 +16,7 @@ services:
     group_add: ["${DOCKER_GID:-963}"]
     environment:
       - ODYSSEUS_ENABLE_HOST_DOCKER=true
+      # Forward the project name into the container: .env values feed
+      # compose interpolation but are never injected, so without this the
+      # in-container updater cannot tell which stack to rebuild.
+      - COMPOSE_PROJECT_NAME

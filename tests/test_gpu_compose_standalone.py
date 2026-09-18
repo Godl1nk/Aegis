@@ -173,6 +173,7 @@ def test_base_plus_host_docker_overlay_has_explicit_access(base):
 
     assert "/var/run/docker.sock:/var/run/docker.sock" in service["volumes"]
     assert "ODYSSEUS_ENABLE_HOST_DOCKER=true" in service["environment"]
+    assert "COMPOSE_PROJECT_NAME" in service["environment"]
     assert service["group_add"] == ["${DOCKER_GID:-963}"]
 
 
