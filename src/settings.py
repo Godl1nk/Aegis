@@ -277,6 +277,14 @@ DEFAULT_SETTINGS = {
         "cancel": "escape",
     },
     "max_upload_size_mb": 10,
+    # ── Hands-free updates (src/app_update.py) ──
+    # When True, the scheduler finishes main-branch updates overnight exactly
+    # like the update button (one-click rebuild with mounts, staged+manual
+    # otherwise). Default OFF: updates otherwise wait for the admin's click.
+    "auto_update_enabled": False,
+    # Maintenance window (server-local hours, end exclusive, may wrap midnight).
+    "auto_update_start_hour": 2,
+    "auto_update_end_hour": 6,
 }
 
 DEFAULT_FEATURES = {

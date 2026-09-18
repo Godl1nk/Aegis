@@ -3034,7 +3034,9 @@ function initUpdates() {
         } else { throw e; }
       }
       const backupNote = ap.backup ? ` Backup at ${ap.backup}${_fmtMB(ap.backup_bytes)}.` : '';
-      if (ap.mode === 'docker') {
+      if (ap.mode === 'docker' && ap.applied === 'rebuilding') {
+        say('Update installed — rebuilding now. The page will drop for a few minutes; press Check now afterwards.', 'admin-success');
+      } else if (ap.mode === 'docker') {
         say('Staged for Docker. Finish on the host: ' + (ap.host_command || 'rebuild the stack') , 'admin-success');
       } else if (ap.pending_restart) {
         say('Installed.' + backupNote + ' Restart the app to finish.', 'admin-success');
@@ -3061,6 +3063,39 @@ function initUpdates() {
     rbBtn.disabled = false;
     await loadUpdateStatus();
   });
+  // Automatic-install settings row (checkbox + maintenance window).
+  const autoChk = el('adm-updAutoChk'), autoStart = el('adm-updAutoStart'),
+        autoEnd = el('adm-updAutoEnd'), autoSave = el('adm-updAutoSave'),
+        autoMsg = el('adm-updAutoMsg');
+  const autoSay = (t, cls) => { if (autoMsg) { autoMsg.textContent = t; autoMsg.className = cls || ''; } };
+  const _hourOr = (v, fb) => { const n = parseInt(v, 10); return Number.isFinite(n) ? n : fb; };
+  async function loadAuto() {
+    if (!autoChk) return;
+    try {
+      const r = await fetch('/api/admin/updates/auto', { credentials: 'same-origin' });
+      if (!r.ok) throw new Error('status ' + r.status);
+      const a = await r.json();
+      autoChk.checked = !!a.enabled;
+      autoStart.value = a.start_hour; autoEnd.value = a.end_hour;
+      if (a.last && a.last.at) {
+        autoSay(`Last automatic pass: ${a.last.result || '?'}${a.last.commit ? ' (' + String(a.last.commit).slice(0, 12) + ')' : ''} at ${a.last.at}`,
+          a.last.result === 'staged' ? 'admin-success' : '');
+      }
+    } catch (e) { autoSay('Auto-update settings unavailable.'); }
+  }
+  if (autoSave) autoSave.addEventListener('click', async () => {
+    autoSave.disabled = true; autoSay('Saving…');
+    try {
+      const res = await post('/api/admin/updates/auto', {
+        enabled: !!autoChk.checked,
+        start_hour: _hourOr(autoStart.value, 2), end_hour: _hourOr(autoEnd.value, 6),
+      });
+      autoChk.checked = !!res.enabled; autoStart.value = res.start_hour; autoEnd.value = res.end_hour;
+      autoSay('Saved. Takes effect on the next hourly check.', 'admin-success');
+    } catch (e) { autoSay('Save failed: ' + e.message, 'admin-error'); }
+    autoSave.disabled = false;
+  });
+  loadAuto();
 }
 
 /* ── Danger Zone ── */

@@ -678,9 +678,10 @@ def _write_manifest(dest: str, manifest: dict) -> None:
     os.replace(tmp, path)
 
 
-def _backup_for_apply(state: dict, commit: str, data_dir: str | None, orphans: list[str]) -> dict:
+def _backup_for_apply(state: dict, commit: str, data_dir: str | None, orphans: list[str],
+                      root: str | None = None) -> dict:
     """Timestamped backup: manifest + .env + state copy + orphaned custom files."""
-    root = _app_root()
+    root = root or _app_root()
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     dest = os.path.join(_backups_dir(data_dir), f"pre-update-{stamp}-{commit[:12]}")
     os.makedirs(dest, exist_ok=True)
@@ -857,8 +858,10 @@ def active_stream_count() -> int:
         return 0
 
 
-def _apply_files(staged: dict, state: dict, env: dict, data_dir: str | None) -> dict:
-    root = _app_root()
+def _apply_files(staged: dict, state: dict, env: dict, data_dir: str | None,
+                 *, root: str | None = None, record_installed: bool = True,
+                 auto_restart: bool = True) -> dict:
+    root = root or _app_root()
     with tempfile.TemporaryDirectory(prefix="aegis-update-") as tmp:
         tree = _safe_extract(staged["path"], tmp)
         incoming = set(os.listdir(tree))
@@ -892,7 +895,7 @@ def _apply_files(staged: dict, state: dict, env: dict, data_dir: str | None) -> 
             _dir_size(data_dir or _data_dir(), DATA_BACKUP_SKIP),
             data_dir,
         )
-        backup = _backup_for_apply(state, staged["commit"], data_dir, orphans)
+        backup = _backup_for_apply(state, staged["commit"], data_dir, orphans, root=root)
         # An auto-restore is only valid once the replaced-tree copy below has
         # fully completed. A failure during the backup copies themselves must
         # NOT trigger a restore (the live tree is still untouched — restoring
@@ -971,10 +974,14 @@ def _apply_files(staged: dict, state: dict, env: dict, data_dir: str | None) -> 
         backup["manifest"]["status"] = "complete"
         _write_manifest(backup["path"], backup["manifest"])
     previous = state.get("installed_commit")
-    state["installed_commit"] = staged["commit"]
-    state["installed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+    # Managed docker applies resolve their baseline from the stamped tree on
+    # boot instead: recording here would claim the new version while the
+    # rebuild may still fail, leaving a stale "up-to-date" behind it.
+    if record_installed:
+        state["installed_commit"] = staged["commit"]
+        state["installed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     history = state.get("history") or []
-    history.append({"commit": staged["commit"], "at": state["installed_at"],
+    history.append({"commit": staged["commit"], "at": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
                     "backup": backup["path"], "previous": previous})
     state["history"] = history[-10:]
     state["staged"] = None
@@ -1000,10 +1007,70 @@ def _apply_files(staged: dict, state: dict, env: dict, data_dir: str | None) -> 
                           + ", ".join(sorted(set(skipped_locked))) + ")."
                           if skipped_locked else
                           "Restart the app to finish (the running executable was locked).")
-    else:
+    elif auto_restart:
         _schedule_restart()
         result["restart"] = "scheduled"
     return result
+
+
+HOST_PROJECT_MOUNT = "/host-project"
+
+
+def _docker_managed_context(env: dict) -> dict | None:
+    """One-click rebuild prerequisites inside the container.
+
+    Needs the host daemon socket, the project bind mount (both from the
+    opt-in docker/host-docker.yml overlay) AND the overlay's explicit
+    ODYSSEUS_ENABLE_HOST_DOCKER=true — socket presence alone never opts a
+    deployment in. Anything missing returns None and the caller falls back
+    to staged+host-command.
+    """
+    if os.environ.get("ODYSSEUS_ENABLE_HOST_DOCKER") != "true":
+        return None
+    if not env.get("docker") or not env.get("docker_socket"):
+        return None
+    root = HOST_PROJECT_MOUNT
+    if not os.path.isfile(os.path.join(root, "docker-compose.yml")):
+        return None
+    project = os.environ.get("COMPOSE_PROJECT_NAME") or (env.get("compose") or {}).get("project")
+    if not project:
+        return None
+    try:
+        out = subprocess.run(["docker", "compose", "version"],
+                             capture_output=True, text=True, timeout=30)
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    # The daemon itself must answer (a bad DOCKER_GID fails here, not later
+    # after the source tree was already swapped).
+    try:
+        info = subprocess.run(["docker", "info"],
+                              capture_output=True, text=True, timeout=15)
+    except Exception:
+        return None
+    if info.returncode != 0:
+        return None
+    return {"root": root, "project": project}
+
+
+def _spawn_host_rebuild(project_root: str, project: str, commit: str) -> str:
+    """Fire-and-forget `docker compose up -d --build` in the host project.
+
+    Fully detached: this container is recreated mid-command and must not
+    take the CLI down with it. Build output goes to logs/rebuild.log, which
+    is bind-mounted and survives the recreate.
+    """
+    from core.platform_compat import detached_popen_kwargs
+    log_path = os.path.join(project_root, "logs", "rebuild.log")
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    cmd = ["docker", "compose", "-p", project, "up", "-d", "--build", "--remove-orphans"]
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+    with open(log_path, "ab") as logf:
+        logf.write(f"[{stamp}] one-click rebuild for update {commit}\n".encode())
+        subprocess.Popen(cmd, cwd=project_root, stdout=logf, stderr=subprocess.STDOUT,
+                         stdin=subprocess.DEVNULL, **detached_popen_kwargs())
+    return log_path
 
 
 def _apply_docker(staged: dict, state: dict, env: dict, data_dir: str | None) -> dict:
@@ -1016,6 +1083,33 @@ def _apply_docker(staged: dict, state: dict, env: dict, data_dir: str | None) ->
         if os.path.exists(dest):
             shutil.rmtree(dest, ignore_errors=True)
         shutil.copytree(tree, dest)
+    # Record what the rebuilt image contains: the staged tree has no .git,
+    # so without this the post-rebuild check would see a stale baseline and
+    # (with auto-update on) queue another rebuild immediately.
+    try:
+        with open(os.path.join(dest, _DEPLOY_STAMP), "w", encoding="utf-8") as f:
+            f.write(staged["commit"])
+    except OSError:
+        pass
+    managed = _docker_managed_context(env)
+    if managed is not None:
+        # One-click path: same backup/replace/verify machinery as source
+        # installs, but targeting the host project tree (data/, logs/, .env
+        # stay in place — they are the same bind mounts), then a detached
+        # rebuild. installed_commit is deliberately NOT recorded here: the
+        # stamped tree resolves the baseline when the new image boots, and
+        # recording now would claim success if the rebuild then fails.
+        result = _apply_files(staged, state, env, data_dir, root=managed["root"],
+                              record_installed=False, auto_restart=False)
+        try:
+            with open(os.path.join(managed["root"], _DEPLOY_STAMP), "w", encoding="utf-8") as f:
+                f.write(staged["commit"])
+        except OSError:
+            pass
+        log_path = _spawn_host_rebuild(managed["root"], managed["project"], staged["commit"])
+        result.update({"applied": "rebuilding", "mode": "docker", "rebuild_log": log_path,
+                       "note": "Rebuilding now — the page will drop for a few minutes."})
+        return result
     host_cmd = "docker compose up -d --build"
     compose = env.get("compose") or {}
     if compose.get("working_dir"):
@@ -1142,3 +1236,134 @@ def status(data_dir: str | None = None) -> dict:
         "can_rollback": any(h.get("commit") and h["commit"] != installed for h in history),
         "environment": detect_environment(),
     }
+
+
+AUTO_UPDATE_TICK_SECONDS = 6 * 3600
+
+
+def auto_update_settings() -> dict:
+    """Hands-free update config (all defensive: the settings file is hand-editable)."""
+    from src.settings import get_setting
+
+    def _hour(key: str, default: int) -> int:
+        try:
+            value = int(get_setting(key, default))
+        except (TypeError, ValueError):
+            return default
+        return value if 0 <= value <= 23 else default
+
+    return {
+        "enabled": bool(get_setting("auto_update_enabled", False)),
+        "start_hour": _hour("auto_update_start_hour", 2),
+        "end_hour": _hour("auto_update_end_hour", 6),
+    }
+
+
+def _in_maintenance_window(hour: int, start: int, end: int) -> bool:
+    if start == end:
+        return False
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end
+
+
+def _record_auto(data_dir: str | None, commit: str | None, result: str) -> None:
+    try:
+        state = load_state(data_dir)
+        state["last_auto"] = {
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time())),
+            "t": time.time(),
+            "commit": commit,
+            "result": result,
+        }
+        _save_state(state, data_dir)
+    except Exception:
+        pass
+
+
+def _auto_backoff(state: dict, cooldown_s: int = 24 * 3600) -> bool:
+    """Skip this tick when the previous pass failed recently.
+
+    A persistently failing update (full disk, broken tree) must not redo a
+    backup+replace every hour; retry daily instead. Busy skips are not
+    failures and never back off.
+    """
+    last = state.get("last_auto") or {}
+    if "-failed" not in (last.get("result") or ""):
+        return False
+    try:
+        return (time.time() - float(last.get("t") or 0)) < cooldown_s
+    except (TypeError, ValueError):
+        return False
+
+
+def _docker_legacy_needs_host() -> bool:
+    """True when docker has no one-click mounts: applying would only re-stage
+    the same tree, so the auto pass should stay quiet instead."""
+    try:
+        env = detect_environment()
+    except Exception:
+        return False
+    return bool(env.get("docker")) and _docker_managed_context(env) is None
+
+
+def maybe_auto_update(data_dir: str | None = None, now_hour: int | None = None) -> dict:
+    """One hands-free update pass: check, download, and finish like the button.
+
+    Never raises — every failure is recorded in update state and returned.
+    Honors the maintenance window and skips while chats stream; backs off a
+    day after a failed pass so a broken tree is not re-applied hourly.
+    """
+    cfg = auto_update_settings()
+    if not cfg["enabled"]:
+        return {"acted": False, "reason": "disabled"}
+    hour = now_hour if now_hour is not None else time.localtime().tm_hour
+    if not _in_maintenance_window(hour, cfg["start_hour"], cfg["end_hour"]):
+        return {"acted": False, "reason": "outside-window"}
+    state = load_state(data_dir)
+    if _auto_backoff(state):
+        return {"acted": False, "reason": "backoff"}
+    if active_stream_count() > 0:
+        _record_auto(data_dir, None, "busy-streams")
+        return {"acted": False, "reason": "busy-streams"}
+    try:
+        res = check_for_updates(force=True, data_dir=data_dir)
+    except Exception as e:
+        _record_auto(data_dir, None, f"check-failed: {e}")
+        return {"acted": False, "reason": "check-failed"}
+    latest = (res.get("latest") or {}).get("sha")
+    if not latest:
+        return {"acted": False, "reason": "remote-unreachable"}
+    if not res.get("update_available"):
+        return {"acted": False, "reason": "up-to-date"}
+    state = load_state(data_dir)
+    staged = state.get("staged") or {}
+    staged_current = (staged.get("commit") == latest
+                      and os.path.exists(staged.get("path", "")))
+    if staged_current and _docker_legacy_needs_host():
+        _record_auto(data_dir, latest, "staged-needs-host")
+        return {"acted": False, "reason": "staged-needs-host"}
+    if not staged_current:
+        try:
+            dl = download_update(latest, data_dir)
+            latest = dl.get("commit") or latest
+        except UpdateBusy:
+            _record_auto(data_dir, latest, "busy-op")
+            return {"acted": False, "reason": "busy-op"}
+        except Exception as e:
+            _record_auto(data_dir, latest, f"download-failed: {e}")
+            return {"acted": False, "reason": "download-failed"}
+    # Same finish as the update button: source installs replace+restart,
+    # docker with one-click mounts rebuilds, otherwise it stages for a
+    # manual rebuild. Nothing here restarts or recreates synchronously.
+    try:
+        ap = apply_staged(latest, data_dir, force=False)
+    except UpdateBusy:
+        _record_auto(data_dir, latest, "busy-op")
+        return {"acted": False, "reason": "busy-op"}
+    except Exception as e:
+        _record_auto(data_dir, latest, f"apply-failed: {e}")
+        return {"acted": False, "reason": "apply-failed"}
+    _record_auto(data_dir, latest, f"applied-{ap.get('mode')}-{ap.get('applied')}")
+    return {"acted": True, "reason": "applied", "commit": latest,
+            "mode": ap.get("mode"), "applied": ap.get("applied")}

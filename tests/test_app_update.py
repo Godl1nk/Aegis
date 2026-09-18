@@ -438,3 +438,247 @@ def test_redirect_walk_never_reads_body(monkeypatch):
     assert seen.get("entered") is True
     with pytest.raises(app_update.UpdateError):
         app_update._follow_redirects("https://evil.example.com/x")
+
+
+def _auto_settings(monkeypatch, enabled=True, start=2, end=6):
+    vals = {"auto_update_enabled": enabled,
+            "auto_update_start_hour": start,
+            "auto_update_end_hour": end}
+    monkeypatch.setattr("src.settings.get_setting",
+                        lambda key, default=None: vals.get(key, default))
+
+
+def _never_called(name):
+    def _boom(**kwargs):
+        raise AssertionError(f"{name} must not run here")
+    return _boom
+
+
+def _auto_nets(monkeypatch, *, streams=0, latest="a" * 40, available=True,
+               downloaded="a" * 40, fail_download=None,
+               apply_result=None):
+    monkeypatch.setattr(app_update, "active_stream_count", lambda: streams)
+    monkeypatch.setattr(app_update, "check_for_updates",
+                        lambda force=False, data_dir=None: {
+                            "latest": {"sha": latest}, "update_available": available})
+    downloads, applies = [], []
+    if fail_download:
+        def _dl(ref=None, data_dir=None):
+            raise fail_download
+    else:
+        def _dl(ref=None, data_dir=None):
+            downloads.append(ref)
+            return {"commit": downloaded}
+    monkeypatch.setattr(app_update, "download_update", _dl)
+
+    def _ap(commit=None, data_dir=None, force=False):
+        applies.append((commit, force))
+        return dict(apply_result or {"applied": True, "mode": "source"})
+    monkeypatch.setattr(app_update, "apply_staged", _ap)
+    return downloads, applies
+
+
+def test_auto_update_disabled_does_nothing(tmp_path, monkeypatch):
+    _auto_settings(monkeypatch, enabled=False)
+    monkeypatch.setattr(app_update, "check_for_updates", _never_called("check"))
+    out = app_update.maybe_auto_update(str(tmp_path), now_hour=3)
+    assert out == {"acted": False, "reason": "disabled"}
+
+
+def test_auto_update_outside_window(tmp_path, monkeypatch):
+    _auto_settings(monkeypatch)
+    monkeypatch.setattr(app_update, "check_for_updates", _never_called("check"))
+    out = app_update.maybe_auto_update(str(tmp_path), now_hour=12)
+    assert out == {"acted": False, "reason": "outside-window"}
+
+
+def test_auto_update_window_wraps_midnight():
+    assert app_update._in_maintenance_window(23, 22, 6) is True
+    assert app_update._in_maintenance_window(5, 22, 6) is True
+    assert app_update._in_maintenance_window(12, 22, 6) is False
+    assert app_update._in_maintenance_window(3, 2, 6) is True
+    assert app_update._in_maintenance_window(3, 3, 3) is False
+
+
+def test_auto_update_skips_busy_streams(tmp_path, monkeypatch):
+    _auto_settings(monkeypatch)
+    _auto_nets(monkeypatch, streams=2)
+    out = app_update.maybe_auto_update(str(tmp_path), now_hour=3)
+    assert out == {"acted": False, "reason": "busy-streams"}
+    assert app_update.load_state(str(tmp_path))["last_auto"]["result"] == "busy-streams"
+
+
+def test_auto_update_up_to_date(tmp_path, monkeypatch):
+    _auto_settings(monkeypatch)
+    downloads, applies = _auto_nets(monkeypatch, available=False)
+    out = app_update.maybe_auto_update(str(tmp_path), now_hour=3)
+    assert out == {"acted": False, "reason": "up-to-date"}
+    assert downloads == [] and applies == []
+
+
+def test_auto_update_applies_like_button(tmp_path, monkeypatch):
+    _auto_settings(monkeypatch)
+    downloads, applies = _auto_nets(monkeypatch)
+    out = app_update.maybe_auto_update(str(tmp_path), now_hour=3)
+    assert out == {"acted": True, "reason": "applied", "commit": "a" * 40,
+                   "mode": "source", "applied": True}
+    assert downloads == ["a" * 40]
+    assert applies == [("a" * 40, False)]
+    assert app_update.load_state(str(tmp_path))["last_auto"]["result"] == "applied-source-True"
+
+
+def test_auto_update_reuses_current_stage(tmp_path, monkeypatch):
+    _auto_settings(monkeypatch)
+    downloads, applies = _auto_nets(monkeypatch)
+    staging = os.path.join(str(tmp_path), "update_staging")
+    os.makedirs(staging)
+    staged_path = os.path.join(staging, "pkg.zip")
+    open(staged_path, "w").write("x")
+    app_update._save_state({"staged": {"commit": "a" * 40, "path": staged_path}}, str(tmp_path))
+    out = app_update.maybe_auto_update(str(tmp_path), now_hour=3)
+    assert out["acted"] is True and out["commit"] == "a" * 40
+    assert downloads == []
+    assert applies == [("a" * 40, False)]
+
+
+def test_auto_update_backs_off_after_failure(tmp_path, monkeypatch):
+    _auto_settings(monkeypatch)
+    _auto_nets(monkeypatch, fail_download=app_update.UpdateError("boom"))
+    first = app_update.maybe_auto_update(str(tmp_path), now_hour=3)
+    assert first == {"acted": False, "reason": "download-failed"}
+    monkeypatch.setattr(app_update, "check_for_updates", _never_called("check"))
+    second = app_update.maybe_auto_update(str(tmp_path), now_hour=3)
+    assert second == {"acted": False, "reason": "backoff"}
+
+
+def test_auto_update_legacy_docker_stays_staged(tmp_path, monkeypatch):
+    _auto_settings(monkeypatch)
+    downloads, applies = _auto_nets(monkeypatch)
+    staging = os.path.join(str(tmp_path), "update_staging")
+    os.makedirs(staging)
+    staged_path = os.path.join(staging, "pkg.zip")
+    open(staged_path, "w").write("x")
+    app_update._save_state({"staged": {"commit": "a" * 40, "path": staged_path}}, str(tmp_path))
+    monkeypatch.setattr(app_update, "detect_environment",
+                        lambda: {"docker": True, "docker_socket": False})
+    out = app_update.maybe_auto_update(str(tmp_path), now_hour=3)
+    assert out == {"acted": False, "reason": "staged-needs-host"}
+    assert downloads == [] and applies == []
+
+
+def test_docker_managed_context_needs_all_parts(monkeypatch):
+    assert app_update._docker_managed_context({}) is None
+    assert app_update._docker_managed_context({"docker": True}) is None
+    env = {"docker": True, "docker_socket": True}
+    assert app_update._docker_managed_context(env) is None  # no /host-project here
+
+
+def test_docker_managed_context_opt_in(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    env = {"docker": True, "docker_socket": True}
+    monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", "true")
+    monkeypatch.setenv("COMPOSE_PROJECT_NAME", "odysseus")
+    monkeypatch.setattr(app_update, "HOST_PROJECT_MOUNT", str(tmp_path))
+    (tmp_path / "docker-compose.yml").write_text("services: {}")
+    monkeypatch.setattr(app_update.subprocess, "run",
+                        lambda *a, **k: SimpleNamespace(returncode=0))
+    assert app_update._docker_managed_context(env) == {
+        "root": str(tmp_path), "project": "odysseus"}
+    # Socket present but opt-in flag missing: never managed.
+    monkeypatch.delenv("ODYSSEUS_ENABLE_HOST_DOCKER")
+    assert app_update._docker_managed_context(env) is None
+
+
+def test_docker_managed_context_needs_daemon(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    env = {"docker": True, "docker_socket": True}
+    monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", "true")
+    monkeypatch.setenv("COMPOSE_PROJECT_NAME", "odysseus")
+    monkeypatch.setattr(app_update, "HOST_PROJECT_MOUNT", str(tmp_path))
+    (tmp_path / "docker-compose.yml").write_text("services: {}")
+
+    def _run(cmd, **kwargs):
+        if cmd[:2] == ["docker", "info"]:
+            return SimpleNamespace(returncode=1)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(app_update.subprocess, "run", _run)
+    assert app_update._docker_managed_context(env) is None
+
+
+def test_auto_update_download_failure_recorded(tmp_path, monkeypatch):
+    _auto_settings(monkeypatch)
+    _auto_nets(monkeypatch, fail_download=app_update.UpdateError("boom"))
+    out = app_update.maybe_auto_update(str(tmp_path), now_hour=3)
+    assert out == {"acted": False, "reason": "download-failed"}
+    assert "boom" in app_update.load_state(str(tmp_path))["last_auto"]["result"]
+
+
+def test_auto_update_check_failure_never_raises(tmp_path, monkeypatch):
+    _auto_settings(monkeypatch)
+    monkeypatch.setattr(app_update, "active_stream_count", lambda: 0)
+
+    def _offline(**kwargs):
+        raise app_update.UpdateError("offline")
+
+    monkeypatch.setattr(app_update, "check_for_updates", _offline)
+    out = app_update.maybe_auto_update(str(tmp_path), now_hour=3)
+    assert out == {"acted": False, "reason": "check-failed"}
+
+
+def test_auto_endpoints_roundtrip(monkeypatch, tmp_path):
+    import src.settings as settings_mod
+    import routes.admin_update_routes as aur
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(settings_mod, "SETTINGS_FILE", str(tmp_path / "settings.json"))
+    settings_mod._invalidate_caches()
+    monkeypatch.setattr(aur, "require_admin", lambda request: None)
+    app = FastAPI()
+    app.include_router(aur.setup_admin_update_routes())
+    client = TestClient(app, raise_server_exceptions=False)
+
+    got = client.get("/api/admin/updates/auto")
+    assert got.status_code == 200
+    assert got.json()["enabled"] is False
+    assert (got.json()["start_hour"], got.json()["end_hour"]) == (2, 6)
+
+    saved = client.post("/api/admin/updates/auto",
+                        json={"enabled": True, "start_hour": 1, "end_hour": 5})
+    assert saved.status_code == 200
+    assert saved.json() == {"enabled": True, "start_hour": 1, "end_hour": 5}
+    assert client.get("/api/admin/updates/auto").json()["enabled"] is True
+
+    for bad in ({"enabled": True, "start_hour": 9, "end_hour": 9},
+                {"enabled": True, "start_hour": 24, "end_hour": 6}):
+        assert client.post("/api/admin/updates/auto", json=bad).status_code == 400
+
+
+def test_apply_docker_managed_rebuilds_detached(tmp_path, monkeypatch):
+    host = tmp_path / "host"
+    (host / "logs").mkdir(parents=True)
+    zp = _make_zip(str(tmp_path / "up.zip"))
+    staged = {"commit": "a" * 40, "path": zp}
+    monkeypatch.setattr(app_update, "_docker_managed_context",
+                        lambda env: {"root": str(host), "project": "odysseus"})
+    applied = {}
+    monkeypatch.setattr(
+        app_update, "_apply_files",
+        lambda *a, **k: applied.update(root=k.get("root")) or {"applied": True, "mode": "source"})
+    spawned = {}
+
+    class _P:
+        def __init__(self, *a, **k):
+            spawned.update(args=a, kwargs=k)
+
+    monkeypatch.setattr(app_update.subprocess, "Popen", _P)
+    out = app_update._apply_docker(staged, {}, {"docker": True}, str(tmp_path))
+    assert out["applied"] == "rebuilding" and out["mode"] == "docker"
+    assert applied["root"] == str(host)
+    assert spawned["args"][0][:4] == ["docker", "compose", "-p", "odysseus"]
+    assert spawned["kwargs"]["cwd"] == str(host)
+    assert "start_new_session" in spawned["kwargs"] or "creationflags" in spawned["kwargs"]
+    assert open(host / ".deploy-commit").read() == "a" * 40
+    assert (host / "logs" / "rebuild.log").exists()
+

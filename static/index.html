@@ -2612,6 +2612,19 @@
               <button class="admin-btn-sm" id="adm-updRollbackBtn" style="display:none;">Roll back</button>
             </div>
             <div id="adm-updMsg" style="margin-top:6px;font-size:11px;"></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px;font-size:12px;">
+              <label style="display:flex;gap:6px;align-items:center;cursor:pointer;">
+                <input type="checkbox" id="adm-updAutoChk"> Install automatically
+              </label>
+              <label>between
+                <input type="number" id="adm-updAutoStart" min="0" max="23" step="1" style="width:52px;" title="Maintenance window start (server-local hour)">
+                and
+                <input type="number" id="adm-updAutoEnd" min="0" max="23" step="1" style="width:52px;" title="Maintenance window end (server-local hour, exclusive)">
+              </label>
+              <button class="admin-btn-sm" id="adm-updAutoSave">Save</button>
+              <span id="adm-updAutoMsg" style="font-size:11px;"></span>
+            </div>
+            <div class="admin-toggle-sub" style="margin-top:4px">Automatic installs finish overnight exactly like the button (one-click rebuild when the host-docker overlay is enabled, staged for a manual rebuild otherwise). Only runs while no chats stream.</div>
           </div>
           <div class="admin-card admin-danger-card">
             <h2 style="color:#e55;">Danger Zone</h2>

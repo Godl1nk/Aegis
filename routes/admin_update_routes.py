@@ -21,6 +21,12 @@ class UpdateCommitRequest(BaseModel):
     force: bool = False
 
 
+class AutoUpdateBody(BaseModel):
+    enabled: bool = False
+    start_hour: int = 2
+    end_hour: int = 6
+
+
 def setup_admin_update_routes() -> APIRouter:
     router = APIRouter(prefix="/api/admin/updates")
     _check_limiter = RateLimiter(max_requests=10, window_seconds=3600)
@@ -83,5 +89,31 @@ def setup_admin_update_routes() -> APIRouter:
             raise HTTPException(409, str(e))
         except app_update.UpdateError as e:
             raise HTTPException(502, str(e))
+
+    @router.get("/auto")
+    def update_auto_get(request: Request):
+        require_admin(request)
+        cfg = app_update.auto_update_settings()
+        try:
+            last = app_update.load_state().get("last_auto")
+        except Exception:
+            last = None
+        return {**cfg, "last": last}
+
+    @router.post("/auto")
+    def update_auto_set(request: Request, body: AutoUpdateBody):
+        require_admin(request)
+        start, end = int(body.start_hour), int(body.end_hour)
+        if not (0 <= start <= 23 and 0 <= end <= 23):
+            raise HTTPException(400, "maintenance window hours must be 0-23")
+        if start == end:
+            raise HTTPException(400, "maintenance window must not be empty (start != end)")
+        from src.settings import load_settings, save_settings
+        current = load_settings()
+        current["auto_update_enabled"] = bool(body.enabled)
+        current["auto_update_start_hour"] = start
+        current["auto_update_end_hour"] = end
+        save_settings(current)
+        return {"enabled": bool(body.enabled), "start_hour": start, "end_hour": end}
 
     return router

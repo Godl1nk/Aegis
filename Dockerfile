@@ -67,6 +67,23 @@ RUN ARCH="$(dpkg --print-architecture)" \
     && install -m 0755 /tmp/docker/docker /usr/local/bin/docker \
     && rm -rf /tmp/docker /tmp/docker.tgz
 
+# Compose v2 plugin (static binary, same pattern as the client above) so the
+# self-updater can rebuild its own stack through the host daemon — see
+# _apply_docker in src/app_update.py. The `docker compose version` check
+# fails the build loudly on a bad pin instead of at 3am during an update.
+ARG DOCKER_COMPOSE_VERSION=v2.29.7
+RUN ARCH="$(dpkg --print-architecture)" \
+    && case "$ARCH" in \
+         amd64) CARCH=x86_64 ;; \
+         arm64) CARCH=aarch64 ;; \
+         *) echo "unsupported arch $ARCH"; exit 1 ;; \
+       esac \
+    && mkdir -p /usr/local/lib/docker/cli-plugins \
+    && curl -fsSL "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-linux-${CARCH}" \
+       -o /usr/local/lib/docker/cli-plugins/docker-compose \
+    && chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose \
+    && docker compose version
+
 WORKDIR /app
 
 # Install Python deps first (layer cache). Optional extras stay opt-in; see

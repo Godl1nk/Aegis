@@ -556,6 +556,7 @@ class TaskScheduler:
         # old event scanner too caused duplicate emails/notifications for the
         # same calendar event.
         self._note_pings_task = asyncio.create_task(self._note_pings_loop())
+        self._auto_update_task = asyncio.create_task(self._auto_update_loop())
         logger.info(f"Task scheduler started (concurrency cap: {self._concurrency_cap})")
         # Audit clusters: show any minute-of-day where >1 active scheduled
         # tasks land. Helps spot "all my tasks fire at 9am" patterns the user
@@ -592,7 +593,7 @@ class TaskScheduler:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        for attr in ("_note_pings_task", "_event_pings_task"):
+        for attr in ("_note_pings_task", "_event_pings_task", "_auto_update_task"):
             t = getattr(self, attr, None)
             if t:
                 t.cancel()
@@ -639,6 +640,24 @@ class TaskScheduler:
                 except Exception as e:
                     logger.warning(f"ping_events background scanner errored for owner={ow!r}: {e}")
             await asyncio.sleep(600)  # 10 min
+
+    async def _auto_update_loop(self):
+        """Hands-free update staging — same recipe as the ping scanners.
+
+        Ticks hourly; the pass itself (src.app_update.maybe_auto_update)
+        only acts inside the maintenance window, while idle, when main
+        actually moved. Never raises out of the loop.
+        """
+        await asyncio.sleep(300)
+        while self._running:
+            tick = 6 * 3600  # src.app_update.AUTO_UPDATE_TICK_SECONDS
+            try:
+                from src import app_update as _au
+                tick = _au.AUTO_UPDATE_TICK_SECONDS
+                await asyncio.to_thread(_au.maybe_auto_update)
+            except Exception as e:
+                logger.warning(f"auto-update background pass errored: {e}")
+            await asyncio.sleep(tick)
 
     def _known_task_owners(self) -> list:
         """Distinct non-empty owners that background scanners should visit.
