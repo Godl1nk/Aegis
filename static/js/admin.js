@@ -2985,6 +2985,83 @@ async function loadUpdateStatus() {
   if (rbBtn) rbBtn.style.display = st.can_rollback ? '' : 'none';
 }
 
+/* ── Rebuild progress overlay ── */
+// Full-screen wait screen after a one-click rebuild starts. The rebuild runs
+// detached on the host, so closing this page is always safe — the overlay is
+// purely informational. Polls update status until the new commit serves,
+// then reloads; gives up with guidance after ~20 minutes.
+function _updOverlay(title, onDismiss) {
+  document.getElementById('adm-updOverlay')?.remove();
+  const ov = document.createElement('div');
+  ov.id = 'adm-updOverlay';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.74);';
+  ov.innerHTML = `<div style="text-align:center;max-width:440px;padding:28px;">
+      <div id="adm-updOverlaySpin" style="font-size:30px;line-height:1;">◐</div>
+      <div style="font-size:15px;font-weight:600;margin:14px 0 6px;">${title}</div>
+      <div id="adm-updOverlaySub" style="font-size:12px;opacity:.75;"></div>
+      <div style="margin-top:16px;"><button class="admin-btn-sm" id="adm-updOverlayHide">Hide (keeps rebuilding)</button></div>
+    </div>`;
+  document.body.appendChild(ov);
+  const frames = ['◐', '◓', '◑', '◒'];
+  let fi = 0;
+  const spinEl = ov.querySelector('#adm-updOverlaySpin');
+  const timer = setInterval(() => {
+    if (!ov.isConnected) { clearInterval(timer); return; }
+    fi = (fi + 1) % frames.length;
+    if (spinEl) spinEl.textContent = frames[fi];
+  }, 140);
+  let done = false;
+  ov.querySelector('#adm-updOverlayHide').addEventListener('click', () => {
+    if (done) return;
+    done = true;
+    clearInterval(timer);
+    ov.remove();
+    if (onDismiss) onDismiss();
+  });
+  return {
+    sub(text) {
+      const sub = ov.querySelector('#adm-updOverlaySub');
+      if (sub) sub.textContent = text;
+    },
+    get dismissed() { return done; },
+    remove() {
+      if (done) return;
+      done = true;
+      clearInterval(timer);
+      ov.remove();
+    },
+  };
+}
+
+async function _pollRebuildDone(commit, overlay, onDone) {
+  const want = String(commit || '').slice(0, 12);
+  const maxTries = 80, waitMs = 15000; // ~20 minute ceiling
+  for (let i = 1; i <= maxTries; i++) {
+    if (overlay.dismissed) return;
+    overlay.sub(`Waiting for version ${want} to serve… (${i}/${maxTries})`);
+    await new Promise((r) => setTimeout(r, waitMs));
+    if (overlay.dismissed) return;
+    let cur = null;
+    try {
+      // The server drops mid-recreate; failed fetches just mean "not yet".
+      const res = await fetch('/api/admin/updates/status', { credentials: 'same-origin' });
+      if (res.ok) {
+        const st = await res.json();
+        cur = st && st.current && st.current.commit;
+      }
+    } catch (e) { /* still rebuilding — keep waiting */ }
+    if (cur && String(cur).startsWith(want) && want) {
+      overlay.sub(`Version ${want} is serving — reloading…`);
+      await new Promise((r) => setTimeout(r, 1500));
+      overlay.remove();
+      window.location.reload();
+      return;
+    }
+  }
+  overlay.sub('Still rebuilding after ~20 minutes. Check logs/rebuild.log on the host, or press Check now later.');
+  if (onDone) onDone();
+}
+
 function initUpdates() {
   const msg = el('adm-updMsg');
   const updBtn = el('adm-updUpdateBtn');
@@ -3017,6 +3094,7 @@ function initUpdates() {
     updBtn.disabled = true; say('Downloading update package…');
     const _fmtMB = (b) => b ? ` (${(b / 1048576).toFixed(1)}MB backed up)` : '';
     const _applyOnce = async (commit, force) => post('/api/admin/updates/apply', { commit, force });
+    let _polling = false;
     try {
       const dl = await post('/api/admin/updates/download');
       say(`Downloaded ${String(dl.commit).slice(0, 12)} — backing up and applying…`);
@@ -3035,7 +3113,10 @@ function initUpdates() {
       }
       const backupNote = ap.backup ? ` Backup at ${ap.backup}${_fmtMB(ap.backup_bytes)}.` : '';
       if (ap.mode === 'docker' && ap.applied === 'rebuilding') {
-        say('Update installed — rebuilding now. The page will drop for a few minutes; press Check now afterwards.', 'admin-success');
+        _polling = true;
+        say('Update installed — rebuilding now. You can close this page; it is safe.', 'admin-success');
+        const _pollDone = () => { updBtn.disabled = false; loadUpdateStatus().catch(() => {}); };
+        _pollRebuildDone(dl.commit, _updOverlay('Installing update…', _pollDone), _pollDone);
       } else if (ap.mode === 'docker') {
         say('Staged for Docker. Finish on the host: ' + (ap.host_command || 'rebuild the stack') + (ap.managed_skip ? ` (one-click unavailable: ${ap.managed_skip})` : ''), 'admin-success');
       } else if (ap.pending_restart) {
@@ -3045,8 +3126,10 @@ function initUpdates() {
         setTimeout(() => window.location.reload(), 8000);
       }
     } catch (e) { say('Update failed: ' + e.message, 'admin-error'); }
-    updBtn.disabled = false;
-    await loadUpdateStatus();
+    if (!_polling) {
+      updBtn.disabled = false;
+      await loadUpdateStatus();
+    }
   });
   const rbBtn = el('adm-updRollbackBtn');
   if (rbBtn) rbBtn.addEventListener('click', async () => {

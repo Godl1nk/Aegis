@@ -175,6 +175,8 @@ def test_base_plus_host_docker_overlay_has_explicit_access(base):
     assert "ODYSSEUS_ENABLE_HOST_DOCKER=true" in service["environment"]
     assert "COMPOSE_PROJECT_NAME" in service["environment"]
     assert service["group_add"] == ["${DOCKER_GID:-963}"]
+    # The detached rebuild CLI must outlive the old container's teardown.
+    assert service["stop_grace_period"] == "5m"
 
 
 def test_nvidia_plus_host_docker_preserves_gpu_and_docker_access(base):

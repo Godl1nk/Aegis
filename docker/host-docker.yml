@@ -5,6 +5,13 @@
 #   DOCKER_GID=<numeric host Docker group id>
 services:
   odysseus:
+    # One-click updates rebuild this container from inside itself via a
+    # detached compose CLI. Docker only SIGTERMs PID 1 on stop, so the CLI
+    # survives the teardown — but only until the SIGKILL deadline. Give it
+    # minutes, not seconds: without this the CLI dies with the old container
+    # after the build but before the new one starts, leaving the stack down.
+    # Normal stops/restarts are unaffected (exits fast, deadline never hit).
+    stop_grace_period: 5m
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # Project tree for one-click self-updates (_apply_docker managed path):
