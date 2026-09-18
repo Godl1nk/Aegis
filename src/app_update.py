@@ -373,9 +373,10 @@ def _compose_context() -> dict | None:
         labels = ((info[0] or {}).get("Config") or {}).get("Labels") or {}
         working_dir = labels.get("com.docker.compose.project.working_dir")
         project = labels.get("com.docker.compose.project.name")
-        if not working_dir or not project:
+        image = ((info[0] or {}).get("Config") or {}).get("Image")
+        if not working_dir or not project or not image:
             return None
-        return {"working_dir": working_dir, "project": project}
+        return {"working_dir": working_dir, "project": project, "image": image}
     except Exception as e:
         logger.debug("Compose context lookup failed: %s", e)
         return None
@@ -1160,31 +1161,48 @@ def _clear_rebuild_claim(data_dir: str | None) -> None:
 
 def _spawn_host_rebuild(project_root: str, project: str, commit: str,
                         data_dir: str | None = None) -> str:
-    """Fire-and-forget `docker compose up -d --build` in the host project.
+    """Launch a throwaway helper container to rebuild+recreate the stack.
 
-    Fully detached: this container is recreated mid-command and must not
-    take the CLI down with it. Build output goes to logs/rebuild.log, which
-    is bind-mounted and survives the recreate. The compose wrapper removes
-    the rebuild claim on exit (success or failure) so a later update is
-    never blocked by this one; a claim whose CLI was hard-killed ages out
-    instead (see _read_rebuild_claim). Launch failures propagate to the
-    caller, which owns claim cleanup (_apply_docker clears it).
+    A process inside the app container cannot orchestrate its own teardown:
+    compose's recreate stops AND removes the old container, killing any
+    in-container orchestrator mid-handoff (setsid only survives the request
+    lifecycle; stop_grace_period only delays SIGKILL). So the app only swaps
+    source and spawns this helper, which is a separate container: it outlives
+    the app's teardown by construction, runs build+recreate, clears the
+    rebuild claim, and exits (--rm). No shell interpolation anywhere below:
+    the project name is validated and all inner paths are constants.
     """
     from core.platform_compat import detached_popen_kwargs
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", project):
         raise UpdateError(f"Refusing rebuild: unexpected compose project name {project!r}")
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise UpdateError("Refusing rebuild: expected a full commit SHA")
+    ctx = _compose_context() or {}
+    working, image = ctx.get("working_dir"), ctx.get("image")
+    if not working or not image:
+        raise UpdateError("Cannot inspect own container for the update helper")
+    helper = f"aegis-updater-{commit[:12]}"
+    try:
+        subprocess.run(["docker", "rm", "-f", helper],
+                       capture_output=True, timeout=30)
+    except Exception:
+        pass
+    # Claim/log paths below are relative to the project mount, whose layout
+    # (data/update_staging, logs) mirrors the shared DATA_DIR volume.
+    inner = ("docker compose -p " + project + " up -d --build "
+             ">>logs/rebuild.log 2>&1; rm -f data/update_staging/rebuild.inflight")
+    cmd = ["docker", "run", "-d", "--rm", "--name", helper,
+           "-v", "/var/run/docker.sock:/var/run/docker.sock",
+           "-v", working + ":/host-project", "-w", "/host-project",
+           "--entrypoint", "sh", image,
+           "-c", inner]
     log_path = os.path.join(project_root, "logs", "rebuild.log")
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    claim = _rebuild_claim_path(data_dir)
-    env = dict(os.environ, _AEGIS_PROJECT=project, _AEGIS_CLAIM=claim)
-    cmd = ["sh", "-c",
-           'docker compose -p "$_AEGIS_PROJECT" up -d --build --remove-orphans; '
-           'code=$?; rm -f "$_AEGIS_CLAIM"; exit $code']
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     with open(log_path, "ab") as logf:
-        logf.write(f"[{stamp}] one-click rebuild for update {commit}\n".encode())
+        logf.write(f"[{stamp}] one-click rebuild for update {commit} spawned helper {helper}\n".encode())
         subprocess.Popen(cmd, cwd=project_root, stdout=logf, stderr=subprocess.STDOUT,
-                         stdin=subprocess.DEVNULL, env=env, **detached_popen_kwargs())
+                         stdin=subprocess.DEVNULL, **detached_popen_kwargs())
     return log_path
 
 

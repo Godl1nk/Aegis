@@ -716,32 +716,17 @@ def test_auto_endpoints_roundtrip(monkeypatch, tmp_path):
 
 
 def test_apply_docker_managed_rebuilds_detached(tmp_path, monkeypatch):
-    host = tmp_path / "host"
-    (host / "logs").mkdir(parents=True)
-    zp = _make_zip(str(tmp_path / "up.zip"))
-    staged = {"commit": "a" * 40, "path": zp}
-    monkeypatch.setattr(app_update, "_docker_managed_context",
-                        lambda env: {"root": str(host), "project": "odysseus"})
+    host, spawned = _managed_env(monkeypatch, tmp_path)
     applied = {}
     monkeypatch.setattr(
         app_update, "_apply_files",
         lambda *a, **k: applied.update(root=k.get("root")) or {"applied": True, "mode": "source"})
-    spawned = {}
-
-    class _P:
-        def __init__(self, *a, **k):
-            spawned.update(args=a, kwargs=k)
-
-    monkeypatch.setattr(app_update.subprocess, "Popen", _P)
+    zp = _make_zip(str(tmp_path / "up.zip"))
+    staged = {"commit": "a" * 40, "path": zp}
     out = app_update._apply_docker(staged, {}, {"docker": True}, str(tmp_path))
     assert out["applied"] == "rebuilding" and out["mode"] == "docker"
     assert applied["root"] == str(host)
-    assert spawned["args"][0][:2] == ["sh", "-c"]
-    assert "docker compose" in spawned["args"][0][2]
-    assert "rm -f" in spawned["args"][0][2]
-    assert spawned["kwargs"]["cwd"] == str(host)
-    assert spawned["kwargs"]["env"]["_AEGIS_PROJECT"] == "odysseus"
-    assert "start_new_session" in spawned["kwargs"] or "creationflags" in spawned["kwargs"]
+    _assert_helper_shape(spawned, host)
     assert open(host / ".deploy-commit").read() == "a" * 40
     assert (host / "logs" / "rebuild.log").exists()
     import json as _json
@@ -755,9 +740,15 @@ def _managed_env(monkeypatch, tmp_path):
     (host / "logs").mkdir(parents=True)
     monkeypatch.setattr(app_update, "_docker_managed_context",
                         lambda env: {"root": str(host), "project": "odysseus"})
+    monkeypatch.setattr(app_update, "_compose_context",
+                        lambda: {"working_dir": "/h", "project": "odysseus",
+                                 "image": "odysseus-odysseus:latest"})
     monkeypatch.setattr(
         app_update, "_apply_files",
         lambda *a, **k: {"applied": True, "mode": "source"})
+    monkeypatch.setattr(app_update, "_compose_context",
+                        lambda: {"working_dir": "/h", "project": "odysseus",
+                                 "image": "odysseus-odysseus:latest"})
     spawned = {}
 
     class _P:
@@ -766,6 +757,19 @@ def _managed_env(monkeypatch, tmp_path):
 
     monkeypatch.setattr(app_update.subprocess, "Popen", _P)
     return host, spawned
+
+
+def _assert_helper_shape(spawned, host):
+    args = spawned["args"][0]
+    assert args[:6] == ["docker", "run", "-d", "--rm", "--name",
+                        "aegis-updater-aaaaaaaaaaaa"]
+    assert "--entrypoint" in args and "sh" in args
+    assert args[-2:] == ["-c", args[-1]]
+    assert "up -d --build" in args[-1] and "rm -f" in args[-1]
+    assert "-v" in args and "/var/run/docker.sock:/var/run/docker.sock" in args
+    assert "/h:/host-project" in args
+    assert spawned["kwargs"]["cwd"] == str(host)
+    assert "start_new_session" in spawned["kwargs"] or "creationflags" in spawned["kwargs"]
 
 
 def test_apply_docker_refuses_busy_streams_without_force(tmp_path, monkeypatch):
@@ -785,7 +789,7 @@ def test_apply_docker_force_proceeds_despite_streams(tmp_path, monkeypatch):
     out = app_update._apply_docker({"commit": "a" * 40, "path": zp},
                                    {}, {"docker": True}, str(tmp_path), force=True)
     assert out["applied"] == "rebuilding"
-    assert spawned["args"][0][:2] == ["sh", "-c"]
+    _assert_helper_shape(spawned, host)
 
 
 def _seed_claim(data_dir, commit="a" * 40, age_s=0):
@@ -821,6 +825,9 @@ def test_spawn_failure_clears_claim(tmp_path, monkeypatch):
     (host / "logs").mkdir(parents=True)
     monkeypatch.setattr(app_update, "_docker_managed_context",
                         lambda env: {"root": str(host), "project": "odysseus"})
+    monkeypatch.setattr(app_update, "_compose_context",
+                        lambda: {"working_dir": "/h", "project": "odysseus",
+                                 "image": "odysseus-odysseus:latest"})
     monkeypatch.setattr(app_update, "active_stream_count", lambda: 0)
     monkeypatch.setattr(
         app_update, "_apply_files",
