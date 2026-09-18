@@ -12,6 +12,7 @@ services:
       # build context as a host rebuild. The updater additionally requires
       # ODYSSEUS_ENABLE_HOST_DOCKER=true below, so socket presence alone
       # never opts a deployment in.
+      - .:/host-project
     group_add: ["${DOCKER_GID:-963}"]
     environment:
       - ODYSSEUS_ENABLE_HOST_DOCKER=true
