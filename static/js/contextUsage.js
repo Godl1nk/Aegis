@@ -196,8 +196,22 @@ export function setContextSession(value) {
   void refresh();
 }
 
+export function sanitizeUsageData(prevSnapshot, data) {
+  // A non-positive count is never a measurement: any real request carries at
+  // least the user message, so providers reporting 0/0 (empty, error-adjacent
+  // or uncounted turns) must not clobber a known-good value. Without this the
+  // meter dropped to 0 mid-turn and stayed there until the next update.
+  const incomingUsed = Number(data?.used_tokens);
+  const prevUsed = Number(prevSnapshot?.used_tokens);
+  if (!(incomingUsed > 0) && prevUsed > 0) {
+    return { ...data, used_tokens: prevSnapshot.used_tokens };
+  }
+  return data;
+}
+
 export function updateContextUsage(sessionId, data) {
   if (!selection?.sessionId || sessionId !== selection.sessionId || !data) return;
+  data = sanitizeUsageData(snapshot, data);
   if (data.model && data.model !== selection.model && data.model !== snapshot?.model) {
     // Never combine a fallback model's token count with the selected model's limit.
     snapshot = { ...data, context_length: null, context_length_known: false };

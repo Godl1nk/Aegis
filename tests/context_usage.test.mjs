@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { contextView, mergeDiscoverySnapshot } from '../static/js/contextUsage.js';
+import { contextView, mergeDiscoverySnapshot, sanitizeUsageData } from '../static/js/contextUsage.js';
 
 test('context percentage and thresholds', () => {
   for (const [used, expected] of [[0, 'normal'], [699, 'normal'], [700, 'warning'], [850, 'danger'], [1200, 'danger']]) {
@@ -47,4 +47,21 @@ test('busy merge keeps freshly re-asserted flags and nulls switched-model limits
   const switched = mergeDiscoverySnapshot(prev, { ...fresh, model: 'n' }, { busy: true });
   assert.equal(switched.context_length, null);
   assert.equal(switched.context_length_known, false);
+});
+test('zero or missing counts never clobber a known value', () => {
+  const prev = { used_tokens: 6500, model: 'm' };
+  assert.equal(sanitizeUsageData(prev, { used_tokens: 0, model: 'm' }).used_tokens, 6500);
+  assert.equal(sanitizeUsageData(prev, { used_tokens: -5, model: 'm' }).used_tokens, 6500);
+  const noKey = sanitizeUsageData(prev, { model: 'm', compacted: true });
+  assert.equal(noKey.used_tokens, 6500);
+  assert.equal(noKey.compacted, true);
+});
+test('zero counts pass through with nothing known', () => {
+  assert.equal(sanitizeUsageData(null, { used_tokens: 0 }).used_tokens, 0);
+  assert.equal(sanitizeUsageData({ used_tokens: 0 }, { used_tokens: 0 }).used_tokens, 0);
+});
+test('positive counts always replace', () => {
+  const prev = { used_tokens: 6500, model: 'm' };
+  assert.equal(sanitizeUsageData(prev, { used_tokens: 6600, model: 'm' }).used_tokens, 6600);
+  assert.equal(sanitizeUsageData(null, { used_tokens: 100, model: 'm' }).used_tokens, 100);
 });

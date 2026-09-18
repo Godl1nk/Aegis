@@ -23,8 +23,12 @@ def session_context_usage(session):
     metadata = latest.get("metadata") or {}
     context_tokens = metadata.get("context_tokens")
     output_tokens = metadata.get("context_output_tokens", 0)
+    # Stored zeros are not measurements: providers report 0/0 on empty,
+    # error-adjacent or otherwise uncounted turns, and accepting them pins
+    # the meter at 0 until the next turn. Fall back to the history estimate,
+    # which is positive for any non-empty history.
     if (latest.get("role") == "assistant" and metadata.get("model") == session.model
-            and isinstance(context_tokens, (int, float)) and context_tokens >= 0
+            and isinstance(context_tokens, (int, float)) and context_tokens > 0
             and isinstance(output_tokens, (int, float)) and output_tokens >= 0):
         result.update(used_tokens=context_tokens + output_tokens,
                       usage_source=metadata.get("context_usage_source", metadata.get("usage_source", "real")), basis="request",

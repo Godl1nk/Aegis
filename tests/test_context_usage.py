@@ -35,6 +35,30 @@ def test_unknown_window_is_not_presented_as_verified(monkeypatch):
     assert result["used_tokens"] == 0
 
 
+def test_stored_zero_counts_fall_back_to_history_estimate(monkeypatch):
+    # Providers report 0/0 on empty, error-adjacent or uncounted turns; those
+    # zeros must not pin the meter — the history estimate takes over.
+    monkeypatch.setattr(context_usage, "get_context_length_known", lambda *a: (32768, True))
+    s = session([ChatMessage("user", "hello there, how are you doing today?"),
+                 ChatMessage("assistant", "I am doing well, thanks!", {
+                     "model": "qwen", "context_tokens": 0, "context_output_tokens": 0,
+                     "usage_source": "real"})])
+    result = context_usage.session_context_usage(s)
+    assert result["basis"] == "history"
+    assert result["used_tokens"] == estimate_tokens(s.get_context_messages())
+    assert result["used_tokens"] > 0
+
+
+def test_stored_zero_output_with_real_input_is_kept(monkeypatch):
+    monkeypatch.setattr(context_usage, "get_context_length_known", lambda *a: (32768, True))
+    s = session([ChatMessage("assistant", "answer", {
+        "model": "qwen", "context_tokens": 6000, "context_output_tokens": 0,
+        "usage_source": "real"})])
+    result = context_usage.session_context_usage(s)
+    assert result["used_tokens"] == 6000
+    assert result["basis"] == "request"
+
+
 def test_reload_uses_latest_request_not_cumulative_billing(monkeypatch):
     monkeypatch.setattr(context_usage, "get_context_length_known", lambda *a: (32768, True))
     s = session([ChatMessage("assistant", "answer", {

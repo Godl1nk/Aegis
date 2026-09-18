@@ -2766,7 +2766,8 @@ import { createAgentTurn, mergeAgentTurnActivity } from './agentTurn.js';
                 if (!_isBg && metrics) updateContextUsage(streamSessionId, {
                   model: metrics.model,
                   // Agent input_tokens are cumulative billing, not context.
-                  used_tokens: metrics.context_tokens != null
+                  // A zero context_tokens is "not measured", same as missing.
+                  used_tokens: metrics.context_tokens > 0
                     ? metrics.context_tokens + (metrics.context_output_tokens || 0)
                     : metrics.context_percent != null && metrics.context_length
                       ? Math.round(metrics.context_percent * metrics.context_length / 100) : metrics.input_tokens,
