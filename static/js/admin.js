@@ -3033,6 +3033,33 @@ function _updOverlay(title, onDismiss) {
   };
 }
 
+// Phase 1 of the install wait: the apply itself runs after the HTTP
+// response (proxies time out long requests with a bare 502), so poll the
+// recorded outcome until this commit's apply lands, fails, or times out.
+async function _pollApplyDone(commit, overlay) {
+  const want = String(commit || '');
+  for (let i = 1; i <= 240; i++) {
+    if (overlay.dismissed) return { outcome: 'dismissed' };
+    overlay.sub(`Preparing update ${want.slice(0, 12)}… (${i}/240)`);
+    await new Promise((r) => setTimeout(r, 5000));
+    if (overlay.dismissed) return { outcome: 'dismissed' };
+    let last = null;
+    try {
+      const res = await fetch('/api/admin/updates/status', { credentials: 'same-origin' });
+      if (res.ok) {
+        const st = await res.json();
+        if (st && st.last_apply && st.last_apply.commit === want) last = st.last_apply;
+      }
+    } catch (e) { /* server busy applying — keep waiting */ }
+    if (last) {
+      return last.ok
+        ? { outcome: 'result', result: last.result }
+        : { outcome: 'error', error: last.error || 'Apply failed' };
+    }
+  }
+  return { outcome: 'timeout' };
+}
+
 async function _pollRebuildDone(commit, overlay, onDone) {
   const want = String(commit || '').slice(0, 12);
   const maxTries = 80, waitMs = 15000; // ~20 minute ceiling
@@ -3111,19 +3138,40 @@ function initUpdates() {
           ap = await _applyOnce(dl.commit, true);
         } else { throw e; }
       }
+      if (!ap || !ap.accepted) throw new Error('Update was not accepted');
+      _polling = true;
+      const _pollDone = () => { updBtn.disabled = false; loadUpdateStatus().catch(() => {}); };
+      const overlay = _updOverlay('Installing update…', _pollDone);
+      say('Update accepted — preparing…', 'admin-success');
+      const done = await _pollApplyDone(dl.commit, overlay);
+      if (done.outcome === 'dismissed') return;
+      if (done.outcome === 'timeout') {
+        overlay.sub('Still working after ~20 minutes. Check logs/rebuild.log on the host, or press Check now later.');
+        _pollDone();
+        return;
+      }
+      if (done.outcome === 'error') {
+        overlay.remove();
+        say('Update failed: ' + done.error, 'admin-error');
+        _pollDone();
+        return;
+      }
+      ap = done.result;
       const backupNote = ap.backup ? ` Backup at ${ap.backup}${_fmtMB(ap.backup_bytes)}.` : '';
       if (ap.mode === 'docker' && ap.applied === 'rebuilding') {
-        _polling = true;
         say('Update installed — rebuilding now. You can close this page; it is safe.', 'admin-success');
-        const _pollDone = () => { updBtn.disabled = false; loadUpdateStatus().catch(() => {}); };
-        _pollRebuildDone(dl.commit, _updOverlay('Installing update…', _pollDone), _pollDone);
-      } else if (ap.mode === 'docker') {
-        say('Staged for Docker. Finish on the host: ' + (ap.host_command || 'rebuild the stack') + (ap.managed_skip ? ` (one-click unavailable: ${ap.managed_skip})` : ''), 'admin-success');
-      } else if (ap.pending_restart) {
-        say('Installed.' + backupNote + ' Restart the app to finish.', 'admin-success');
+        _pollRebuildDone(dl.commit, overlay, _pollDone);
       } else {
-        say('Installed.' + backupNote + ' Restarting…', 'admin-success');
-        setTimeout(() => window.location.reload(), 8000);
+        overlay.remove();
+        if (ap.mode === 'docker') {
+          say('Staged for Docker. Finish on the host: ' + (ap.host_command || 'rebuild the stack') + (ap.managed_skip ? ` (one-click unavailable: ${ap.managed_skip})` : ''), 'admin-success');
+        } else if (ap.pending_restart) {
+          say('Installed.' + backupNote + ' Restart the app to finish.', 'admin-success');
+        } else {
+          say('Installed.' + backupNote + ' Restarting…', 'admin-success');
+          setTimeout(() => window.location.reload(), 8000);
+        }
+        _pollDone();
       }
     } catch (e) { say('Update failed: ' + e.message, 'admin-error'); }
     if (!_polling) {

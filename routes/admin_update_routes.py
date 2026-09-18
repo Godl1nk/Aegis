@@ -1,8 +1,9 @@
 """Admin self-update routes: check, download, apply, and roll back Aegis updates."""
 
 import logging
+import os
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel
 
 from core.middleware import require_admin
@@ -66,17 +67,42 @@ def setup_admin_update_routes() -> APIRouter:
             raise HTTPException(502, str(e))
 
     @router.post("/apply")
-    def update_apply(request: Request, body: UpdateCommitRequest):
+    def update_apply(request: Request, body: UpdateCommitRequest, background_tasks: BackgroundTasks):
         require_admin(request)
         if not _op_limiter.check(_client(request)):
             raise HTTPException(429, "Too many update operations — try again later")
+        commit = (body.commit or "").strip() or None
+        force = bool(body.force)
+        # Fast synchronous gates so the UI gets actionable errors immediately.
+        # The heavy backup/swap/rebuild runs after the response: proxies time
+        # out long requests with a bare 502, which used to masquerade as
+        # failure while the update was actually proceeding.
         try:
-            return app_update.apply_staged((body.commit or "").strip() or None,
-                                           force=bool(body.force))
-        except app_update.UpdateBusy as e:
-            raise HTTPException(409, str(e))
-        except app_update.UpdateError as e:
-            raise HTTPException(502, str(e))
+            state = app_update.load_state()
+            staged = state.get("staged") or {}
+            if commit and commit != staged.get("commit"):
+                raise HTTPException(502, "Staged update does not match — download it first")
+            if not staged.get("path") or not os.path.exists(staged.get("path")):
+                raise HTTPException(502, "No staged update found — download first")
+            if app_update._read_rebuild_claim(None) is not None:
+                raise HTTPException(409, "A rebuild is already in progress — check logs/rebuild.log instead of stacking another one.")
+            if not force:
+                live = app_update.active_stream_count()
+                if live > 0:
+                    raise HTTPException(502,
+                                        f"{live} chat stream(s) active — retry when idle or force the "
+                                        f"apply (in-flight turns may error)")
+            if not app_update.try_claim_apply_slot():
+                raise HTTPException(409, "An update apply is already running — check back shortly.")
+        except HTTPException:
+            raise
+        try:
+            background_tasks.add_task(app_update._apply_in_background,
+                                      staged["commit"], None, force)
+        except Exception:
+            app_update._release_apply_slot()
+            raise
+        return {"accepted": True, "commit": staged["commit"]}
 
     @router.post("/rollback")
     def update_rollback(request: Request):

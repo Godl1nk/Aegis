@@ -871,3 +871,116 @@ def test_auto_update_retries_stuck_rebuild(tmp_path, monkeypatch):
     assert downloads == ["a" * 40]
     assert applies == [("a" * 40, False)]
 
+
+def _update_client(monkeypatch):
+    import routes.admin_update_routes as aur
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(aur, "require_admin", lambda request: None)
+    app = FastAPI()
+    app.include_router(aur.setup_admin_update_routes())
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def _seed_staged(tmp_path, commit="a" * 40):
+    data_dir = str(tmp_path / "data")
+    os.makedirs(data_dir, exist_ok=True)
+    zp = _make_zip(str(tmp_path / "up.zip"))
+    app_update._save_state({"staged": {"commit": commit, "path": zp}}, data_dir)
+    return data_dir
+
+
+def test_background_worker_records_success_and_releases(tmp_path, monkeypatch):
+    data_dir = str(tmp_path / "data")
+    os.makedirs(data_dir, exist_ok=True)
+    monkeypatch.setattr(app_update, "apply_staged",
+                        lambda commit=None, data_dir=None, force=False: {"applied": True})
+    assert app_update.try_claim_apply_slot() is True
+    app_update._apply_in_background("a" * 40, data_dir, False)
+    last = app_update.load_state(data_dir)["last_apply"]
+    assert last["ok"] is True and last["commit"] == "a" * 40
+    assert app_update.try_claim_apply_slot() is True
+    app_update._release_apply_slot()
+
+
+def test_background_worker_records_failure_and_releases(tmp_path, monkeypatch):
+    data_dir = str(tmp_path / "data")
+    os.makedirs(data_dir, exist_ok=True)
+
+    def _boom(commit=None, data_dir=None, force=False):
+        raise app_update.UpdateError("disk gone")
+
+    monkeypatch.setattr(app_update, "apply_staged", _boom)
+    assert app_update.try_claim_apply_slot() is True
+    app_update._apply_in_background("a" * 40, data_dir, False)
+    last = app_update.load_state(data_dir)["last_apply"]
+    assert last["ok"] is False and "disk gone" in last["error"]
+    assert app_update.try_claim_apply_slot() is True
+    app_update._release_apply_slot()
+
+
+def test_apply_slot_blocks_second_accept(tmp_path):
+    assert app_update.try_claim_apply_slot() is True
+    try:
+        assert app_update.try_claim_apply_slot() is False
+    finally:
+        app_update._release_apply_slot()
+    assert app_update.try_claim_apply_slot() is True
+    app_update._release_apply_slot()
+
+
+def test_apply_route_accepts_and_validates(monkeypatch, tmp_path):
+    client = _update_client(monkeypatch)
+    data_dir = _seed_staged(tmp_path)
+    state = app_update.load_state(data_dir)
+    monkeypatch.setattr(app_update, "load_state", lambda dd=None: dict(state))
+    monkeypatch.setattr(app_update, "_read_rebuild_claim", lambda dd=None: None)
+    monkeypatch.setattr(app_update, "active_stream_count", lambda: 0)
+    calls = []
+    monkeypatch.setattr(app_update, "_apply_in_background",
+                        lambda *a, **k: calls.append((a, k)))
+    try:
+        r = client.post("/api/admin/updates/apply", json={"commit": "a" * 40})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"accepted": True, "commit": "a" * 40}
+        assert calls and calls[0][0][:2] == ("a" * 40, None)
+        # Second immediate accept is refused while the slot is held.
+        r2 = client.post("/api/admin/updates/apply", json={"commit": "a" * 40})
+        assert r2.status_code == 409
+        # Mismatched or missing stage is rejected without touching the worker.
+        calls.clear()
+        assert client.post("/api/admin/updates/apply",
+                           json={"commit": "b" * 40}).status_code == 502
+        assert calls == []
+    finally:
+        app_update._release_apply_slot()
+
+
+def test_apply_route_streams_check(monkeypatch, tmp_path):
+    client = _update_client(monkeypatch)
+    data_dir = _seed_staged(tmp_path)
+    state = app_update.load_state(data_dir)
+    monkeypatch.setattr(app_update, "load_state", lambda dd=None: dict(state))
+    monkeypatch.setattr(app_update, "_read_rebuild_claim", lambda dd=None: None)
+    monkeypatch.setattr(app_update, "active_stream_count", lambda: 2)
+    ran = []
+    monkeypatch.setattr(app_update, "_apply_in_background",
+                        lambda *a, **k: ran.append(True))
+    try:
+        r = client.post("/api/admin/updates/apply", json={"commit": "a" * 40})
+        assert r.status_code == 502 and "stream(s) active" in r.text
+        assert ran == []
+        r = client.post("/api/admin/updates/apply",
+                        json={"commit": "a" * 40, "force": True})
+        assert r.status_code == 200
+        assert ran == [True]
+    finally:
+        app_update._release_apply_slot()
+
+
+def test_status_includes_last_apply(tmp_path):
+    data_dir = str(tmp_path / "data")
+    os.makedirs(data_dir, exist_ok=True)
+    app_update._save_state({"last_apply": {"commit": "a" * 40, "ok": True}}, data_dir)
+    assert app_update.status(data_dir)["last_apply"]["commit"] == "a" * 40
+

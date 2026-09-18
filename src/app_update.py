@@ -1391,7 +1391,72 @@ def status(data_dir: str | None = None) -> dict:
                      "backup": h.get("backup")} for h in history[-5:]],
         "can_rollback": any(h.get("commit") and h["commit"] != installed for h in history),
         "environment": detect_environment(),
+        "last_apply": state.get("last_apply"),
     }
+
+
+# Accept-slot for background applies: the HTTP route must answer in
+# milliseconds (proxies time out long requests with a bare 502), so the
+# heavy apply runs after the response. This flag serializes accepts; the
+# worker clears it when done. A stale flag (crashed worker) ages out.
+_APPLY_SLOT_LOCK = threading.Lock()
+_apply_accepted_at: float | None = None
+APPLY_SLOT_STALE_S = 30 * 60
+
+
+def _record_apply_result(data_dir: str | None, commit: str | None, ok: bool,
+                         result: dict | None = None, error: str | None = None) -> None:
+    try:
+        state = load_state(data_dir)
+        entry: dict = {"at": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+                       "commit": commit, "ok": bool(ok)}
+        if ok:
+            entry["result"] = result or {}
+        else:
+            entry["error"] = error or "apply failed"
+        state["last_apply"] = entry
+        _save_state(state, data_dir)
+    except Exception:
+        pass
+
+
+def try_claim_apply_slot() -> bool:
+    """Reserve the single background-apply slot. False when one is live
+    (or finished so recently the worker hasn't cleared yet)."""
+    global _apply_accepted_at
+    with _APPLY_SLOT_LOCK:
+        if (_apply_accepted_at is not None
+                and time.time() - _apply_accepted_at < APPLY_SLOT_STALE_S):
+            return False
+        _apply_accepted_at = time.time()
+        return True
+
+
+def _release_apply_slot() -> None:
+    global _apply_accepted_at
+    with _APPLY_SLOT_LOCK:
+        _apply_accepted_at = None
+
+
+def _apply_in_background(commit: str, data_dir: str | None, force: bool) -> None:
+    """BackgroundTasks entry: run the full apply, record the outcome for the
+    status poll. Never raises out of the worker. Always releases the accept
+    slot the route claimed, so a later update is never wedged behind this one.
+    """
+    try:
+        try:
+            result = apply_staged(commit, data_dir, force=force)
+        except UpdateBusy as e:
+            _record_apply_result(data_dir, commit, False, error=str(e))
+            return
+        except Exception as e:
+            _record_apply_result(data_dir, commit, False,
+                                 error=f"{type(e).__name__}: {e}")
+            logger.exception("Background apply failed")
+            return
+        _record_apply_result(data_dir, commit, True, result=result)
+    finally:
+        _release_apply_slot()
 
 
 AUTO_UPDATE_TICK_SECONDS = 6 * 3600
