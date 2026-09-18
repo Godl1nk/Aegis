@@ -371,14 +371,20 @@ export function extractThinkingBlocks(text) {
   // Some models emit an empty <think></think> then put thinking text outside,
   // closed by a second orphaned </think>.
   let normalized = normalizePlainThinking(text);
-  // Collapse <think>short</think>...real thinking...</think> into one block
-  // Models sometimes emit a trivial first block then continue thinking outside tags
-  normalized = normalized.replace(/<think(?:ing)?(?:\s+[^>]*)?>.{0,30}<\/think(?:ing)?>\s*([\s\S]*?)<\/think(?:ing)?>/gi, (m, content) => {
-    return '<think>' + content.trim() + '</think>';
-  });
-
-  // Merge consecutive <think> blocks (some models split thinking across multiple tags)
-  normalized = normalized.replace(/<\/think(?:ing)?>\s*<think(?:ing)?(?:\s+[^>]*)?>/gi, '\n\n');
+  // Fenced code blocks and inline code spans are opaque to think parsing: a
+  // literal <think> inside code (a sample, a prompt example) must stay
+  // literal, and must not let tag-matching eat surrounding reply text.
+  // Control-char placeholders cannot collide with prose or regex syntax.
+  // Only closed fences are stashed — an unclosed fence (mid-stream cutoff)
+  // stays inline so nothing after it gets swallowed.
+  const codeKept = [];
+  const _stashCode = (code) => {
+    codeKept.push(code);
+    return ' THINKCODE' + (codeKept.length - 1) + ' ';
+  };
+  normalized = normalized.replace(/```[\s\S]*?```/g, _stashCode);
+  normalized = normalized.replace(/`[^`\n]+`/g, _stashCode);
+  const _restoreCode = (s) => s.replace(/ THINKCODE(\d+) /g, (m, n) => codeKept[Number(n)] ?? m);
 
   // Extract thinking time attribute if present
   const timeMatch = normalized.match(/<think(?:ing)?\s+time="([\d.]+)"/i);
@@ -436,14 +442,15 @@ export function extractThinkingBlocks(text) {
   // Strip any remaining orphaned closing tags
   cleanContent = cleanContent.replace(/<\/think(?:ing)?>/gi, '');
 
-  // Merge all thinking blocks into one — no reason to show multiple dropdowns
+  // Merge all thinking blocks into one — no reason to show multiple dropdowns.
+  // Code stashed up front is restored on both sides so fences survive intact.
   const mergedBlocks = thinkingBlocks.length > 1
-    ? [thinkingBlocks.join('\n\n')]
-    : thinkingBlocks;
+    ? [thinkingBlocks.map(_restoreCode).join('\n\n')]
+    : thinkingBlocks.map(_restoreCode);
 
   return {
     thinkingBlocks: mergedBlocks,
-    content: cleanContent.trim(),
+    content: _restoreCode(cleanContent).trim(),
     thinkingTime,
   };
 }

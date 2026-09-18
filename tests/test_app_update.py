@@ -742,3 +742,73 @@ def test_apply_docker_managed_rebuilds_detached(tmp_path, monkeypatch):
     assert open(host / ".deploy-commit").read() == "a" * 40
     assert (host / "logs" / "rebuild.log").exists()
 
+
+def _managed_env(monkeypatch, tmp_path):
+    host = tmp_path / "host"
+    (host / "logs").mkdir(parents=True)
+    monkeypatch.setattr(app_update, "_docker_managed_context",
+                        lambda env: {"root": str(host), "project": "odysseus"})
+    monkeypatch.setattr(
+        app_update, "_apply_files",
+        lambda *a, **k: {"applied": True, "mode": "source"})
+    spawned = {}
+
+    class _P:
+        def __init__(self, *a, **k):
+            spawned.update(args=a, kwargs=k)
+
+    monkeypatch.setattr(app_update.subprocess, "Popen", _P)
+    return host, spawned
+
+
+def test_apply_docker_refuses_busy_streams_without_force(tmp_path, monkeypatch):
+    host, spawned = _managed_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(app_update, "active_stream_count", lambda: 2)
+    zp = _make_zip(str(tmp_path / "up.zip"))
+    with pytest.raises(app_update.UpdateError, match=r"stream\(s\) active"):
+        app_update._apply_docker({"commit": "a" * 40, "path": zp},
+                                 {}, {"docker": True}, str(tmp_path))
+    assert spawned == {}
+
+
+def test_apply_docker_force_proceeds_despite_streams(tmp_path, monkeypatch):
+    host, spawned = _managed_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(app_update, "active_stream_count", lambda: 3)
+    zp = _make_zip(str(tmp_path / "up.zip"))
+    out = app_update._apply_docker({"commit": "a" * 40, "path": zp},
+                                   {}, {"docker": True}, str(tmp_path), force=True)
+    assert out["applied"] == "rebuilding"
+    assert spawned["args"][0][:2] == ["docker", "compose"]
+
+
+def test_auto_update_skips_rebuild_in_flight(tmp_path, monkeypatch):
+    _auto_settings(monkeypatch)
+    downloads, applies = _auto_nets(monkeypatch)
+    import time as _time
+    app_update._save_state({"rebuilding": {"commit": "a" * 40, "t": _time.time()}},
+                           str(tmp_path))
+    out = app_update.maybe_auto_update(str(tmp_path), now_hour=3)
+    assert out == {"acted": False, "reason": "rebuild-in-flight"}
+    assert downloads == [] and applies == []
+
+
+def test_auto_update_clears_stale_rebuilding_when_current(tmp_path, monkeypatch):
+    _auto_settings(monkeypatch)
+    _auto_nets(monkeypatch, available=False)
+    import time as _time
+    app_update._save_state({"rebuilding": {"commit": "a" * 40, "t": _time.time()}},
+                           str(tmp_path))
+    out = app_update.maybe_auto_update(str(tmp_path), now_hour=3)
+    assert out == {"acted": False, "reason": "up-to-date"}
+    assert "rebuilding" not in app_update.load_state(str(tmp_path))
+
+
+def test_auto_update_retries_stuck_rebuild(tmp_path, monkeypatch):
+    _auto_settings(monkeypatch)
+    downloads, applies = _auto_nets(monkeypatch)
+    app_update._save_state({"rebuilding": {"commit": "a" * 40, "t": 0}}, str(tmp_path))
+    out = app_update.maybe_auto_update(str(tmp_path), now_hour=3)
+    assert out["acted"] is True and out["reason"] == "applied"
+    assert downloads == ["a" * 40]
+    assert applies == [("a" * 40, False)]
+

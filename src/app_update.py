@@ -554,7 +554,7 @@ def apply_staged(commit: str | None = None, data_dir: str | None = None,
         commit = staged["commit"]
         env = detect_environment()
         if env["docker"]:
-            return _apply_docker(staged, state, env, data_dir)
+            return _apply_docker(staged, state, env, data_dir, force=force)
         if not force:
             live = active_stream_count()
             if live > 0:
@@ -1136,10 +1136,17 @@ def _spawn_host_rebuild(project_root: str, project: str, commit: str) -> str:
     return log_path
 
 
-def _apply_docker(staged: dict, state: dict, env: dict, data_dir: str | None) -> dict:
+def _apply_docker(staged: dict, state: dict, env: dict, data_dir: str | None,
+                  force: bool = False) -> dict:
     """Baked-image containers must be rebuilt on the host: stage the tree
     where the host can see it (bind-mounted data/) and hand back the command.
     """
+    if not force:
+        live = active_stream_count()
+        if live > 0:
+            raise UpdateError(
+                f"{live} chat stream(s) active — retry when idle or force the "
+                f"apply (in-flight turns may error)")
     with tempfile.TemporaryDirectory(prefix="aegis-update-") as tmp:
         tree = _safe_extract(staged["path"], tmp)
         dest = os.path.join(_staging_dir(data_dir), staged["commit"])
@@ -1170,6 +1177,11 @@ def _apply_docker(staged: dict, state: dict, env: dict, data_dir: str | None) ->
         except OSError:
             pass
         log_path = _spawn_host_rebuild(managed["root"], managed["project"], staged["commit"])
+        try:
+            state["rebuilding"] = {"commit": staged["commit"], "t": time.time()}
+            _save_state(state, data_dir)
+        except Exception:
+            pass
         result.update({"applied": "rebuilding", "mode": "docker", "rebuild_log": log_path,
                        "note": "Rebuilding now — the page will drop for a few minutes."})
         return result
@@ -1399,9 +1411,28 @@ def maybe_auto_update(data_dir: str | None = None, now_hour: int | None = None) 
     if not latest:
         return {"acted": False, "reason": "remote-unreachable"}
     if not res.get("update_available"):
+        # check_for_updates saved state after our earlier load; re-read so
+        # clearing the entry cannot clobber its checked_at/latest_known.
+        fresh = load_state(data_dir)
+        if fresh.pop("rebuilding", None) is not None:
+            try:
+                _save_state(fresh, data_dir)
+            except Exception:
+                pass
         return {"acted": False, "reason": "up-to-date"}
     state = load_state(data_dir)
     staged = state.get("staged") or {}
+    rebuilding = state.get("rebuilding") or {}
+    if rebuilding.get("commit") == latest:
+        # A rebuild was launched but this container is still the old one
+        # (slow build, or it failed). Give it up to two hours, then retry
+        # rather than stacking a rebuild every tick.
+        try:
+            recent = (time.time() - float(rebuilding.get("t") or 0)) < 2 * 3600
+        except (TypeError, ValueError):
+            recent = False
+        if recent:
+            return {"acted": False, "reason": "rebuild-in-flight"}
     staged_current = (staged.get("commit") == latest
                       and os.path.exists(staged.get("path", "")))
     if staged_current and _docker_legacy_needs_host():
