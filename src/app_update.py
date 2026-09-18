@@ -1016,42 +1016,105 @@ def _apply_files(staged: dict, state: dict, env: dict, data_dir: str | None,
 HOST_PROJECT_MOUNT = "/host-project"
 
 
-def _docker_managed_context(env: dict) -> dict | None:
-    """One-click rebuild prerequisites inside the container.
-
-    Needs the host daemon socket, the project bind mount (both from the
-    opt-in docker/host-docker.yml overlay) AND the overlay's explicit
-    ODYSSEUS_ENABLE_HOST_DOCKER=true — socket presence alone never opts a
-    deployment in. Anything missing returns None and the caller falls back
-    to staged+host-command.
-    """
-    if os.environ.get("ODYSSEUS_ENABLE_HOST_DOCKER") != "true":
-        return None
-    if not env.get("docker") or not env.get("docker_socket"):
-        return None
-    root = HOST_PROJECT_MOUNT
-    if not os.path.isfile(os.path.join(root, "docker-compose.yml")):
-        return None
-    project = os.environ.get("COMPOSE_PROJECT_NAME") or (env.get("compose") or {}).get("project")
-    if not project:
-        return None
+def _compose_project_from_env_file(root: str) -> str | None:
+    """COMPOSE_PROJECT_NAME set explicitly in the project .env, if any."""
     try:
-        out = subprocess.run(["docker", "compose", "version"],
-                             capture_output=True, text=True, timeout=30)
+        with open(os.path.join(root, ".env"), encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line.startswith("COMPOSE_PROJECT_NAME="):
+                    continue
+                val = line.split("=", 1)[1].strip().strip("'\"")
+                if val and not val.startswith("$"):
+                    return val
+    except OSError:
+        pass
+    return None
+
+
+def _sole_compose_project() -> str | None:
+    """Project name when exactly one compose stack runs on the daemon.
+
+    Needs no files or labels; deterministic on single-stack hosts, and
+    refuses to guess when several stacks share the daemon.
+    """
+    try:
+        out = subprocess.run(["docker", "compose", "ls", "--format", "json"],
+                             capture_output=True, text=True, timeout=15)
     except Exception:
         return None
     if out.returncode != 0:
         return None
+    names = []
+    for line in (out.stdout or "").splitlines():
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(obj, dict) and obj.get("Name"):
+            names.append(obj["Name"])
+    return names[0] if len(names) == 1 else None
+
+
+def _resolve_compose_project(env: dict, root: str = HOST_PROJECT_MOUNT) -> str | None:
+    direct = os.environ.get("COMPOSE_PROJECT_NAME")
+    if direct:
+        return direct
+    try:
+        ctx = _compose_context()
+        if ctx and ctx.get("project"):
+            return ctx["project"]
+    except Exception:
+        pass
+    file_hit = _compose_project_from_env_file(root)
+    if file_hit:
+        return file_hit
+    return _sole_compose_project()
+
+
+def _docker_managed_skip_reason(env: dict) -> str | None:
+    """Why one-click is unavailable (None = ready). Surfaced in the UI so a
+    fallback never fails silently."""
+    if os.environ.get("ODYSSEUS_ENABLE_HOST_DOCKER") != "true":
+        return "host-docker overlay not enabled"
+    if not env.get("docker"):
+        return "not running in docker"
+    if not env.get("docker_socket"):
+        return "no docker socket mount"
+    if not os.path.isfile(os.path.join(HOST_PROJECT_MOUNT, "docker-compose.yml")):
+        return "no project mount"
+    if _resolve_compose_project(env) is None:
+        return "cannot determine compose project"
+    try:
+        out = subprocess.run(["docker", "compose", "version"],
+                             capture_output=True, text=True, timeout=30)
+    except Exception:
+        return "compose plugin check failed"
+    if out.returncode != 0:
+        return "no working compose plugin"
     # The daemon itself must answer (a bad DOCKER_GID fails here, not later
     # after the source tree was already swapped).
     try:
         info = subprocess.run(["docker", "info"],
                               capture_output=True, text=True, timeout=15)
     except Exception:
-        return None
+        return "docker daemon unreachable"
     if info.returncode != 0:
+        return "docker daemon unreachable"
+    return None
+
+
+def _docker_managed_context(env: dict) -> dict | None:
+    """One-click rebuild prerequisites inside the container (see
+    _docker_managed_skip_reason). Anything missing returns None and the
+    caller falls back to staged+host-command.
+    """
+    if _docker_managed_skip_reason(env) is not None:
         return None
-    return {"root": root, "project": project}
+    project = _resolve_compose_project(env)
+    if not project:
+        return None
+    return {"root": HOST_PROJECT_MOUNT, "project": project}
 
 
 def _spawn_host_rebuild(project_root: str, project: str, commit: str) -> str:
@@ -1123,6 +1186,7 @@ def _apply_docker(staged: dict, state: dict, env: dict, data_dir: str | None) ->
         "commit": staged["commit"],
         "staged_path": dest,
         "restart_required": True,
+        "managed_skip": _docker_managed_skip_reason(env),
         "host_command": (
             f"{host_cmd}  # then: copy {dest} over the source tree "
             "(keep data/, logs/, .env) BEFORE rebuilding, or point the build at it"

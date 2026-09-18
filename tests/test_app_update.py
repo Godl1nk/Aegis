@@ -573,6 +573,66 @@ def test_docker_managed_context_needs_all_parts(monkeypatch):
     assert app_update._docker_managed_context(env) is None  # no /host-project here
 
 
+def test_managed_context_resolves_via_sole_project(monkeypatch, tmp_path):
+    # Mirrors a real host: overlay on, no COMPOSE_PROJECT_NAME anywhere,
+    # labels unavailable, single stack on the daemon.
+    monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", "true")
+    monkeypatch.delenv("COMPOSE_PROJECT_NAME", raising=False)
+    monkeypatch.setattr(app_update, "HOST_PROJECT_MOUNT", str(tmp_path))
+    (tmp_path / "docker-compose.yml").write_text("services: {}")
+    monkeypatch.setattr(app_update, "_compose_context", lambda: None)
+
+    def _run(cmd, **kwargs):
+        from types import SimpleNamespace
+        if cmd[:3] == ["docker", "compose", "ls"]:
+            return SimpleNamespace(returncode=0, stdout='{"Name": "odysseus"}\n')
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(app_update.subprocess, "run", _run)
+    assert app_update._docker_managed_context({"docker": True, "docker_socket": True}) == {
+        "root": str(tmp_path), "project": "odysseus"}
+
+
+def test_docker_managed_skip_reasons(monkeypatch, tmp_path):
+    monkeypatch.delenv("ODYSSEUS_ENABLE_HOST_DOCKER", raising=False)
+    assert app_update._docker_managed_skip_reason({}) == "host-docker overlay not enabled"
+    monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", "true")
+    assert app_update._docker_managed_skip_reason({}) == "not running in docker"
+    assert app_update._docker_managed_skip_reason({"docker": True}) == "no docker socket mount"
+    assert app_update._docker_managed_skip_reason(
+        {"docker": True, "docker_socket": True}) == "no project mount"
+
+
+def test_resolve_compose_project_prefers_env_file(monkeypatch, tmp_path):
+    monkeypatch.delenv("COMPOSE_PROJECT_NAME", raising=False)
+    (tmp_path / ".env").write_text("COMPOSE_PROJECT_NAME=myproj\n")
+    assert app_update._resolve_compose_project({}, str(tmp_path)) == "myproj"
+
+
+def test_sole_compose_project(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    def _ls(out, code=0):
+        monkeypatch.setattr(app_update.subprocess, "run",
+                            lambda *a, **k: SimpleNamespace(returncode=code, stdout=out))
+
+    _ls('{"Name": "odysseus", "Status": "running"}\n')
+    assert app_update._sole_compose_project() == "odysseus"
+    _ls('{"Name": "a"}\n{"Name": "b"}\n')
+    assert app_update._sole_compose_project() is None
+    _ls('', code=1)
+    assert app_update._sole_compose_project() is None
+
+
+def test_apply_docker_legacy_reports_skip_reason(tmp_path, monkeypatch):
+    monkeypatch.delenv("ODYSSEUS_ENABLE_HOST_DOCKER", raising=False)
+    zp = _make_zip(str(tmp_path / "up.zip"))
+    staged = {"commit": "b" * 40, "path": zp}
+    out = app_update._apply_docker(staged, {}, {"docker": True}, str(tmp_path))
+    assert out["applied"] == "staged" and out["mode"] == "docker"
+    assert out["managed_skip"] == "host-docker overlay not enabled"
+
+
 def test_docker_managed_context_opt_in(monkeypatch, tmp_path):
     from types import SimpleNamespace
     env = {"docker": True, "docker_socket": True}

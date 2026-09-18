@@ -3037,7 +3037,7 @@ function initUpdates() {
       if (ap.mode === 'docker' && ap.applied === 'rebuilding') {
         say('Update installed — rebuilding now. The page will drop for a few minutes; press Check now afterwards.', 'admin-success');
       } else if (ap.mode === 'docker') {
-        say('Staged for Docker. Finish on the host: ' + (ap.host_command || 'rebuild the stack') , 'admin-success');
+        say('Staged for Docker. Finish on the host: ' + (ap.host_command || 'rebuild the stack') + (ap.managed_skip ? ` (one-click unavailable: ${ap.managed_skip})` : ''), 'admin-success');
       } else if (ap.pending_restart) {
         say('Installed.' + backupNote + ' Restart the app to finish.', 'admin-success');
       } else {
