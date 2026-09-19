@@ -342,18 +342,34 @@ def detect_environment() -> dict:
     }
 
 
+_CID_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _find_container_id(text: str) -> str | None:
+    """First full container ID anywhere in cgroup content.
+
+    cgroup v1 shows it as the trailing path segment, but cgroup v2 under
+    systemd embeds it mid-segment (docker-<hex>.scope), which a
+    last-segment check misses entirely.
+    """
+    m = _CID_RE.search(text or "")
+    return m.group(0) if m else None
+
+
 def _own_container_id() -> str | None:
     try:
         with open("/proc/self/cgroup", encoding="utf-8", errors="replace") as f:
-            for line in f.read().splitlines():
-                part = line.rsplit("/", 1)[-1].strip()
-                if len(part) == 64 and all(c in "0123456789abcdef" for c in part):
-                    return part
+            found = _find_container_id(f.read())
+            if found:
+                return found
     except Exception:
         pass
     hostname = (os.environ.get("HOSTNAME") or "").strip()
-    if len(hostname) == 64 and all(c in "0123456789abcdef" for c in hostname):
-        return hostname
+    if hostname:
+        # Short IDs and container names both resolve via the daemon; only
+        # use it when it looks like an ID to avoid inspecting arbitrary names.
+        if _CID_RE.fullmatch(hostname) or re.fullmatch(r"[0-9a-f]{12}", hostname):
+            return hostname
     return None
 
 

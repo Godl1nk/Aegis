@@ -686,6 +686,15 @@ def test_auto_update_check_failure_never_raises(tmp_path, monkeypatch):
     assert out == {"acted": False, "reason": "check-failed"}
 
 
+def test_find_container_id_cgroup_variants():
+    full = "a" * 64
+    assert app_update._find_container_id(f"12:devices:/docker/{full}\n") == full
+    assert app_update._find_container_id(
+        f"0::/system.slice/docker-{full}.scope\n") == full
+    assert app_update._find_container_id("0::/\n") is None
+    assert app_update._find_container_id("") is None
+
+
 def test_auto_endpoints_roundtrip(monkeypatch, tmp_path):
     import src.settings as settings_mod
     import routes.admin_update_routes as aur
