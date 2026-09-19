@@ -1217,6 +1217,16 @@ def _spawn_host_rebuild(project_root: str, project: str, commit: str,
     working, image = ctx.get("working_dir"), ctx.get("image")
     if not working or not image or working == "/":
         raise UpdateError("Cannot inspect own container for the update helper")
+    if working == HOST_PROJECT_MOUNT:
+        # Poisoned generation: this container was itself created by the old
+        # helper that ran compose from a mount point, so its labels point at
+        # the mount instead of the real project dir. Spawning from here would
+        # repeat the corruption (phantom data dirs, empty-data boot). Refuse
+        # loudly; a one-time manual rebuild script run re-anchors everything.
+        raise UpdateError(
+            "Refusing rebuild: compose working dir points at the project mount, "
+            "not the real project directory (stale labels from a mount-point "
+            "rebuild). Rebuild once via the host script, then one-click is safe again.")
     helper = f"aegis-updater-{commit[:12]}"
     try:
         subprocess.run(["docker", "rm", "-f", helper],
@@ -1230,7 +1240,12 @@ def _spawn_host_rebuild(project_root: str, project: str, commit: str,
     # host-side compose run.
     # Claim/log paths below are relative to the project dir (the helper cwd),
     # whose layout (data/update_staging, logs) mirrors the shared DATA_DIR.
-    inner = ("docker compose -p " + project + " up -d --build "
+    # Preflight first: if the mount ever points somewhere without project
+    # files, fail LOUDLY into the log instead of letting compose create
+    # phantom bind dirs on the host and boot the app on empty data.
+    inner = ("test -f docker-compose.yml || { echo 'update helper: no compose file "
+             "in project dir, refusing rebuild' >>logs/rebuild.log 2>&1; exit 1; }; "
+             "docker compose -p " + project + " up -d --build "
              ">>logs/rebuild.log 2>&1; rm -f data/update_staging/rebuild.inflight")
     cmd = ["docker", "run", "-d", "--rm", "--name", helper,
            "-v", "/var/run/docker.sock:/var/run/docker.sock",
@@ -1308,7 +1323,7 @@ def _apply_docker(staged: dict, state: dict, env: dict, data_dir: str | None,
         return result
     host_cmd = "docker compose up -d --build"
     compose = env.get("compose") or {}
-    if compose.get("working_dir"):
+    if compose.get("working_dir") not in (None, "", "/", HOST_PROJECT_MOUNT):
         host_cmd = f"cd {compose['working_dir']} && docker compose -p {compose.get('project', 'odysseus')} up -d --build"
     state["staged"] = {**staged, "host_path": dest,
                        "note": "docker-staged; rebuild on the host to finish"}

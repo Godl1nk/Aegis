@@ -820,6 +820,9 @@ def _assert_helper_shape(spawned, host):
     assert "--entrypoint" in args and "sh" in args
     assert args[-2:] == ["-c", args[-1]]
     assert "up -d --build" in args[-1] and "rm -f" in args[-1]
+    # Preflight: the helper must refuse a project dir without compose files
+    # instead of letting compose create phantom host dirs.
+    assert "test -f docker-compose.yml" in args[-1]
     assert "-v" in args and "/var/run/docker.sock:/var/run/docker.sock" in args
     # Identical-path project mount: relative bind sources must resolve to
     # the real project dir, never to a mount point.
@@ -880,6 +883,17 @@ def test_spawn_rejects_degenerate_working_dir(tmp_path, monkeypatch):
                         lambda: {"working_dir": "/", "project": "odysseus",
                                  "image": "odysseus-odysseus:latest"})
     with pytest.raises(app_update.UpdateError, match="Cannot inspect own container"):
+        app_update._spawn_host_rebuild(str(tmp_path), "odysseus", "a" * 40, str(tmp_path))
+
+
+def test_spawn_rejects_mount_point_working_dir(tmp_path, monkeypatch):
+    # Labels stamped by the old mount-point helper point at the mount, not
+    # the real project dir. Spawning from here must refuse, never rebuild
+    # onto phantom data dirs.
+    monkeypatch.setattr(app_update, "_compose_context",
+                        lambda: {"working_dir": "/host-project", "project": "odysseus",
+                                 "image": "odysseus-odysseus:latest"})
+    with pytest.raises(app_update.UpdateError, match="mount"):
         app_update._spawn_host_rebuild(str(tmp_path), "odysseus", "a" * 40, str(tmp_path))
 
 
