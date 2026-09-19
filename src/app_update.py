@@ -1215,7 +1215,7 @@ def _spawn_host_rebuild(project_root: str, project: str, commit: str,
         raise UpdateError("Refusing rebuild: expected a full commit SHA")
     ctx = _compose_context() or {}
     working, image = ctx.get("working_dir"), ctx.get("image")
-    if not working or not image:
+    if not working or not image or working == "/":
         raise UpdateError("Cannot inspect own container for the update helper")
     helper = f"aegis-updater-{commit[:12]}"
     try:
@@ -1223,13 +1223,18 @@ def _spawn_host_rebuild(project_root: str, project: str, commit: str,
                        capture_output=True, timeout=30)
     except Exception:
         pass
-    # Claim/log paths below are relative to the project mount, whose layout
-    # (data/update_staging, logs) mirrors the shared DATA_DIR volume.
+    # Mount the project at its IDENTICAL host path: relative bind sources
+    # (./data) resolve against the project directory, so mounting elsewhere
+    # once pointed them at phantom host dirs and booted the app on empty
+    # data. Identical-path mounting makes the helper behave exactly like a
+    # host-side compose run.
+    # Claim/log paths below are relative to the project dir (the helper cwd),
+    # whose layout (data/update_staging, logs) mirrors the shared DATA_DIR.
     inner = ("docker compose -p " + project + " up -d --build "
              ">>logs/rebuild.log 2>&1; rm -f data/update_staging/rebuild.inflight")
     cmd = ["docker", "run", "-d", "--rm", "--name", helper,
            "-v", "/var/run/docker.sock:/var/run/docker.sock",
-           "-v", working + ":/host-project", "-w", "/host-project",
+           "-v", working + ":" + working, "-w", working,
            "--entrypoint", "sh", image,
            "-c", inner]
     log_path = os.path.join(project_root, "logs", "rebuild.log")

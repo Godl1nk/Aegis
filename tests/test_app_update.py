@@ -821,7 +821,11 @@ def _assert_helper_shape(spawned, host):
     assert args[-2:] == ["-c", args[-1]]
     assert "up -d --build" in args[-1] and "rm -f" in args[-1]
     assert "-v" in args and "/var/run/docker.sock:/var/run/docker.sock" in args
-    assert "/h:/host-project" in args
+    # Identical-path project mount: relative bind sources must resolve to
+    # the real project dir, never to a mount point.
+    assert "/h:/h" in args
+    assert "/h:/host-project" not in args
+    assert args[args.index("-w") + 1] == "/h"
     assert spawned["kwargs"]["cwd"] == str(host)
     assert "start_new_session" in spawned["kwargs"] or "creationflags" in spawned["kwargs"]
 
@@ -869,6 +873,14 @@ def test_apply_docker_refuses_second_rebuild_while_in_flight(tmp_path, monkeypat
 def test_spawn_rejects_bad_project_name(tmp_path):
     with pytest.raises(app_update.UpdateError, match="project name"):
         app_update._spawn_host_rebuild(str(tmp_path), "a;b", "a" * 40, str(tmp_path))
+
+
+def test_spawn_rejects_degenerate_working_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_update, "_compose_context",
+                        lambda: {"working_dir": "/", "project": "odysseus",
+                                 "image": "odysseus-odysseus:latest"})
+    with pytest.raises(app_update.UpdateError, match="Cannot inspect own container"):
+        app_update._spawn_host_rebuild(str(tmp_path), "odysseus", "a" * 40, str(tmp_path))
 
 
 def test_spawn_failure_clears_claim(tmp_path, monkeypatch):
