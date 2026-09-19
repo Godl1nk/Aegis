@@ -695,6 +695,35 @@ def test_find_container_id_cgroup_variants():
     assert app_update._find_container_id("") is None
 
 
+def test_find_container_id_nested_takes_innermost():
+    outer, inner = "a" * 64, "b" * 64
+    assert app_update._find_container_id(
+        f"11:devices:/docker/{outer}/kubepods/burstable/{inner}\n") == inner
+
+
+def test_own_container_id_empty_cgroup_short_hostname():
+    # Their exact box shape: bare "0::/" cgroup plus a 12-hex uts hostname.
+    # Docker sets the hostname but never exports HOSTNAME, so the namespace
+    # read (not the env var) is what makes this resolve.
+    assert app_update._own_container_id("0::/\n", "cf4c29f4842a") == "cf4c29f4842a"
+
+
+def test_own_container_id_ignores_garbage_hostname():
+    assert app_update._own_container_id("0::/\n", "not-a-container") is None
+    assert app_update._own_container_id("0::/\n", "") is None
+
+
+def test_own_container_id_socket_fallback(monkeypatch):
+    monkeypatch.delenv("HOSTNAME", raising=False)
+    monkeypatch.setattr(app_update.socket, "gethostname", lambda: "cf4c29f4842a")
+    assert app_update._own_container_id("0::/\n", None) == "cf4c29f4842a"
+
+
+def test_own_container_id_env_hostname(monkeypatch):
+    monkeypatch.setenv("HOSTNAME", "b" * 64)
+    assert app_update._own_container_id("0::/\n", None) == "b" * 64
+
+
 def test_auto_endpoints_roundtrip(monkeypatch, tmp_path):
     import src.settings as settings_mod
     import routes.admin_update_routes as aur

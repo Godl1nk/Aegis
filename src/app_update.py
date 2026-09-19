@@ -36,6 +36,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -350,26 +351,36 @@ def _find_container_id(text: str) -> str | None:
 
     cgroup v1 shows it as the trailing path segment, but cgroup v2 under
     systemd embeds it mid-segment (docker-<hex>.scope), which a
-    last-segment check misses entirely.
+    last-segment check misses entirely. Nested containers list outer IDs
+    first, so the innermost (last) match is the current container.
     """
-    m = _CID_RE.search(text or "")
-    return m.group(0) if m else None
+    found = _CID_RE.findall(text or "")
+    return found[-1] if found else None
 
 
-def _own_container_id() -> str | None:
-    try:
-        with open("/proc/self/cgroup", encoding="utf-8", errors="replace") as f:
-            found = _find_container_id(f.read())
-            if found:
-                return found
-    except Exception:
-        pass
-    hostname = (os.environ.get("HOSTNAME") or "").strip()
-    if hostname:
-        # Short IDs and container names both resolve via the daemon; only
-        # use it when it looks like an ID to avoid inspecting arbitrary names.
-        if _CID_RE.fullmatch(hostname) or re.fullmatch(r"[0-9a-f]{12}", hostname):
-            return hostname
+def _own_container_id(cgroup_text=None, hostname=None) -> str | None:
+    if cgroup_text is None:
+        try:
+            with open("/proc/self/cgroup", encoding="utf-8", errors="replace") as f:
+                cgroup_text = f.read()
+        except Exception:
+            cgroup_text = ""
+    found = _find_container_id(cgroup_text)
+    if found:
+        return found
+    # NOTE: read the UTS namespace, not the HOSTNAME *variable* — Docker sets
+    # the hostname but does not export it, so os.environ is empty here and an
+    # env-only lookup silently disables self-inspection on every host.
+    if hostname is None:
+        hostname = (os.environ.get("HOSTNAME") or "").strip()
+        if not hostname:
+            try:
+                hostname = socket.gethostname().strip()
+            except Exception:
+                hostname = ""
+    hostname = (hostname or "").strip()
+    if _CID_RE.fullmatch(hostname) or re.fullmatch(r"[0-9a-f]{12}", hostname):
+        return hostname
     return None
 
 
