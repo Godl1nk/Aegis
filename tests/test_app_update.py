@@ -701,6 +701,22 @@ def test_find_container_id_nested_takes_innermost():
         f"11:devices:/docker/{outer}/kubepods/burstable/{inner}\n") == inner
 
 
+def test_compose_project_label_flat_preferred():
+    assert app_update._compose_project_from_labels({
+        "com.docker.compose.project": "odysseus",
+        "com.docker.compose.project.name": "other"}) == "odysseus"
+
+
+def test_compose_project_label_long_fallback():
+    assert app_update._compose_project_from_labels(
+        {"com.docker.compose.project.name": "odysseus"}) == "odysseus"
+
+
+def test_compose_project_label_missing():
+    assert app_update._compose_project_from_labels({}) is None
+    assert app_update._compose_project_from_labels(None) is None
+
+
 def test_own_container_id_empty_cgroup_short_hostname():
     # Their exact box shape: bare "0::/" cgroup plus a 12-hex uts hostname.
     # Docker sets the hostname but never exports HOSTNAME, so the namespace

@@ -384,6 +384,15 @@ def _own_container_id(cgroup_text=None, hostname=None) -> str | None:
     return None
 
 
+def _compose_project_from_labels(labels: dict) -> str | None:
+    """Project name from container labels. Compose uses the flat
+    ``com.docker.compose.project`` key; the longer ``.project.name`` form
+    is accepted as a fallback in case some version emits it."""
+    labels = labels or {}
+    return (labels.get("com.docker.compose.project")
+            or labels.get("com.docker.compose.project.name"))
+
+
 def _compose_context() -> dict | None:
     """Host compose coordinates for this container (needs the docker socket)."""
     cid = _own_container_id()
@@ -399,7 +408,7 @@ def _compose_context() -> dict | None:
         info = _json.loads(out.stdout or "[]")
         labels = ((info[0] or {}).get("Config") or {}).get("Labels") or {}
         working_dir = labels.get("com.docker.compose.project.working_dir")
-        project = labels.get("com.docker.compose.project.name")
+        project = _compose_project_from_labels(labels)
         image = ((info[0] or {}).get("Config") or {}).get("Image")
         if not working_dir or not project or not image:
             return None
