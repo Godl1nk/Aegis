@@ -1994,6 +1994,8 @@ async function initResearchSearchSettings() {
 async function initAgentSettings() {
   var toolsInput = el('set-agentMaxTools');
   var roundsInput = el('set-agentMaxRounds');
+  var compactPctInput = el('set-autoCompactPercent');
+  var compactTokInput = el('set-autoCompactTokens');
   var supInput = el('set-agentSupervisorLadder');
   var msg = el('set-agentMsg');
   if (!toolsInput) return;
@@ -2003,6 +2005,8 @@ async function initAgentSettings() {
     var settings = await res.json();
     if (settings.agent_max_tool_calls) toolsInput.value = settings.agent_max_tool_calls;
     if (roundsInput && settings.agent_max_rounds) roundsInput.value = settings.agent_max_rounds;
+    if (compactPctInput && settings.auto_compact_percent != null) compactPctInput.value = settings.auto_compact_percent;
+    if (compactTokInput && settings.auto_compact_tokens != null) compactTokInput.value = settings.auto_compact_tokens;
     if (supInput) supInput.checked = !!settings.agent_supervisor_ladder;
   } catch (e) {}
 
@@ -2017,10 +2021,16 @@ async function initAgentSettings() {
   async function save() {
     var tools = clampInt(toolsInput.value, 0, 1000, 0);
     var rounds = roundsInput ? clampInt(roundsInput.value, 1, 200, 20) : null;
+    var pct = compactPctInput ? clampInt(compactPctInput.value, 0, 95, 85) : null;
+    var tok = compactTokInput ? clampInt(compactTokInput.value, 0, 2000000, 0) : null;
     toolsInput.value = tools;                       // reflect the clamped value
     if (roundsInput) roundsInput.value = rounds;
+    if (compactPctInput) compactPctInput.value = pct;
+    if (compactTokInput) compactTokInput.value = tok;
     var payload = { agent_max_tool_calls: tools };
     if (rounds != null) payload.agent_max_rounds = rounds;
+    if (pct != null) payload.auto_compact_percent = pct;
+    if (tok != null) payload.auto_compact_tokens = tok;
     if (supInput) payload.agent_supervisor_ladder = !!supInput.checked;
     try {
       await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
@@ -2029,6 +2039,7 @@ async function initAgentSettings() {
       });
       msg.textContent = (tools > 0 ? 'Limit: ' + tools + ' tool calls' : 'Unlimited tool calls') +
         (rounds != null ? ' · ' + rounds + ' steps/message' : '') +
+        (pct != null ? ' · compact ' + (pct > 0 ? pct + '%' : 'off (percent)') + (tok > 0 ? ' / ' + tok + ' tok' : '') : '') +
         (supInput && supInput.checked ? ' · supervisor on' : '');
       msg.style.color = 'var(--fg)';
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
@@ -2036,6 +2047,8 @@ async function initAgentSettings() {
 
   toolsInput.addEventListener('change', save);
   if (roundsInput) roundsInput.addEventListener('change', save);
+  if (compactPctInput) compactPctInput.addEventListener('change', save);
+  if (compactTokInput) compactTokInput.addEventListener('change', save);
   if (supInput) supInput.addEventListener('change', save);
   var cur = parseInt(toolsInput.value, 10) || 0;
   var curR = roundsInput ? (parseInt(roundsInput.value, 10) || 20) : null;

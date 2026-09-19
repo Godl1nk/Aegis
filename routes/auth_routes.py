@@ -657,6 +657,8 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             "agent_max_rounds": (1, 200),
             "agent_max_tool_calls": (0, 1000),  # 0 = unlimited
             "max_upload_size_mb": (1, 500),
+            "auto_compact_percent": (0, 95),
+            "auto_compact_tokens": (0, 2000000),
         }
         for key in DEFAULT_SETTINGS:
             if key not in body:

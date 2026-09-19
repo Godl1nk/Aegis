@@ -102,9 +102,15 @@ function render() {
     add(snapshot.basis === 'request'
       ? 'Last prepared request, including its reported output when available. The next request may differ.'
       : 'Saved history estimate. Skills, tool schemas, retrieved content and pending attachments are added when the request is prepared.', 'context-note');
+    const _autoParts = [
+      snapshot.compact_threshold ? `at about ${Math.round(number(snapshot.compact_threshold) * 100)}% usage` : null,
+      number(snapshot.compact_token_cap) ? `past ${fmt(number(snapshot.compact_token_cap))} tokens` : null,
+    ].filter(Boolean);
+    add(_autoParts.length
+      ? `Auto-compaction: older messages are summarized before a request ${_autoParts.join(' or ')}, when enough history exists. Recent messages are kept.`
+      : 'Automatic compaction is off — trimming still guards against overloads. Recent messages are kept.', 'context-note');
     if (view.draftTokens) add(`Draft: ~${fmt(view.draftTokens)} additional tokens.`, 'context-note');
     if (view.estimated) add('Approximate token count; provider-reported usage replaces estimates when available.', 'context-note');
-    add(`Auto-compaction: older messages are summarized before a request at about ${Math.round(number(snapshot.compact_threshold || 0.85) * 100)}% usage, when enough history exists. Recent messages are kept.`, 'context-note');
     add('Output needs room too. Agent input budgets or fallback trimming may reduce context earlier. Compaction is lossy, not unlimited memory.', 'context-note');
     if (!view.limit) add('The model limit could not be verified; no percentage is assumed.', 'context-note');
     if (snapshot.compacted) add('Earlier messages have been compacted.', 'context-status');

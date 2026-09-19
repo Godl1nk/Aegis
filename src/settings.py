@@ -285,6 +285,15 @@ DEFAULT_SETTINGS = {
     # Maintenance window (server-local hours, end exclusive, may wrap midnight).
     "auto_update_start_hour": 2,
     "auto_update_end_hour": 6,
+    # ── Auto-compaction trigger (src/context_compactor.py) ──
+    # Percent of the *verified* context window at which older turns are
+    # summarized. 0 disables the percent gate (the token cap below may still
+    # fire). Kept at the historical 85 default.
+    "auto_compact_percent": 85,
+    # Absolute used-token trigger, independent of window knowledge. 0 =
+    # disabled. This is the correct knob when the window can't be verified
+    # (the percent gate needs a proven window and stays silent without one).
+    "auto_compact_tokens": 0,
 }
 
 DEFAULT_FEATURES = {

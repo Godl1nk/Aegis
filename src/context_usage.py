@@ -1,12 +1,13 @@
 """Read-only context accounting for the composer (no prompt-building side effects)."""
 
-from src.context_compactor import COMPACT_THRESHOLD
+from src.context_compactor import resolve_compact_trigger
 from src.model_context import estimate_tokens, get_context_length_known
 
 
 def session_context_usage(session):
     context_length, known = get_context_length_known(session.endpoint_url, session.model)
     messages = session.get_context_messages()
+    pct, token_cap = resolve_compact_trigger()
     result = {
         "model": session.model,
         "context_length": context_length if known else None,
@@ -14,7 +15,8 @@ def session_context_usage(session):
         "used_tokens": estimate_tokens(messages),
         "usage_source": "estimated",
         "basis": "history",
-        "compact_threshold": COMPACT_THRESHOLD,
+        "compact_threshold": pct / 100 if pct else None,
+        "compact_token_cap": token_cap,
         "compacted": any((m.get("metadata") or {}).get("compacted") for m in messages),
     }
     # Only the most recent assistant request can be reused. Never sum the

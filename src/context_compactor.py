@@ -9,9 +9,10 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from src.model_context import get_context_length, estimate_tokens
+from src.model_context import get_context_length, get_context_length_known, estimate_tokens
 from src.llm_core import llm_call_async
 from src.endpoint_resolver import resolve_endpoint
+from src.settings import get_setting
 from core.models import ChatMessage
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,29 @@ def _content_as_text(content: Any) -> str:
 COMPACT_THRESHOLD = 0.85  # Trigger compaction at 85% of context window
 SUMMARY_MAX_TOKENS = 1024
 SMALL_CONTEXT_LIMIT = 8192  # Models with context <= this get aggressive trimming
+
+
+def resolve_compact_trigger():
+    """(percent_or_None, token_cap) for the auto-compact gate, from settings.
+
+    Defensive: the settings file is hand-editable. Percent 0 disables that
+    gate; out-of-range percents fall back to the historical default.
+    """
+    try:
+        pct = int(get_setting("auto_compact_percent", 85))
+    except (TypeError, ValueError):
+        pct = 85
+    if pct == 0:
+        percent = None
+    elif 1 <= pct <= 95:
+        percent = pct
+    else:
+        percent = 85
+    try:
+        tokens = int(get_setting("auto_compact_tokens", 0))
+    except (TypeError, ValueError):
+        tokens = 0
+    return percent, tokens if tokens > 0 else 0
 
 # Cursor-style self-summarization prompt — produces structured, dense summaries
 SELF_SUMMARY_SYSTEM_PROMPT = """You are summarizing a conversation to preserve context after compaction. Produce a structured summary that lets the conversation continue seamlessly.
@@ -321,15 +345,26 @@ async def maybe_compact(
 
     Returns (messages, context_length, was_compacted).
     """
-    context_length = get_context_length(endpoint_url, model)
+    context_length, known = get_context_length_known(endpoint_url, model)
+    if not known:
+        # Keep the legacy fallback number for the trim backstop below, but
+        # the percent gate needs a proven window — compacting against an
+        # unproven 128K either fires pointlessly late (small real window) or
+        # prematurely (large real window). The absolute token cap below still
+        # applies without any window knowledge.
+        context_length = get_context_length(endpoint_url, model)
     used = estimate_tokens(messages)
     pct = (used / context_length) * 100 if context_length else 0
+    percent, token_cap = resolve_compact_trigger()
+    fire_percent = known and percent is not None and pct >= percent
+    fire_tokens = token_cap > 0 and used >= token_cap
 
-    if pct < COMPACT_THRESHOLD * 100:
+    if not (fire_percent or fire_tokens):
         return messages, context_length, False
 
     logger.info(
-        f"Context at {pct:.1f}% ({used}/{context_length} tokens) — compacting"
+        f"Context at {pct:.1f}% ({used}/{context_length} tokens) — compacting "
+        f"({'percent' if fire_percent else 'token cap'})"
     )
 
     # Split into system preface and conversation

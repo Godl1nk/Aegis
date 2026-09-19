@@ -59,6 +59,15 @@ def test_stored_zero_output_with_real_input_is_kept(monkeypatch):
     assert result["basis"] == "request"
 
 
+def test_compact_trigger_fields_follow_settings(monkeypatch):
+    # Defaults: 85% gate, no token cap — the meter contract.
+    monkeypatch.setattr(context_usage, "get_context_length_known", lambda *a: (32768, True))
+    s = session([ChatMessage("user", "hello")])
+    result = context_usage.session_context_usage(s)
+    assert result["compact_threshold"] == 0.85
+    assert result["compact_token_cap"] == 0
+
+
 def test_reload_uses_latest_request_not_cumulative_billing(monkeypatch):
     monkeypatch.setattr(context_usage, "get_context_length_known", lambda *a: (32768, True))
     s = session([ChatMessage("assistant", "answer", {

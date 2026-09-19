@@ -124,6 +124,7 @@ class TestMaybeCompactFourthMessage:
         # Force compaction to trigger and stub the summary LLM call so the test
         # is hermetic (no network, no real endpoint resolution).
         orig_ctx = cc.get_context_length
+        orig_known = cc.get_context_length_known
         orig_call = cc.llm_call_async
         orig_resolve = cc.resolve_endpoint
         orig_update = cc._update_session_history
@@ -132,6 +133,7 @@ class TestMaybeCompactFourthMessage:
             return "compact summary text"
 
         cc.get_context_length = lambda url, model: context_length
+        cc.get_context_length_known = lambda url, model: (context_length, True)
         cc.llm_call_async = _fake_summary
         cc.resolve_endpoint = lambda which, owner=None: (None, None, None)
         cc._update_session_history = lambda *a, **k: None
@@ -147,6 +149,7 @@ class TestMaybeCompactFourthMessage:
             )
         finally:
             cc.get_context_length = orig_ctx
+            cc.get_context_length_known = orig_known
             cc.llm_call_async = orig_call
             cc.resolve_endpoint = orig_resolve
             cc._update_session_history = orig_update
@@ -194,6 +197,73 @@ class TestMaybeCompactFourthMessage:
         assert len(result) == 3 and result[2] is True
 
 
+class TestConfigurableTrigger:
+    """The auto-compact gate reads percent + absolute token cap from settings
+    (Hermes/pi-style configurability instead of a hardcoded 85%)."""
+
+    def _run_cfg(self, monkeypatch, messages, *, length=1000, known=True, pct=85, tok=0):
+        vals = {"auto_compact_percent": pct, "auto_compact_tokens": tok}
+        monkeypatch.setattr(cc, "get_setting", lambda key, default=None: vals.get(key, default))
+        monkeypatch.setattr(cc, "get_context_length_known", lambda *a: (length, known))
+        monkeypatch.setattr(cc, "get_context_length", lambda *a: length)
+
+        async def _fake_summary(*a, **k):
+            return "compact summary text"
+
+        monkeypatch.setattr(cc, "llm_call_async", _fake_summary)
+        monkeypatch.setattr(cc, "resolve_endpoint", lambda which, owner=None: (None, None, None))
+        monkeypatch.setattr(cc, "_update_session_history", lambda *a, **k: None)
+        return asyncio.run(maybe_compact(session=None, endpoint_url="http://local/v1",
+                                         model="m", messages=list(messages), headers={}))
+
+    def _history(self, user_chars=500, rounds=2):
+        msgs = [{"role": "system", "content": "You are helpful. " * 20}]
+        for i in range(rounds):
+            msgs.append({"role": "user", "content": f"q{i} " + "x" * user_chars})
+            msgs.append({"role": "assistant", "content": f"a{i} " + "y" * user_chars})
+        return msgs
+
+    def test_percent_setting_honored(self, monkeypatch):
+        # ~75% of a 1000-token window: fires at 50, stays quiet at 85.
+        msgs = self._history()
+        _, _, fired_50 = self._run_cfg(monkeypatch, msgs, pct=50)
+        _, _, fired_85 = self._run_cfg(monkeypatch, msgs, pct=85)
+        assert fired_50 is True
+        assert fired_85 is False
+
+    def test_percent_zero_disables_gate(self, monkeypatch):
+        _, _, fired = self._run_cfg(monkeypatch, self._history(), pct=0)
+        assert fired is False
+
+    def test_tokens_cap_fires_without_window_knowledge(self, monkeypatch):
+        _, _, fired = self._run_cfg(monkeypatch, self._history(),
+                                    known=False, pct=85, tok=100)
+        assert fired is True
+
+    def test_unknown_window_skips_percent_gate(self, monkeypatch):
+        # No proven window: percent math would be fiction (Pi does the same);
+        # the absolute cap is the honest knob there.
+        _, _, fired = self._run_cfg(monkeypatch, self._history(),
+                                    known=False, pct=85, tok=0)
+        assert fired is False
+
+    def test_resolve_defaults_and_clamping(self, monkeypatch):
+        monkeypatch.setattr(cc, "get_setting", lambda key, default=None: default)
+        assert cc.resolve_compact_trigger() == (85, 0)
+        monkeypatch.setattr(cc, "get_setting", lambda key, default=None:
+                            {"auto_compact_percent": 0}.get(key, default))
+        assert cc.resolve_compact_trigger() == (None, 0)
+        monkeypatch.setattr(cc, "get_setting", lambda key, default=None:
+                            {"auto_compact_percent": 50, "auto_compact_tokens": 5000}.get(key, default))
+        assert cc.resolve_compact_trigger() == (50, 5000)
+        monkeypatch.setattr(cc, "get_setting", lambda key, default=None:
+                            {"auto_compact_percent": 200, "auto_compact_tokens": -5}.get(key, default))
+        assert cc.resolve_compact_trigger() == (85, 0)
+        monkeypatch.setattr(cc, "get_setting", lambda key, default=None:
+                            {"auto_compact_percent": "junk"}.get(key, default))
+        assert cc.resolve_compact_trigger() == (85, 0)
+
+
 class TestPreCompressMemoryStash:
     """Compaction must stash the discarded older half on the session so
     run_post_response_tasks can queue a final memory-extraction pass over it
@@ -201,6 +271,7 @@ class TestPreCompressMemoryStash:
 
     def _run_with_session(self, messages, session, *, context_length=500):
         orig_ctx = cc.get_context_length
+        orig_known = cc.get_context_length_known
         orig_call = cc.llm_call_async
         orig_resolve = cc.resolve_endpoint
         orig_update = cc._update_session_history
@@ -209,6 +280,7 @@ class TestPreCompressMemoryStash:
             return "compact summary text"
 
         cc.get_context_length = lambda url, model: context_length
+        cc.get_context_length_known = lambda url, model: (context_length, True)
         cc.llm_call_async = _fake_summary
         cc.resolve_endpoint = lambda which, owner=None: (None, None, None)
         cc._update_session_history = lambda *a, **k: None
@@ -224,6 +296,7 @@ class TestPreCompressMemoryStash:
             )
         finally:
             cc.get_context_length = orig_ctx
+            cc.get_context_length_known = orig_known
             cc.llm_call_async = orig_call
             cc.resolve_endpoint = orig_resolve
             cc._update_session_history = orig_update
