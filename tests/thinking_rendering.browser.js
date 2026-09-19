@@ -60,6 +60,19 @@ function check() {
   checkSplit('orphan-close',
     'leaked reasoning here</think>\n\nThe reply.',
     'leaked reasoning here', 'The reply.');
+  // Tab-close/reopen resume shapes: the resume path wraps replayed
+  // thinking-flagged deltas in <think> tags and force-closes at finalize,
+  // so the finalized text always arrives here with balanced markup.
+  // Closed thinking with no reply yet (interrupted turn): folds to the bar,
+  // never spills as visible text.
+  checkSplit('resume-closed-think-no-reply',
+    '<think>The user is asking about NInfer quantization quality.</think>',
+    'The user is asking about NInfer quantization quality.', '');
+  // Wrapped deltas + reply: the exact accumulation the fixed resume path
+  // builds from {thinking:true} chunks followed by answer chunks.
+  checkSplit('resume-wrapped-deltas',
+    '<think>Checking the README first.</think>\n\nHere is the answer.',
+    'Checking the README first.', 'Here is the answer.');
   // Deliberate tradeoff, pinned so it is never "fixed" blindly: an unclosed
   // opener at the start is shown as the reply. Quantized models emit a
   // literal <think> on every reply without closing; treating it as thinking

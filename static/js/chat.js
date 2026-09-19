@@ -4325,6 +4325,13 @@ import { createAgentTurn, mergeAgentTurnActivity } from './agentTurn.js';
     let buffer = '';
     let roundText = '';
     let docFenceOpened = false;
+    // Mirror the primary send path: thinking-flagged deltas are wrapped in
+    // <think> tags as they arrive, otherwise a tab-close/reopen replays them
+    // as plain reply text and the thinking spills into the bubble.
+    let _thinkOpen = false;
+    // Provider errors arriving mid-resume must surface in the bubble instead
+    // of finalizing into an empty thinking bar with no explanation.
+    let _resumeError = '';
     let gotDelta = false;
     let leftSession = false;
     let metricsData = null;
@@ -4350,7 +4357,7 @@ import { createAgentTurn, mergeAgentTurnActivity } from './agentTurn.js';
         // The renderer freezes finalized blocks and re-renders only the live tail.
         const renderer = contentDiv._streamRenderer ||
           (contentDiv._streamRenderer = createStreamRenderer(contentDiv, {
-            render: (t) => markdownModule.mdToHtml(markdownModule.squashOutsideCode(t)),
+            render: (t) => markdownModule.processWithThinking(markdownModule.squashOutsideCode(t)),
             hljs: window.hljs,
           }));
         renderer.update(dt);
@@ -4383,8 +4390,16 @@ import { createAgentTurn, mergeAgentTurnActivity } from './agentTurn.js';
           }
           let json;
           try { json = JSON.parse(payload); } catch (_) { continue; }
-          if (json.delta) {
-            roundText += json.delta;
+          if (json.error && !json.delta) {
+            _resumeError = json.error || json.message || _resumeError;
+          } else if (json.delta) {
+            let _rd = json.delta;
+            if (json.thinking) {
+              if (!_thinkOpen) { _rd = '<think>' + _rd; _thinkOpen = true; }
+            } else if (_thinkOpen) {
+              _rd = '</think>' + _rd; _thinkOpen = false;
+            }
+            roundText += _rd;
             if (!docFenceOpened && (roundText.includes('```create_document\n') || roundText.includes('```document\n') || roundText.includes('```documen\n'))) {
               docFenceOpened = true;
               rich = true;
@@ -4434,14 +4449,34 @@ import { createAgentTurn, mergeAgentTurnActivity } from './agentTurn.js';
     const onThisSession = sessionModule.getCurrentSessionId &&
                           sessionModule.getCurrentSessionId() === sessionId;
 
+    // Force-close a still-open thinking block: finalizing with an unclosed
+    // <think> would hit the deliberate unclosed-stays-visible tradeoff in the
+    // canonical renderer and spill the thinking as reply text.
+    if (_thinkOpen) { roundText += '</think>'; _thinkOpen = false; }
     // Plain text reply: finalize in place. Replace the live bubble with a
     // canonical single message (markdown + footer actions + metrics) using the
     // same renderer history does. No history refetch, no end-of-stream flicker.
     if (onThisSession && !rich && roundText.trim()) {
-      if (holder.parentNode) holder.remove();
-      const model = meta && meta.model;
-      const meta_ = metricsData ? Object.assign({ model }, metricsData) : { model };
-      chatRenderer.addMessage('assistant', roundText, model, meta_);
+      // Thinking-only content plus a recorded error means the run died
+      // before answering: fall through to the error bubble below instead of
+      // finalizing an empty thinking bar with no explanation.
+      const _rt = markdownModule.extractThinkingBlocks(roundText).content.trim();
+      if (_rt || !_resumeError) {
+        if (holder.parentNode) holder.remove();
+        const model = meta && meta.model;
+        const meta_ = metricsData ? Object.assign({ model }, metricsData) : { model };
+        chatRenderer.addMessage('assistant', roundText, model, meta_);
+        uiModule.scrollHistory();
+        return true;
+      }
+    }
+
+    // The run died after thinking (provider error) with no reply text:
+    // say so in the bubble instead of leaving an empty thinking bar.
+    if (onThisSession && !rich && _resumeError) {
+      const errBody = holder.querySelector('.body') || holder;
+      errBody.innerHTML = '<i style="color: var(--color-error);">' +
+        uiModule.esc(_resumeError) + '</i>';
       uiModule.scrollHistory();
       return true;
     }
