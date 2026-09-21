@@ -4374,6 +4374,24 @@ import { createAgentTurn, mergeAgentTurnActivity } from './agentTurn.js';
       const dt = markdownModule.normalizeThinkingMarkup(_streamDisplayText(roundText, { final: docFenceOpened }));
       if (docFenceOpened && !dt.trim()) {
         _showDocumentWritingStatus(contentDiv);
+      } else if (markdownModule.hasUnclosedThinkTag && markdownModule.hasUnclosedThinkTag(dt)) {
+        // Thinking still streaming (unclosed <think>): same indicator the
+        // primary send path shows instead of raw text. Without this,
+        // re-attaching mid-thinking renders the partial block as a normal
+        // reply (the extractor's unclosed-opener tradeoff), i.e. the
+        // thinking appears to spill into chat on return.
+        const thinkStart = dt.search(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>|<\|channel>thought/i);
+        const thinkContent = dt.substring(Math.max(thinkStart, 0))
+          .replace(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>|<\|channel>thought\s*\n?/i, '')
+          .replace(/<channel\|>/gi, '')
+          .trim();
+        const thinkLines = thinkContent.split('\n').length;
+        contentDiv.innerHTML =
+          '<div class="thinking-section"><div class="thinking-header"><div class="thinking-header-left">Thinking' +
+          (thinkLines > 1 ? ' (' + thinkLines + ' lines)' : '') + '</div></div></div>';
+        // The stream renderer self-heals when it next sees this overwritten
+        // container (streamingRenderer.js), so no explicit reset is needed.
+        uiModule.scrollHistory();
       } else {
         // Incremental render, same as the primary send path. This used to assign
         // contentDiv.innerHTML with a fresh full-document markdown parse on EVERY

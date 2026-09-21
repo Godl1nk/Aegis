@@ -64,6 +64,23 @@ def test_document_writing_branch_is_preserved():
     assert "_showDocumentWritingStatus(contentDiv)" in body
 
 
+def test_resume_stream_folds_replayed_thinking():
+    """Replayed thinking-flagged deltas must render through processWithThinking
+    (bare mdToHtml spilled them as reply text on tab-reopen)."""
+    body = _resume_stream_source()
+    assert "processWithThinking" in body
+
+
+def test_resume_stream_shows_indicator_for_unclosed_think():
+    """Re-attaching mid-thinking (unclosed <think>) must show the thinking
+    indicator like the primary send path — otherwise the partial block hits
+    the extractor's unclosed-opener tradeoff and spills into chat as a
+    normal message on return."""
+    body = _resume_stream_source()
+    assert "hasUnclosedThinkTag" in body
+    assert "thinking-section" in body
+
+
 def test_resume_stream_preserves_document_language_and_lifecycle():
     body = _resume_stream_source()
     assert "json.language || json.lang || ''" in body
