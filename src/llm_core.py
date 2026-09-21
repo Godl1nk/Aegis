@@ -291,6 +291,107 @@ def _stream_delta_event(text: str, *, thinking: bool = False) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+# llama-swap proxy status chatter (sendLoadingState): while a model swap is in
+# flight, the proxy injects loading/queue lines into the chat completion
+# stream. They are transport artifacts, not model output — they must never
+# reach the reply, the thinking panel, or the echoed reasoning_content.
+# Shapes seen in the wild:
+#   ___
+#   llama-swap loading model: <name>
+#   Queue position: #1 .............
+# Both patterns require the colon, and the queue shape additionally requires
+# queue-syntax after it, so model prose ("Queue position matters",
+# "queue position: 5 things") survives while the proxy's dotted form does not.
+_QUEUE_STATUS_RE = re.compile(r"queue\s+position\s*:", re.IGNORECASE)
+_LSWAP_STATUS_LIT = "llama-swap loading model:"
+
+
+def _is_proxy_status_line(line: str) -> bool:
+    """True when a complete line is proxy status chatter, not model prose."""
+    s = line.strip()
+    if not s:
+        return False
+    low = s.lower()
+    if low.startswith(_LSWAP_STATUS_LIT):
+        return True
+    m = _QUEUE_STATUS_RE.match(low)
+    if m:
+        rest = low[m.end():]
+        return re.fullmatch(r"[\s#\d.]*", rest) is not None
+    return False
+
+
+def _could_be_status_line(tail: str) -> bool:
+    """True when an unterminated tail could still grow into a droppable line,
+    so the filter holds it instead of emitting a fragment. Anything else
+    streams immediately — first-token latency and think-tag splitting are
+    unaffected by the filter."""
+    if tail.strip() == "":
+        return True
+    if all(c in "_*- \t" for c in tail):
+        return True
+    s = tail.lstrip().lower()
+    for lit in (_LSWAP_STATUS_LIT, "queue position:"):
+        if lit.startswith(s) or s.startswith(lit):
+            return True
+    return False
+
+
+def _is_hr_line(line: str) -> bool:
+    """True for a markdown horizontal-rule line (llama-swap emits ___ above
+    its status block). Only dropped pre-content, never mid-reply."""
+    s = "".join(line.split())
+    return len(s) >= 3 and len(set(s)) == 1 and s[0] in "_-*"
+
+
+class _ProxyStatusFilter:
+    """Drops proxy status lines from one text channel, robust to chunk splits.
+
+    Complete lines are filtered the moment they terminate; an unterminated
+    tail is held only while it could still become a status line (otherwise it
+    streams immediately). flush() releases the tail, dropping it when it is
+    itself status. Pre-content blanks and a leading rule line are also
+    dropped — they are invisible in the reply either way.
+    """
+
+    __slots__ = ("buf", "saw_content")
+
+    def __init__(self) -> None:
+        self.buf = ""
+        self.saw_content = False
+
+    def feed(self, text: str) -> str:
+        if not text:
+            return ""
+        self.buf += text
+        out = []
+        while True:
+            nl = self.buf.find("\n")
+            if nl < 0:
+                break
+            line = self.buf[:nl]
+            self.buf = self.buf[nl + 1:]
+            if _is_proxy_status_line(line):
+                continue
+            if not self.saw_content and (not line.strip() or _is_hr_line(line)):
+                continue
+            self.saw_content = True
+            out.append(line + "\n")
+        tail = self.buf
+        if tail and not _could_be_status_line(tail):
+            self.buf = ""
+            self.saw_content = True
+            out.append(tail)
+        return "".join(out)
+
+    def flush(self) -> str:
+        tail = self.buf
+        self.buf = ""
+        if not tail or _is_proxy_status_line(tail):
+            return ""
+        return tail
+
+
 _DEGENERATE_WORD_RE = re.compile(r"[A-Za-z0-9_\u0370-\u03ff\u0400-\u04ff]+")
 
 
@@ -2786,7 +2887,11 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     _in_think_tag = False        # True while consuming <think>…</think> content
     _think_open_stripped = False  # opening <think> tag already removed
     _harmony_router = _HarmonyStreamRouter()
-    _harmony_active = False       # sticky: gpt-oss harmony <|channel|> stream detected
+    _harmony_active = False        # sticky: gpt-oss harmony <|channel|> stream detected
+    # Proxy status filters (one per channel — content and reasoning must not
+    # share pre/post-content state). See _ProxyStatusFilter.
+    _proxy_content = _ProxyStatusFilter()
+    _proxy_reasoning = _ProxyStatusFilter()
     _actual_model = ""
     _actual_model_announced = False
 
@@ -2834,6 +2939,15 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 if line.startswith("data:"):
                     data = line[5:].strip()
                     if data == "[DONE]":
+                        # Release any held filter tails before the terminal
+                        # flush so a final partial line is not lost.
+                        _tail = _proxy_content.flush()
+                        if _tail:
+                            for event in _format_routed_content(_harmony_router.feed(_tail)):
+                                yield event
+                        _r_tail = _proxy_reasoning.flush()
+                        if _r_tail:
+                            yield _stream_delta_event(_r_tail, thinking=True)
                         for event in _format_routed_content(_harmony_router.flush()):
                             yield event
                         tc_event = _emit_tool_calls()
@@ -2909,6 +3023,8 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                                 reasoning = (reasoning + thinking_part) if reasoning else thinking_part
                                             content = text_part
                                         if reasoning:
+                                            reasoning = _proxy_reasoning.feed(reasoning)
+                                        if reasoning:
                                             _degenerate = degenerate_guard.check(reasoning)
                                             if _degenerate:
                                                 yield _degenerate
@@ -2916,6 +3032,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                             yield _stream_delta_event(reasoning, thinking=True)
                                         if content:
                                             content = _strip_visible_chat_template_artifacts(content)
+                                            content = _proxy_content.feed(content)
                                             if not content:
                                                 continue
                                             _degenerate = degenerate_guard.check(content)
@@ -3036,6 +3153,17 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                             yield event
                             else:
                                 if data.strip():
+                                    # Non-JSON data lines are never valid OpenAI
+                                    # SSE content, but some proxies emit status
+                                    # text here — filter it through the same
+                                    # content-channel filter before routing.
+                                    # Each data: line is one protocol line, so
+                                    # re-attach its newline: without it,
+                                    # consecutive lines would fuse in the
+                                    # filter buffer and could swallow a reply.
+                                    data = _proxy_content.feed(data + "\n")
+                                    if not data.strip():
+                                        continue
                                     for event in _format_routed_content(_harmony_router.feed(data)):
                                         yield event
                     except Exception as e:
@@ -3043,6 +3171,13 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                         continue
 
             # End of stream (no explicit [DONE] received)
+            _tail = _proxy_content.flush()
+            if _tail:
+                for event in _format_routed_content(_harmony_router.feed(_tail)):
+                    yield event
+            _r_tail = _proxy_reasoning.flush()
+            if _r_tail:
+                yield _stream_delta_event(_r_tail, thinking=True)
             for event in _format_routed_content(_harmony_router.flush()):
                 yield event
             tc_event = _emit_tool_calls()
