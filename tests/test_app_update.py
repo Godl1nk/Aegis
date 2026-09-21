@@ -805,11 +805,12 @@ def _managed_env(monkeypatch, tmp_path):
                                  "image": "odysseus-odysseus:latest"})
     spawned = {}
 
-    class _P:
-        def __init__(self, *a, **k):
+    def _run(*a, **k):
+        if a[0][:2] == ["docker", "run"]:
             spawned.update(args=a, kwargs=k)
+        return app_update.subprocess.CompletedProcess(a[0], 0)
 
-    monkeypatch.setattr(app_update.subprocess, "Popen", _P)
+    monkeypatch.setattr(app_update.subprocess, "run", _run)
     return host, spawned
 
 
@@ -830,6 +831,8 @@ def _assert_helper_shape(spawned, host):
     assert "/h:/host-project" not in args
     assert args[args.index("-w") + 1] == "/h"
     assert spawned["kwargs"]["cwd"] == str(host)
+    assert spawned["kwargs"]["check"] is True
+    assert spawned["kwargs"]["timeout"] == 60
     assert "start_new_session" in spawned["kwargs"] or "creationflags" in spawned["kwargs"]
 
 
@@ -916,7 +919,7 @@ def test_spawn_failure_clears_claim(tmp_path, monkeypatch):
     def _boom(*a, **k):
         raise OSError("no exec")
 
-    monkeypatch.setattr(app_update.subprocess, "Popen", _boom)
+    monkeypatch.setattr(app_update.subprocess, "run", _boom)
     zp = _make_zip(str(tmp_path / "up.zip"))
     with pytest.raises(OSError):
         app_update._apply_docker({"commit": "a" * 40, "path": zp},
@@ -1022,8 +1025,11 @@ def test_apply_route_accepts_and_validates(monkeypatch, tmp_path):
     try:
         r = client.post("/api/admin/updates/apply", json={"commit": "a" * 40})
         assert r.status_code == 200, r.text
-        assert r.json() == {"accepted": True, "commit": "a" * 40}
+        accepted = r.json()
+        assert accepted["accepted"] is True and accepted["commit"] == "a" * 40
+        assert len(accepted["attempt_id"]) == 32
         assert calls and calls[0][0][:2] == ("a" * 40, None)
+        assert calls[0][1]["attempt_id"] == accepted["attempt_id"]
         # Second immediate accept is refused while the slot is held.
         r2 = client.post("/api/admin/updates/apply", json={"commit": "a" * 40})
         assert r2.status_code == 409
@@ -1063,4 +1069,41 @@ def test_status_includes_last_apply(tmp_path):
     os.makedirs(data_dir, exist_ok=True)
     app_update._save_state({"last_apply": {"commit": "a" * 40, "ok": True}}, data_dir)
     assert app_update.status(data_dir)["last_apply"]["commit"] == "a" * 40
+
+
+@pytest.mark.parametrize("failure", ["exit", "timeout"])
+def test_failed_docker_client_clears_claim_and_records_failure(tmp_path, monkeypatch, failure):
+    _managed_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(app_update, "active_stream_count", lambda: 0)
+
+    def failed_run(cmd, **kwargs):
+        if cmd[:2] == ["docker", "run"]:
+            if failure == "timeout":
+                raise app_update.subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+            raise app_update.subprocess.CalledProcessError(125, cmd)
+        return app_update.subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(app_update.subprocess, "run", failed_run)
+    staged = {"commit": "a" * 40, "path": _make_zip(str(tmp_path / "up.zip"))}
+    monkeypatch.setattr(app_update, "apply_staged", lambda *a, **k:
+                        app_update._apply_docker(staged, {}, {"docker": True}, str(tmp_path)))
+    assert app_update.try_claim_apply_slot()
+    app_update._apply_in_background("a" * 40, str(tmp_path), False, attempt_id="failed-launch")
+    last = app_update.load_state(str(tmp_path))["last_apply"]
+    assert last["ok"] is False and "helper launch failed" in last["error"]
+    assert last["attempt_id"] == "failed-launch"
+    assert app_update._read_rebuild_claim(str(tmp_path)) is None
+    assert app_update.try_claim_apply_slot()
+    app_update._release_apply_slot()
+
+
+def test_retry_result_is_bound_to_new_attempt(tmp_path, monkeypatch):
+    data_dir = str(tmp_path)
+    app_update._record_apply_result(data_dir, "a" * 40, False,
+                                    error="previous failure", attempt_id="old")
+    monkeypatch.setattr(app_update, "apply_staged", lambda *a, **k: {"applied": True})
+    app_update._apply_in_background("a" * 40, data_dir, False, attempt_id="new")
+    last = app_update.load_state(data_dir)["last_apply"]
+    assert last["attempt_id"] == "new" and last["ok"] is True
+    assert "error" not in last
 

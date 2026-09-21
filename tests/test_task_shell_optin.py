@@ -140,6 +140,21 @@ def test_tool_create_defaults_shell_off(isolated_db):
     assert isolated_db.tasks[-1].allow_shell is False
 
 
+def test_function_equals_false_does_not_enable_task_shell(isolated_db):
+    import asyncio
+    from src.agent_tools import parse_tool_blocks
+    from src.tools.system import do_manage_tasks
+
+    raw = ('<function=manage_tasks><parameter=action>create</parameter>'
+           '<parameter=prompt>summarize inbox</parameter>'
+           '<parameter=schedule>daily</parameter>'
+           '<parameter=allow_shell>false</parameter></function>')
+    block, = parse_tool_blocks(raw)
+    out = asyncio.run(do_manage_tasks(block.content, owner="admin"))
+    assert out["exit_code"] == 0, out
+    assert isolated_db.tasks[-1].allow_shell is False
+
+
 def test_tool_create_shell_opt_in(isolated_db):
     _create({"allow_shell": True})
     assert isolated_db.tasks[-1].allow_shell is True

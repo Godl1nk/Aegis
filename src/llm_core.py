@@ -354,11 +354,12 @@ class _ProxyStatusFilter:
     dropped — they are invisible in the reply either way.
     """
 
-    __slots__ = ("buf", "saw_content")
+    __slots__ = ("buf", "saw_content", "line_started")
 
     def __init__(self) -> None:
         self.buf = ""
         self.saw_content = False
+        self.line_started = False
 
     def feed(self, text: str) -> str:
         if not text:
@@ -371,22 +372,26 @@ class _ProxyStatusFilter:
                 break
             line = self.buf[:nl]
             self.buf = self.buf[nl + 1:]
-            if _is_proxy_status_line(line):
+            continuation = self.line_started
+            self.line_started = False
+            if not continuation and _is_proxy_status_line(line):
                 continue
             if not self.saw_content and (not line.strip() or _is_hr_line(line)):
                 continue
             self.saw_content = True
             out.append(line + "\n")
         tail = self.buf
-        if tail and not _could_be_status_line(tail):
+        if tail and (self.line_started or not _could_be_status_line(tail)):
             self.buf = ""
             self.saw_content = True
+            self.line_started = True
             out.append(tail)
         return "".join(out)
 
     def flush(self) -> str:
         tail = self.buf
         self.buf = ""
+        self.line_started = False
         if not tail or _is_proxy_status_line(tail):
             return ""
         return tail
@@ -3033,8 +3038,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                         if content:
                                             content = _strip_visible_chat_template_artifacts(content)
                                             content = _proxy_content.feed(content)
-                                            if not content:
-                                                continue
+                                        # Filtering content must not discard native tool calls
+                                        # carried by the same delta.
+                                        if content:
                                             _degenerate = degenerate_guard.check(content)
                                             if _degenerate:
                                                 yield _degenerate

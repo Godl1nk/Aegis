@@ -946,18 +946,37 @@ def _parse_function_eq_call(name, body) -> Optional[ToolBlock]:
     calls — so the full tool set and per-tool content format are handled in
     ONE place. Unknown tool names convert to None exactly like invoke.
     """
+    # Local import to avoid a circular import at module load.
+    from src.tool_schemas import FUNCTION_TOOL_SCHEMAS, function_call_to_tool_block
+
     tool_name = name.lower()
+    canonical_name = _TOOL_NAME_MAP.get(tool_name, tool_name)
+    schema = next((s["function"]["parameters"] for s in FUNCTION_TOOL_SCHEMAS
+                   if s["function"]["name"] == canonical_name), {})
+    properties = schema.get("properties", {})
+    json_types = {"boolean": (bool,), "integer": (int,), "number": (int, float),
+                  "array": (list,), "object": (dict,), "null": (type(None),)}
     params = {}
     for pname, pval in _iter_named_blocks(body, _FUNCTION_PARAM_OPEN_RE, _FUNCTION_PARAM_CLOSE_RE):
-        params[pname] = pval.strip()
+        value = pval.strip()
+        expected = properties.get(pname, {}).get("type")
+        if isinstance(expected, str) and expected in json_types:
+            try:
+                value = json.loads(value)
+            except (ValueError, TypeError):
+                return None
+            # Exact types: Python bool is an int subclass, but JSON true is
+            # not a valid integer argument. Never pass malformed booleans on
+            # as truthy strings (notably allow_shell="false").
+            if type(value) not in json_types[expected]:
+                return None
+        params[pname] = value
     if not params and tool_name not in BUILTIN_EMAIL_TOOLS:
         # Mirror the fenced path: an opener with zero paired parameters is a
         # fragment, not a call — only the no-arg email tools dispatch empty.
         # Without this, an opener flood (or a stray unclosed tag) schedules
         # empty shell executions instead of parsing to nothing.
         return None
-    # Local import to avoid a circular import at module load.
-    from src.tool_schemas import function_call_to_tool_block
     return function_call_to_tool_block(tool_name, json.dumps(params))
 
 

@@ -1256,9 +1256,16 @@ def _spawn_host_rebuild(project_root: str, project: str, commit: str,
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     with open(log_path, "ab") as logf:
-        logf.write(f"[{stamp}] one-click rebuild for update {commit} spawned helper {helper}\n".encode())
-        subprocess.Popen(cmd, cwd=project_root, stdout=logf, stderr=subprocess.STDOUT,
-                         stdin=subprocess.DEVNULL, **detached_popen_kwargs())
+        logf.write(f"[{stamp}] one-click rebuild for update {commit} launching helper {helper}\n".encode())
+        logf.flush()
+        try:
+            # Only wait for the Docker client to acknowledge creation. The
+            # helper itself remains detached and outlives this app container.
+            subprocess.run(cmd, cwd=project_root, stdout=logf, stderr=subprocess.STDOUT,
+                           stdin=subprocess.DEVNULL, check=True, timeout=60,
+                           **detached_popen_kwargs())
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            raise UpdateError(f"Update helper launch failed; check {log_path}: {e}") from e
     return log_path
 
 
@@ -1461,11 +1468,14 @@ APPLY_SLOT_STALE_S = 30 * 60
 
 
 def _record_apply_result(data_dir: str | None, commit: str | None, ok: bool,
-                         result: dict | None = None, error: str | None = None) -> None:
+                         result: dict | None = None, error: str | None = None,
+                         attempt_id: str | None = None) -> None:
     try:
         state = load_state(data_dir)
         entry: dict = {"at": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
                        "commit": commit, "ok": bool(ok)}
+        if attempt_id is not None:
+            entry["attempt_id"] = attempt_id
         if ok:
             entry["result"] = result or {}
         else:
@@ -1494,7 +1504,8 @@ def _release_apply_slot() -> None:
         _apply_accepted_at = None
 
 
-def _apply_in_background(commit: str, data_dir: str | None, force: bool) -> None:
+def _apply_in_background(commit: str, data_dir: str | None, force: bool,
+                         attempt_id: str | None = None) -> None:
     """BackgroundTasks entry: run the full apply, record the outcome for the
     status poll. Never raises out of the worker. Always releases the accept
     slot the route claimed, so a later update is never wedged behind this one.
@@ -1503,14 +1514,14 @@ def _apply_in_background(commit: str, data_dir: str | None, force: bool) -> None
         try:
             result = apply_staged(commit, data_dir, force=force)
         except UpdateBusy as e:
-            _record_apply_result(data_dir, commit, False, error=str(e))
+            _record_apply_result(data_dir, commit, False, error=str(e), attempt_id=attempt_id)
             return
         except Exception as e:
             _record_apply_result(data_dir, commit, False,
-                                 error=f"{type(e).__name__}: {e}")
+                                 error=f"{type(e).__name__}: {e}", attempt_id=attempt_id)
             logger.exception("Background apply failed")
             return
-        _record_apply_result(data_dir, commit, True, result=result)
+        _record_apply_result(data_dir, commit, True, result=result, attempt_id=attempt_id)
     finally:
         _release_apply_slot()
 

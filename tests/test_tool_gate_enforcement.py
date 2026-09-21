@@ -213,9 +213,8 @@ def test_two_gated_blocks_one_session_approval_covers_both(monkeypatch):
     assert calls == ["read_file", "edit_file", "edit_file"], calls
 
 
-def test_gate_timeout_message_directs_to_card_not_retry(monkeypatch):
-    """A timed-out gate dialog must not invite blind retry (that looped
-    multi-task creation forever); it must point at the approval card."""
+def test_gate_timeout_allows_user_requested_retry_with_a_fresh_card(monkeypatch):
+    """Expiry requires a user-requested retry before a new card can exist."""
     monkeypatch.setattr(command_approval, "_get_approval_timeout", lambda: 0)
     ap_id, _ = command_approval.create_tool_gate_approval(
         tool="manage_tasks", reason="needs authorization",
@@ -223,5 +222,14 @@ def test_gate_timeout_message_directs_to_card_not_retry(monkeypatch):
     )
     out = asyncio.run(command_approval.await_tool_gate_approval(ap_id))
     assert not out["approved"]
-    assert "approval card" in out["message"]
-    assert "then retry" not in out["message"]
+    assert "Ask the user whether they want to retry" in out["message"]
+    assert "create a fresh approval card" in out["message"]
+    assert "chat reply is not approval" in out["message"]
+    assert not command_approval.resolve_approval(ap_id, "once", owner="")
+    new_id, _ = command_approval.create_tool_gate_approval(
+        tool="manage_tasks", reason="user requested retry",
+        session_id="gate-sess-msg", owner="", detail="create",
+    )
+    assert new_id != ap_id
+    assert command_approval.resolve_approval(new_id, "once", owner="")
+    assert asyncio.run(command_approval.await_tool_gate_approval(new_id, timeout=1))["approved"]

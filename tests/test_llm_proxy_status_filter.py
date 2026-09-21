@@ -17,6 +17,8 @@ horizontal rules).
 import asyncio
 import json
 
+import pytest
+
 from src import llm_core
 
 
@@ -61,7 +63,7 @@ def _reasoning_line(text):
     return "data: " + json.dumps({"choices": [{"delta": {"reasoning_content": text}}]})
 
 
-def _run_stream(lines, monkeypatch):
+def _run_stream(lines, monkeypatch, events=None):
     """Drive stream_llm against a faked upstream; return (content, thinking)
     with each side's delta texts joined in arrival order."""
     monkeypatch.setattr(llm_core, "_get_http_client", lambda: _FakeClient(lines))
@@ -92,6 +94,8 @@ def _run_stream(lines, monkeypatch):
                 obj = json.loads(payload)
             except json.JSONDecodeError:
                 continue
+            if events is not None:
+                events.append(obj)
             if "delta" not in obj:
                 continue
             (thinking_parts if obj.get("thinking") else content_parts).append(obj["delta"])
@@ -223,3 +227,43 @@ def test_normal_stream_byte_identical(monkeypatch):
         [_content_line("Hi there.\nSecond line."), "data: [DONE]"], monkeypatch
     )
     assert content == "Hi there.\nSecond line."
+
+
+@pytest.mark.parametrize("text", ["\n", " ", "___\n", "Queue position: #1 ...\n", "Q"])
+def test_filtered_content_preserves_native_tool_calls(monkeypatch, text):
+    def tool_line(content, function, **extra):
+        return "data: " + json.dumps({"choices": [{"delta": {
+            "content": content,
+            "tool_calls": [{"index": 0, "function": function, **extra}],
+        }}]})
+
+    events = []
+    _run_stream([
+        tool_line(text, {"name": "manage_tasks", "arguments": '{"action":'}, id="call_1"),
+        tool_line(" ", {"arguments": '"list"}'}),
+        "data: [DONE]",
+    ], monkeypatch, events)
+    calls = [event for event in events if event.get("type") == "tool_calls"]
+    assert len(calls) == 1
+    assert calls[0]["calls"] == [{"id": "call_1", "name": "manage_tasks",
+                                  "arguments": '{"action":"list"}'}]
+
+
+def test_status_like_sentence_survives_chunk_boundaries(monkeypatch):
+    content, _ = _run_stream([
+        _content_line("Your "), _content_line("queue position: 1\n"), "data: [DONE]",
+    ], monkeypatch)
+    assert content == "Your queue position: 1\n"
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Your queue position: 1\n", "Your queue position: 1\n"),
+    ("A llama-swap loading model: example\n", "A llama-swap loading model: example\n"),
+    ("Hi\nQueue position: #1 ...\nReply", "Hi\nReply"),
+    ("___\nllama-swap loading model: test\nHello", "Hello"),
+])
+def test_filter_output_is_independent_of_chunk_size(text, expected):
+    for size in range(1, len(text) + 1):
+        filt = llm_core._ProxyStatusFilter()
+        result = "".join(filt.feed(text[i:i + size]) for i in range(0, len(text), size))
+        assert result + filt.flush() == expected, size

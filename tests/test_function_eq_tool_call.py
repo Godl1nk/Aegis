@@ -16,7 +16,10 @@ These tests pin the normalize->parse->strip path for the dialect, including
 unclosed tails and the no-false-positive contract.
 """
 
+import json
 import time
+
+import pytest
 
 from src.agent_tools import parse_tool_blocks, strip_tool_blocks
 
@@ -110,3 +113,31 @@ def test_opener_flood_without_closers_stays_fast():
     assert parse_tool_blocks(raw) == []
     assert strip_tool_blocks(raw) == ""
     assert time.monotonic() - start < 5
+
+
+@pytest.mark.parametrize("value, expected", [("false", False), ("true", True)])
+def test_boolean_parameters_keep_their_type(value, expected):
+    raw = ('<function=manage_tasks><parameter=action>create</parameter>'
+           f'<parameter=allow_shell>{value}</parameter></function>')
+    assert json.loads(parse_tool_blocks(raw)[0].content)["allow_shell"] is expected
+
+
+@pytest.mark.parametrize("value", ['"false"', "yes", "0", "null", "{}"])
+def test_malformed_boolean_is_not_dispatched(value):
+    raw = ('<function=manage_tasks><parameter=action>create</parameter>'
+           f'<parameter=allow_shell>{value}</parameter></function>')
+    assert parse_tool_blocks(raw) == []
+
+
+def test_typed_parameters_preserve_numbers_arrays_and_string_literals():
+    raw = ('<function=manage_tasks><parameter=action>create</parameter>'
+           '<parameter=scheduled_day>2</parameter><parameter=prompt>false</parameter>'
+           '</function>')
+    args = json.loads(parse_tool_blocks(raw)[0].content)
+    assert args["scheduled_day"] == 2 and type(args["scheduled_day"]) is int
+    assert args["prompt"] == "false"
+    raw = ('<function=manage_notes><parameter=action>add</parameter>'
+           '<parameter=checklist_items>[{"text":"milk","done":false}]</parameter>'
+           '</function>')
+    assert json.loads(parse_tool_blocks(raw)[0].content)["checklist_items"] == [
+        {"text": "milk", "done": False}]

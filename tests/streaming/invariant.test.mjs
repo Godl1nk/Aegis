@@ -77,6 +77,9 @@ for (const [rname, renderFn] of RENDERERS) {
 // specifically exercise the self-verifying local check refusing to finalize inside
 // or across a think block that processWithThinking floats to the top.
 const THINKING_CORPUS = [
+  ['code inside thinking', '<think>Reasoning:\n```python\nx = 1\n```\nMore thought.</think>Final answer'],
+  ['blank lines and fences inside thinking', '<thinking>Reasoning:\n\n```js\nx = 1;\n```\n\nMore thought.\n\nStill thinking.</thinking>\n\nFinal answer.\n\nAnother paragraph.'],
+  ['literal tags inside code', '```html\n<think>example</think>\n```\n\nUse `<think>` tags.\n\nDone.'],
   ['leading think then answer', '<think>Let me reason about it.</think>\n\nThe answer is 42.'],
   ['think with internal blank lines', '<think>Step one.\n\nStep two.\n\nStep three.</think>\n\nDone — the result follows.'],
   ['think then several paragraphs', '<thinking>analyzing the request</thinking>\n\nFirst point made here.\n\nSecond point made here.\n\nThird and final point.'],

@@ -2,6 +2,7 @@
 
 import logging
 import os
+import uuid
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel
@@ -96,13 +97,14 @@ def setup_admin_update_routes() -> APIRouter:
                 raise HTTPException(409, "An update apply is already running — check back shortly.")
         except HTTPException:
             raise
+        attempt_id = uuid.uuid4().hex
         try:
             background_tasks.add_task(app_update._apply_in_background,
-                                      staged["commit"], None, force)
+                                      staged["commit"], None, force, attempt_id=attempt_id)
         except Exception:
             app_update._release_apply_slot()
             raise
-        return {"accepted": True, "commit": staged["commit"]}
+        return {"accepted": True, "commit": staged["commit"], "attempt_id": attempt_id}
 
     @router.post("/rollback")
     def update_rollback(request: Request):

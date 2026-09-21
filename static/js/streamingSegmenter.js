@@ -54,6 +54,7 @@ function findBoundaries(text, fromOffset) {
   const n = text.length;
   let inFence = false;
   let fenceMarker = '';
+  let thinkingDepth = 0;
   let i = fromOffset;
 
   while (i < n) {
@@ -62,6 +63,17 @@ function findBoundaries(text, fromOffset) {
     const afterNl = nl === -1 ? n : nl + 1;
     const line = text.slice(i, lineEnd);
     const fence = line.match(FENCE_RE);
+
+    // Thinking is an atomic rendered block, even when it contains markdown
+    // fences or blank lines. Ignore literal tags inside code. Chat normalizes
+    // provider-specific thinking markup before passing it to the renderer.
+    if (!inFence && !fence) {
+      for (const tag of line.matchAll(/`+[^`]*`+|<(\/?)(?:think(?:ing)?|thought)(?:\s+[^>]*)?\s*>/gi)) {
+        if (tag[0][0] === '<') {
+          thinkingDepth = Math.max(0, thinkingDepth + (tag[1] ? -1 : 1));
+        }
+      }
+    }
 
     if (fence) {
       const marker = fence[1];
@@ -75,10 +87,10 @@ function findBoundaries(text, fromOffset) {
       ) {
         inFence = false;
         fenceMarker = '';
-        boundaries.push({ offset: afterNl, afterClosedFence: true });
+        if (!thinkingDepth) boundaries.push({ offset: afterNl, afterClosedFence: true });
       }
       i = afterNl;
-    } else if (!inFence && line.trim() === '') {
+    } else if (!inFence && !thinkingDepth && line.trim() === '') {
       // Consume the entire run of blank lines; the boundary is the start of the
       // next non-blank line so the finalized side owns the separator and the tail
       // starts clean.

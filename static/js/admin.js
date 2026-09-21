@@ -3036,7 +3036,7 @@ function _updOverlay(title, onDismiss) {
 // Phase 1 of the install wait: the apply itself runs after the HTTP
 // response (proxies time out long requests with a bare 502), so poll the
 // recorded outcome until this commit's apply lands, fails, or times out.
-async function _pollApplyDone(commit, overlay) {
+async function _pollApplyDone(commit, attemptId, overlay) {
   const want = String(commit || '');
   for (let i = 1; i <= 240; i++) {
     if (overlay.dismissed) return { outcome: 'dismissed' };
@@ -3048,7 +3048,8 @@ async function _pollApplyDone(commit, overlay) {
       const res = await fetch('/api/admin/updates/status', { credentials: 'same-origin' });
       if (res.ok) {
         const st = await res.json();
-        if (st && st.last_apply && st.last_apply.commit === want) last = st.last_apply;
+        if (st && st.last_apply && st.last_apply.commit === want &&
+            attemptId && st.last_apply.attempt_id === attemptId) last = st.last_apply;
       }
     } catch (e) { /* server busy applying — keep waiting */ }
     if (last) {
@@ -3138,12 +3139,12 @@ function initUpdates() {
           ap = await _applyOnce(dl.commit, true);
         } else { throw e; }
       }
-      if (!ap || !ap.accepted) throw new Error('Update was not accepted');
+      if (!ap || !ap.accepted || !ap.attempt_id) throw new Error('Update was not accepted');
       _polling = true;
       const _pollDone = () => { updBtn.disabled = false; loadUpdateStatus().catch(() => {}); };
       const overlay = _updOverlay('Installing update…', _pollDone);
       say('Update accepted — preparing…', 'admin-success');
-      const done = await _pollApplyDone(dl.commit, overlay);
+      const done = await _pollApplyDone(dl.commit, ap.attempt_id, overlay);
       if (done.outcome === 'dismissed') return;
       if (done.outcome === 'timeout') {
         overlay.sub('Still working after ~20 minutes. Check logs/rebuild.log on the host, or press Check now later.');
