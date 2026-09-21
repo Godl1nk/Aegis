@@ -301,6 +301,7 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
                     "last_run": t.last_run.isoformat() + "Z" if t.last_run else None,
                     "run_count": t.run_count or 0,
                     "allow_shell": _t_allow if _t_allow is not None else True,
+                    "run_when_busy": bool(getattr(t, "run_when_busy", False)),
                 })
             return {"response": f"Found {len(task_list)} tasks", "tasks": task_list, "exit_code": 0}
 
@@ -348,6 +349,7 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
                 # TASK_SHELL_WRITE_TOOLS): omitted/false keeps the task to
                 # reads + safe tools. Legacy rows (NULL) keep old behaviour.
                 allow_shell=bool(args.get("allow_shell")),
+                run_when_busy=bool(args.get("run_when_busy")),
             )
             db.add(task)
             db.commit()
@@ -371,6 +373,9 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
             if args.get("allow_shell") is not None:
                 task.allow_shell = bool(args.get("allow_shell"))
                 changed.append("allow_shell")
+            if args.get("run_when_busy") is not None:
+                task.run_when_busy = bool(args.get("run_when_busy"))
+                changed.append("run_when_busy")
             if args.get("task_type") is not None:
                 task.task_type = args["task_type"]
                 changed.append("task_type")

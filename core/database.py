@@ -612,6 +612,10 @@ class ScheduledTask(TimestampMixin, Base):
     max_steps      = Column(Integer, nullable=True)       # max agent loop iterations (null=unlimited)
     email_results  = Column(Boolean, default=True)        # email results to character.email_to
     notifications_enabled = Column(Boolean, default=True) # per-task on/off for completion notifications
+    # When true, dispatch at the scheduled time and keep running even while
+    # the foreground chat is active. False preserves the background-only
+    # behavior used by existing tasks.
+    run_when_busy = Column(Boolean, nullable=False, default=False)
     # Whether this task's agent may use shell/file-write tools (bash, python,
     # write_file, edit_file). NULL = legacy rows created before the flag
     # existed: treated as allowed so existing tasks keep working. New tasks
@@ -1719,6 +1723,23 @@ def _migrate_add_task_allow_shell_column():
     except Exception as e:
         logging.getLogger(__name__).warning(f"task allow_shell migration: {e}")
 
+def _migrate_add_task_run_when_busy_column():
+    """Let selected tasks run without waiting for foreground inactivity."""
+    try:
+        with engine.connect() as conn:
+            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(scheduled_tasks)"))]
+            if "run_when_busy" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE scheduled_tasks ADD COLUMN "
+                    "run_when_busy BOOLEAN NOT NULL DEFAULT 0"
+                ))
+                conn.commit()
+                logging.getLogger(__name__).info(
+                    "Migrated: added 'run_when_busy' to scheduled_tasks"
+                )
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"task run_when_busy migration: {e}")
+
 def _migrate_drop_ping_notes_tasks():
     """One-time cleanup: ping_notes and ping_events used to be seeded as
     user-facing tasks. They're now pure background scanners inside the
@@ -2011,6 +2032,7 @@ def init_db():
     _migrate_add_mcp_oauth_tokens_column()
     _migrate_add_task_v2_columns()
     _migrate_add_task_allow_shell_column()
+    _migrate_add_task_run_when_busy_column()
     _migrate_add_notifications_enabled()
     _migrate_drop_ping_notes_tasks()
     _migrate_add_crew_member_id()

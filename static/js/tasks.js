@@ -830,6 +830,7 @@ function _renderList() {
 
     // Slim meta line (always visible): schedule · next · run count.
     const metaParts = [_scheduleLabel(task)];
+    if (task.run_when_busy) metaParts.push('Runs while active');
     if (task.next_run && task.status === 'active') metaParts.push('Next: ' + _relativeTime(task.next_run));
     if (task.run_count > 0) metaParts.push(task.run_count + ' run' + (task.run_count !== 1 ? 's' : ''));
     const meta = document.createElement('div');
@@ -1187,6 +1188,15 @@ function _showForm(existing, initTaskType, initTriggerType) {
         <span class="task-form-notif-copy">
           <span>Notifications</span>
           <span>Silence completion alerts for chatty cron jobs.</span>
+        </span>
+      </label>
+
+      <label class="task-form-notif-toggle" title="Queue this task at its trigger time and let it run even while Aegis is active.">
+        <input type="checkbox" id="task-form-run-busy" ${existing?.run_when_busy ? 'checked' : ''}>
+        <span class="task-form-notif-switch" aria-hidden="true"></span>
+        <span class="task-form-notif-copy">
+          <span>Run while Aegis is active</span>
+          <span>Queue on time and run when a task slot is free, without waiting for idle.</span>
         </span>
       </label>
 
@@ -1634,6 +1644,9 @@ function _showForm(existing, initTaskType, initTriggerType) {
     // Notifications toggle — defaults to true if absent.
     const notifEl = document.getElementById('task-form-notif');
     if (notifEl) payload.notifications_enabled = !!notifEl.checked;
+
+    const runBusyEl = document.getElementById('task-form-run-busy');
+    if (runBusyEl) payload.run_when_busy = !!runBusyEl.checked;
 
     // Unattended shell/file-write access — defaults to OFF (reads + safe
     // tools only). Legacy tasks report allow_shell true and keep it unless

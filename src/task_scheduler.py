@@ -737,15 +737,17 @@ class TaskScheduler:
                     ScheduledTask.id.notin_(executing_snapshot) if executing_snapshot else True,
                 ).all()
                 to_dispatch = []
+                deferred = False
                 for task in due:
                     if task.id in self._executing:
                         continue
-                    if foreground_active:
+                    if foreground_active and not bool(getattr(task, "run_when_busy", False)):
                         task.next_run = now + timedelta(minutes=15)
+                        deferred = True
                         continue
                     self._executing.add(task.id)
                     to_dispatch.append(task.id)
-                if foreground_active and due:
+                if deferred:
                     db.commit()
             for task_id in to_dispatch:
                 asyncio.create_task(self._execute_task(task_id))
@@ -877,10 +879,16 @@ class TaskScheduler:
                 db.commit()
                 return
 
+            # Per-task opt-in: enter the normal scheduler queue at trigger
+            # time, but do not wait for or enforce foreground inactivity.
+            gate_foreground = gate_foreground and not bool(
+                getattr(task, "run_when_busy", False)
+            )
+
             if gate_foreground:
                 waiting = db.query(TaskRun).filter(TaskRun.id == run_id).first()
                 if waiting and waiting.status == "queued":
-                    waiting.result = "Queued — waiting for Odysseus to be idle…"
+                    waiting.result = "Queued — waiting for Aegis to be idle…"
                     db.commit()
                 from src.interactive_gate import wait_for_interactive_quiet
                 await wait_for_interactive_quiet(f"scheduled task {task.name}")
@@ -930,7 +938,7 @@ class TaskScheduler:
                         await asyncio.sleep(0.25)
                         if has_foreground_activity():
                             foreground_cancel["hit"] = True
-                            logger.info("Task '%s' interrupted because Odysseus became active", task.name)
+                            logger.info("Task '%s' interrupted because Aegis became active", task.name)
                             if current_task:
                                 current_task.cancel()
                             return
@@ -976,7 +984,7 @@ class TaskScheduler:
                 return
             except asyncio.CancelledError:
                 msg = (
-                    "Paused because Odysseus became active"
+                    "Paused because Aegis became active"
                     if foreground_cancel.get("hit")
                     else "Stopped by user"
                 )
@@ -2269,18 +2277,36 @@ class TaskScheduler:
         stopped = self._mark_run_aborted(task_id) or stopped
         return stopped
 
-    async def stop_background_tasks_for_foreground(self, *, reason: str = "Odysseus became active") -> int:
+    async def stop_background_tasks_for_foreground(self, *, reason: str = "Aegis became active") -> int:
         """Cancel all in-process scheduler tasks because the user is active.
 
-        This is intentionally blunt for scheduled/background work: when the
-        user opens or uses Odysseus, foreground interaction wins immediately.
-        Manual force-runs can be restarted by the user; automatic jobs will be
-        deferred by their cancellation path instead of stealing the app.
+        Tasks explicitly configured to run while Aegis is active are left in
+        the queue or allowed to continue. Other automatic jobs are deferred by
+        their cancellation path so foreground interaction keeps priority.
         """
         async with self._executing_lock:
             task_ids = list(self._executing)
+        run_when_busy_ids = set()
+        if task_ids:
+            try:
+                from core.database import SessionLocal, ScheduledTask
+                db = SessionLocal()
+                try:
+                    run_when_busy_ids = {
+                        row[0]
+                        for row in db.query(ScheduledTask.id).filter(
+                            ScheduledTask.id.in_(task_ids),
+                            ScheduledTask.run_when_busy.is_(True),
+                        ).all()
+                    }
+                finally:
+                    db.close()
+            except Exception:
+                logger.exception("Failed to read foreground policy for active tasks")
         stopped = 0
         for task_id in task_ids:
+            if task_id in run_when_busy_ids:
+                continue
             handle = self._task_handles.get(task_id)
             if handle and not handle.done():
                 handle.cancel()

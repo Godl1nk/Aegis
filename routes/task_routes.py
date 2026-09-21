@@ -157,6 +157,8 @@ class TaskCreate(BaseModel):
     then_task_id: Optional[str] = None            # chain: run this task after success
     notifications_enabled: Optional[bool] = None  # None lets action-specific defaults apply
     character_id: Optional[str] = None             # built-in persona id (PERSONAS) — biases output voice
+    allow_shell: Optional[bool] = None             # None = legacy (shell allowed); False = reads/safe tools only
+    run_when_busy: bool = False                    # run without waiting for foreground inactivity
 
 
 class TaskUpdate(BaseModel):
@@ -178,6 +180,8 @@ class TaskUpdate(BaseModel):
     then_task_id: Optional[str] = None
     notifications_enabled: Optional[bool] = None
     character_id: Optional[str] = None
+    allow_shell: Optional[bool] = None
+    run_when_busy: Optional[bool] = None
 
 
 def _display_task_name(t: ScheduledTask) -> str:
@@ -189,6 +193,7 @@ def _display_task_name(t: ScheduledTask) -> str:
 
 def _task_to_dict(t: ScheduledTask, include_last_run_result: bool = False) -> dict:
     defs = HOUSEKEEPING_DEFAULTS.get(t.action) if t.action else None
+    _allow_shell = getattr(t, "allow_shell", None)
     d = {
         "id": t.id,
         "name": _display_task_name(t),
@@ -216,6 +221,8 @@ def _task_to_dict(t: ScheduledTask, include_last_run_result: bool = False) -> di
         "run_count": t.run_count or 0,
         "then_task_id": t.then_task_id,
         "notifications_enabled": bool(getattr(t, "notifications_enabled", True)),
+        "allow_shell": _allow_shell if _allow_shell is not None else True,
+        "run_when_busy": bool(getattr(t, "run_when_busy", False)),
         "webhook_token": t.webhook_token if (t.trigger_type or "schedule") == "webhook" else None,
         "created_at": t.created_at.isoformat() + "Z" if t.created_at else None,
         "updated_at": t.updated_at.isoformat() + "Z" if t.updated_at else None,
@@ -550,6 +557,10 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 webhook_token=webhook_token,
                 notifications_enabled=notifications_enabled,
                 character_id=(req.character_id or None),
+                # New tasks via the UI/API default to no unattended shell
+                # (explicit opt-in); legacy rows stay NULL (allowed).
+                allow_shell=(bool(req.allow_shell) if req.allow_shell is not None else False),
+                run_when_busy=bool(req.run_when_busy),
             )
             db.add(task)
             db.commit()
@@ -711,6 +722,10 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 task.then_task_id = _validate_then_task_id(db, req.then_task_id, user, current_task_id=task.id)
             if req.notifications_enabled is not None:
                 task.notifications_enabled = bool(req.notifications_enabled)
+            if req.allow_shell is not None:
+                task.allow_shell = bool(req.allow_shell)
+            if req.run_when_busy is not None:
+                task.run_when_busy = bool(req.run_when_busy)
             if req.character_id is not None:
                 # Empty string clears the persona; non-empty stores the id.
                 task.character_id = req.character_id or None

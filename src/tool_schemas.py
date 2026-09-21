@@ -594,7 +594,8 @@ FUNCTION_TOOL_SCHEMAS = [
                                       "description": "Event name (for trigger_type=event)"},
                     "trigger_count": {"type": "integer", "description": "Fire every N events (for trigger_type=event)"},
                     "output_target": {"type": "string", "description": "Where results go. Defaults to 'session' (results land in a dedicated chat session the user reads) — this is the right choice for 'summarize for me' / 'send to me'. Do NOT go hunting for the user's email address; only use an email MCP tool name here if the user explicitly asked to be emailed AND an address is already known."},
-                    "allow_shell": {"type": "boolean", "description": "Let this task's unattended agent use shell/file-write tools (bash, python, write_file, edit_file). Default false: tasks run with reads + safe tools only. Pass true ONLY when the user explicitly asks the task to run commands or change files."}
+                    "allow_shell": {"type": "boolean", "description": "Let this task's unattended agent use shell/file-write tools (bash, python, write_file, edit_file). Default false: tasks run with reads + safe tools only. Pass true ONLY when the user explicitly asks the task to run commands or change files."},
+                    "run_when_busy": {"type": "boolean", "description": "Queue at the trigger time and run as soon as task capacity is available, even while Aegis has foreground activity. Default false preserves idle-only execution."}
                 },
                 "required": ["action"]
             }
