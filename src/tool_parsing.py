@@ -134,6 +134,16 @@ _XML_DIRECT_OPEN_RE = re.compile(r"<\s*([A-Za-z_][\w-]*)\s*>", re.IGNORECASE)
 # parameter openers can't drive finditer's O(n^2) rescan. See _iter_named_blocks.
 _XML_PARAM_OPEN_RE = re.compile(r'<parameter\s+name=["\'](\w+)["\']>', re.IGNORECASE)
 _XML_PARAM_CLOSE_RE = re.compile(r'</parameter>', re.IGNORECASE)
+# Pattern 3b: equator-style <function=tool> + <parameter=name>value</parameter>.
+# Some local templates emit this instead of <invoke name=""> — seen live with
+# Qwen emitting <function=manage_tasks><parameter=action>create</parameter>
+# inside <tool_call>. The name also arrives as <function name="tool">, so both
+# spellings share one opener with the name in group 1 (like _iter_named_blocks
+# expects). Parameter values use the same bare-equals spelling.
+_FUNCTION_EQ_OPEN_RE = re.compile(r"<function\s*(?:=\s*|name\s*=\s*[\"'])([A-Za-z_][\w.-]*)(?:[\"']\s*)?>", re.IGNORECASE)
+_FUNCTION_EQ_CLOSE_RE = re.compile(r"</function\s*>", re.IGNORECASE)
+_FUNCTION_PARAM_OPEN_RE = re.compile(r"<parameter\s*=\s*([A-Za-z_][\w.-]*)\s*>", re.IGNORECASE)
+_FUNCTION_PARAM_CLOSE_RE = re.compile(r"</parameter\s*>", re.IGNORECASE)
 # Closer tokens (any tag name) for the backref scanners, pre-indexed by name so a
 # flood of distinct unclosed tag names stays near-linear. See _iter_backref_blocks.
 _XML_DIRECT_CLOSE_ANY_RE = re.compile(r"</\s*([A-Za-z_][\w-]*)\s*>", re.IGNORECASE)
@@ -923,6 +933,34 @@ def _parse_xml_invoke(name, body) -> Optional[ToolBlock]:
     return function_call_to_tool_block(tool_name, json.dumps(params))
 
 
+def _iter_function_eq(text):
+    """Forward-only ``<function=..>...</function>`` scan (see _iter_named_blocks)."""
+    return _iter_named_blocks(text, _FUNCTION_EQ_OPEN_RE, _FUNCTION_EQ_CLOSE_RE)
+
+
+def _parse_function_eq_call(name, body) -> Optional[ToolBlock]:
+    """Parse a <function=tool><parameter=name>value</parameter></function> call.
+
+    Equator-style dialect of _parse_xml_invoke: delegates content-shaping to
+    function_call_to_tool_block — the SAME converter used for native function
+    calls — so the full tool set and per-tool content format are handled in
+    ONE place. Unknown tool names convert to None exactly like invoke.
+    """
+    tool_name = name.lower()
+    params = {}
+    for pname, pval in _iter_named_blocks(body, _FUNCTION_PARAM_OPEN_RE, _FUNCTION_PARAM_CLOSE_RE):
+        params[pname] = pval.strip()
+    if not params and tool_name not in BUILTIN_EMAIL_TOOLS:
+        # Mirror the fenced path: an opener with zero paired parameters is a
+        # fragment, not a call — only the no-arg email tools dispatch empty.
+        # Without this, an opener flood (or a stray unclosed tag) schedules
+        # empty shell executions instead of parsing to nothing.
+        return None
+    # Local import to avoid a circular import at module load.
+    from src.tool_schemas import function_call_to_tool_block
+    return function_call_to_tool_block(tool_name, json.dumps(params))
+
+
 def _parse_xml_direct_tool(name, body) -> Optional[ToolBlock]:
     """Parse direct XML tool tags inside <tool_call>.
 
@@ -1282,6 +1320,7 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
     1. ```bash ... ``` fenced code blocks (standard)
     2. [TOOL_CALL] ... [/TOOL_CALL] blocks (some models)
     3. XML-style <tool_call>/<invoke> blocks
+    3b. Equator-style <function=tool>/<parameter=name> blocks (closed or not)
     4. <tool_code> blocks (MiniMax-M2.5 style)
     5. StepFun Step-3 native <｜tool▁call▁begin｜> tokens
     6. DeepSeek DSML markup (normalized to <invoke> first)
@@ -1422,6 +1461,25 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
                 if block:
                     blocks.append(block)
 
+    # Pattern 3b: equator-style <function=tool> blocks (see _FUNCTION_EQ_OPEN_RE).
+    # The scan ignores any outer <tool_call> envelope, so wrapped and bare
+    # forms share this path. Unclosed tails are covered too: a model that
+    # streams the opener and parameters but never closes still yields its
+    # paired parameters (each truncated at the next opener so consecutive
+    # calls can't cannibalize each other's args).
+    if not blocks:
+        for func_name, func_body in _iter_function_eq(text):
+            block = _parse_function_eq_call(func_name, func_body)
+            if block:
+                blocks.append(block)
+    if not blocks:
+        opens = list(_FUNCTION_EQ_OPEN_RE.finditer(text))
+        for idx, m in enumerate(opens):
+            end = opens[idx + 1].start() if idx + 1 < len(opens) else len(text)
+            block = _parse_function_eq_call(m.group(1), text[m.end():end])
+            if block:
+                blocks.append(block)
+
     # Pattern 4: <tool_code> blocks (MiniMax-M2.5 style)
     if not blocks:
         for _ms, inner_start, inner_end, _me in _iter_delimited(
@@ -1466,7 +1524,10 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
     # from weaker native-tool models after reading the tool docs but failing to
     # emit the actual structured call.
     if not blocks:
-        m = _PLAIN_UI_OPEN_PANEL_RE.search(text)
+        # Fast path: the pattern's leading ^\s* backtracks quadratically on
+        # whitespace-only stretches, so skip the regex unless the literal it
+        # must contain is present at all.
+        m = _PLAIN_UI_OPEN_PANEL_RE.search(text) if "ui_control" in text.lower() else None
         if m:
             blocks.append(ToolBlock("ui_control", f"open_panel {m.group(1).lower()}"))
 
@@ -1483,7 +1544,7 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
     illustrative example from a native function-calling model), it shouldn't
     vanish from the persisted/displayed text either — otherwise the example
     streams once and then disappears on reload (issue #3222 follow-up).
-    Patterns 2-5 + DSML markup are always stripped, since that markup should
+    Patterns 2-5 + DSML + function-equals markup are always stripped, since that markup should
     never reach the user regardless of whether it converted to a tool call.
     """
     # Normalize ASCII pipe tool-call tokens + DSML first so their markup gets
@@ -1503,6 +1564,9 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
     cleaned = _strip_stepfun_tool_markup(cleaned)
     cleaned = _strip_delimited(cleaned, _XML_TOOL_CALL_OPEN_RE, _XML_TOOL_CALL_CLOSE_RE)
     cleaned = _XML_OPEN_TOOL_CALL_RE.sub('', cleaned)
+    cleaned = _strip_delimited(cleaned, _FUNCTION_EQ_OPEN_RE, _FUNCTION_EQ_CLOSE_RE)
+    cleaned = _FUNCTION_EQ_OPEN_RE.sub('', cleaned)
+    cleaned = _strip_delimited(cleaned, _FUNCTION_PARAM_OPEN_RE, _FUNCTION_PARAM_CLOSE_RE)
     cleaned = _strip_delimited(cleaned, _TOOL_CODE_OPEN_RE, _TOOL_CODE_CLOSE_RE)
     cleaned = _GEMMA_TOOL_CALL_RE.sub('', cleaned)
     cleaned = _strip_delimited(cleaned, _FUNCTION_MODEL_OPEN_RE, _FUNCTION_MODEL_CLOSE_RE)
@@ -1514,7 +1578,11 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
         if raw_web_json:
             _, (start, end) = raw_web_json
             cleaned = cleaned[:start] + cleaned[end:]
-    cleaned = _PLAIN_UI_OPEN_PANEL_RE.sub("", cleaned)
+    # Same fast path as the Pattern 7 search above: skip the regex on text
+    # that cannot match (its leading ^\s* backtracks quadratically on
+    # whitespace-only stretches, e.g. after opener floods are stripped).
+    if "ui_control" in cleaned.lower():
+        cleaned = _PLAIN_UI_OPEN_PANEL_RE.sub("", cleaned)
     # Strip bare <invoke> blocks not wrapped in <tool_call>
     cleaned = _strip_bare_invoke_markup(cleaned)
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
