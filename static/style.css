@@ -42156,6 +42156,12 @@ body.theme-frosted .modal {
   background: color-mix(in srgb, var(--red, #e05a5a) 8%, transparent);
   font-size: 0.85em;
 }
+/* Benign tool-gate approvals (task creation etc.) use the accent tint
+   instead of the danger tint, so they don't scream danger. */
+.approval-card[data-kind="tool_gate"] {
+  border-color: var(--accent, var(--red, #e05a5a));
+  background: color-mix(in srgb, var(--accent, var(--red, #e05a5a)) 8%, transparent);
+}
 .approval-card.resolved { opacity: 0.65; border-color: var(--border, rgba(128,128,128,0.3)); }
 .approval-card.resolved .approval-actions { display: none; }
 .approval-title { font-weight: 600; margin-bottom: 4px; }
@@ -42170,16 +42176,27 @@ body.theme-frosted .modal {
   white-space: pre-wrap;
   font-size: 11px;
 }
-.approval-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.approval-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .approval-error:not(:empty) { margin-top: 6px; color: var(--color-error, #e05a5a); }
 .approval-btn {
-  padding: 4px 10px;
+  padding: 8px 14px;
+  min-height: 44px;
   border-radius: 6px;
   border: 1px solid var(--border, rgba(128,128,128,0.35));
   background: var(--panel, rgba(128,128,128,0.1));
   color: var(--fg, inherit);
   cursor: pointer;
   font-size: 0.95em;
+  font-weight: 600;
+  font-family: inherit;
+}
+/* Benign tool-gate approvals get a filled primary (same language as
+   .admin-btn-add). Dangerous-command cards stay neutral with only Deny
+   outlined, so the safe action isn't visually pushed for real danger. */
+.approval-card[data-kind="tool_gate"] .approval-actions .approval-btn:first-child {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
 }
 .approval-btn:hover { border-color: var(--accent, var(--red)); }
 .approval-btn.danger { border-color: var(--red, #e05a5a); color: var(--red, #e05a5a); }
@@ -42224,4 +42241,11 @@ body.theme-frosted .modal {
     height: 32px !important;
     min-height: 32px !important;
   }
+
+  /* Approval card: four side-by-side buttons are un-tappable at 375px —
+     stack full-width with 44px targets (audited). */
+  .approval-card { font-size: 0.9em; }
+  .approval-actions { flex-direction: column; align-items: stretch; }
+  .approval-btn { width: 100%; min-height: 44px; font-size: 14px; }
+  .approval-cmd { font-size: 12px; max-height: 160px; }
 }
