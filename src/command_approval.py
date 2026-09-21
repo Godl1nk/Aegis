@@ -1448,8 +1448,10 @@ async def await_tool_gate_approval(approval_id: str, timeout=None) -> dict:
         "approved": False,
         "scope": None,
         "message": (
-            "Update the plan or ask the user for explicit authorization, then "
-            "retry — the request timed out waiting for approval."
+            "The approval card expired without a response — nothing was "
+            "approved and nothing ran. Tell the user to watch for the new "
+            "approval card and tap Allow, and only retry the action after "
+            "they confirm they approved it."
             if timed_out else
             "The user denied this action. Do not retry or rephrase it; "
             "continue with something else or ask what they want instead."

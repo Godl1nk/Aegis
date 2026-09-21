@@ -197,3 +197,31 @@ def test_gate_disabled_sends_everything(monkeypatch):
     events = _run_loop(monkeypatch, [READ, EDIT, DONE], session_id="gate-sess-off")
     assert not any(e.get("type") == "approval_request" for e in events)
     assert calls == ["read_file", "edit_file"], calls
+
+
+def test_two_gated_blocks_one_session_approval_covers_both(monkeypatch):
+    """Multiple gated tool calls in one round need a single dialog: approving
+    the first with session scope bypasses the rest instead of stacking one
+    60s wait per block (which made multi-task creation reliably stall)."""
+    calls = []
+    _patch_common(monkeypatch, calls)
+    two_edits = EDIT + "\n" + EDIT
+    events = _pump_with_approval(monkeypatch, [READ, two_edits, DONE], "session",
+                                 session_id="gate-sess-multi")
+    cards = [e for e in events if e.get("type") == "approval_request"]
+    assert len(cards) == 1, cards
+    assert calls == ["read_file", "edit_file", "edit_file"], calls
+
+
+def test_gate_timeout_message_directs_to_card_not_retry(monkeypatch):
+    """A timed-out gate dialog must not invite blind retry (that looped
+    multi-task creation forever); it must point at the approval card."""
+    monkeypatch.setattr(command_approval, "_get_approval_timeout", lambda: 0)
+    ap_id, _ = command_approval.create_tool_gate_approval(
+        tool="manage_tasks", reason="needs authorization",
+        session_id="gate-sess-msg", owner="", detail="create",
+    )
+    out = asyncio.run(command_approval.await_tool_gate_approval(ap_id))
+    assert not out["approved"]
+    assert "approval card" in out["message"]
+    assert "then retry" not in out["message"]
