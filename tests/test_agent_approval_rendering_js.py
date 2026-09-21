@@ -46,3 +46,17 @@ def test_mid_task_detector_uses_the_tool_timeline_not_message_children():
 def test_detached_reader_does_not_paint_duplicate_tool_nodes_after_return():
     assert "if (_isBg || _backgroundStreams.has(streamSessionId)) continue;" in CHAT_JS
     assert "bgToolOutput.pendingApproval = null" in CHAT_JS
+
+
+def test_tool_gate_card_title_names_the_tool():
+    body = _function_source("function _renderApprovalCard")
+    assert "json.kind === 'tool_gate'" in body
+    assert "'Dangerous command - approval required'" in body
+
+
+def test_approval_card_reveal_opens_activity_and_scrolls():
+    body = _function_source("function _revealApprovalCard")
+    assert "details.agent-turn-activity" in body
+    assert "scrollIntoView" in body
+    render = _function_source("function _renderApprovalCard")
+    assert render.count("_revealApprovalCard(") >= 2

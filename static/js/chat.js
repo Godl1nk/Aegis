@@ -338,6 +338,20 @@ import { createAgentTurn, mergeAgentTurnActivity } from './agentTurn.js';
       lower.includes('image_gen');
   }
 
+  function _revealApprovalCard(card) {
+    // An approval gate blocks the run until tapped: never leave the card
+    // hidden inside a collapsed Activity <details>, and bring it into view
+    // (on mobile the running reply usually sits below the fold).
+    try {
+      const details = card.closest('details.agent-turn-activity');
+      if (details) details.open = true;
+    } catch (_) {}
+    uiModule.scrollHistory();
+    try {
+      card.scrollIntoView({ block: 'nearest' });
+    } catch (_) {}
+  }
+
   function _renderApprovalCard(json, host) {
     const approvalId = String((json && json.approval_id) || '');
     if (!approvalId || !host) return null;
@@ -346,16 +360,27 @@ import { createAgentTurn, mergeAgentTurnActivity } from './agentTurn.js';
       .find(card => card.dataset.approvalId === approvalId);
     if (existing) {
       if (existing.parentNode !== host) host.appendChild(existing);
+      _revealApprovalCard(existing);
       return existing;
     }
 
     const card = document.createElement('div');
     card.className = 'approval-card';
     card.dataset.approvalId = approvalId;
+    if (json && json.kind) card.dataset.kind = String(json.kind);
 
     const title = document.createElement('div');
     title.className = 'approval-title';
-    title.textContent = 'Dangerous command - approval required';
+    // Tool-gate approvals (e.g. task creation) are not shell commands:
+    // title them by what they gate so the card reads as actionable.
+    if (json && json.kind === 'tool_gate') {
+      const toolLabel = String(json.tool || '')
+        .replace(/_/g, ' ')
+        .replace(/^\s*\S/, c => c.toUpperCase());
+      title.textContent = (toolLabel || 'Action') + ' - approval required';
+    } else {
+      title.textContent = 'Dangerous command - approval required';
+    }
     card.appendChild(title);
 
     const description = document.createElement('div');
@@ -417,7 +442,7 @@ import { createAgentTurn, mergeAgentTurnActivity } from './agentTurn.js';
     });
 
     host.appendChild(card);
-    uiModule.scrollHistory();
+    _revealApprovalCard(card);
     return card;
   }
 
