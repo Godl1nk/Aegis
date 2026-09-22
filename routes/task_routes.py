@@ -159,6 +159,7 @@ class TaskCreate(BaseModel):
     character_id: Optional[str] = None             # built-in persona id (PERSONAS) — biases output voice
     allow_shell: Optional[bool] = None             # None = legacy (shell allowed); False = reads/safe tools only
     run_when_busy: bool = False                    # run without waiting for foreground inactivity
+    max_steps: Optional[int] = None                # max agent rounds; null uses the scheduler default
 
 
 class TaskUpdate(BaseModel):
@@ -182,6 +183,7 @@ class TaskUpdate(BaseModel):
     character_id: Optional[str] = None
     allow_shell: Optional[bool] = None
     run_when_busy: Optional[bool] = None
+    max_steps: Optional[int] = None
 
 
 def _display_task_name(t: ScheduledTask) -> str:
@@ -223,6 +225,7 @@ def _task_to_dict(t: ScheduledTask, include_last_run_result: bool = False) -> di
         "notifications_enabled": bool(getattr(t, "notifications_enabled", True)),
         "allow_shell": _allow_shell if _allow_shell is not None else True,
         "run_when_busy": bool(getattr(t, "run_when_busy", False)),
+        "max_steps": t.max_steps,
         "webhook_token": t.webhook_token if (t.trigger_type or "schedule") == "webhook" else None,
         "created_at": t.created_at.isoformat() + "Z" if t.created_at else None,
         "updated_at": t.updated_at.isoformat() + "Z" if t.updated_at else None,
@@ -491,6 +494,8 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             raise HTTPException(400, "Event name is required for event-triggered tasks")
         if req.trigger_type == "event" and not req.trigger_count:
             raise HTTPException(400, "Trigger count is required for event-triggered tasks")
+        if req.max_steps is not None and not 1 <= req.max_steps <= 20:
+            raise HTTPException(400, "max_steps must be between 1 and 20")
 
         # Auto-generate name
         name = req.name
@@ -570,6 +575,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 # (explicit opt-in); legacy rows stay NULL (allowed).
                 allow_shell=(bool(req.allow_shell) if req.allow_shell is not None else False),
                 run_when_busy=bool(req.run_when_busy),
+                max_steps=req.max_steps,
             )
             db.add(task)
             db.commit()
@@ -737,6 +743,10 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 task.allow_shell = bool(req.allow_shell)
             if req.run_when_busy is not None:
                 task.run_when_busy = bool(req.run_when_busy)
+            if req.max_steps is not None:
+                if not 1 <= req.max_steps <= 20:
+                    raise HTTPException(400, "max_steps must be between 1 and 20")
+                task.max_steps = req.max_steps
             if req.character_id is not None:
                 # Empty string clears the persona; non-empty stores the id.
                 task.character_id = req.character_id or None

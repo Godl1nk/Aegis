@@ -279,6 +279,15 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
         return {"error": "Invalid JSON arguments", "exit_code": 1}
 
     action = args.get("action", "list")
+    raw_max_steps = args.get("max_steps")
+    max_steps = None
+    if raw_max_steps is not None:
+        try:
+            max_steps = int(raw_max_steps)
+        except (TypeError, ValueError):
+            return {"error": "max_steps must be an integer between 1 and 20", "exit_code": 1}
+        if not 1 <= max_steps <= 20:
+            return {"error": "max_steps must be between 1 and 20", "exit_code": 1}
     db = SessionLocal()
     try:
         if action == "list":
@@ -302,6 +311,7 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
                     "run_count": t.run_count or 0,
                     "allow_shell": _t_allow if _t_allow is not None else True,
                     "run_when_busy": bool(getattr(t, "run_when_busy", False)),
+                    "max_steps": t.max_steps,
                 })
             return {"response": f"Found {len(task_list)} tasks", "tasks": task_list, "exit_code": 0}
 
@@ -350,6 +360,7 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
                 # reads + safe tools. Legacy rows (NULL) keep old behaviour.
                 allow_shell=bool(args.get("allow_shell")),
                 run_when_busy=bool(args.get("run_when_busy")),
+                max_steps=max_steps,
             )
             db.add(task)
             db.commit()
@@ -376,6 +387,9 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
             if args.get("run_when_busy") is not None:
                 task.run_when_busy = bool(args.get("run_when_busy"))
                 changed.append("run_when_busy")
+            if raw_max_steps is not None:
+                task.max_steps = max_steps
+                changed.append("max_steps")
             if args.get("task_type") is not None:
                 task.task_type = args["task_type"]
                 changed.append("task_type")

@@ -99,17 +99,20 @@ async def test_task_api_roundtrips_run_when_busy(task_db):
         trigger_type="schedule",
         allow_shell=True,
         run_when_busy=True,
+        max_steps=1,
     ))
     assert created["allow_shell"] is True
     assert created["run_when_busy"] is True
+    assert created["max_steps"] == 1
 
     updated = await update_task(
         request,
         created["id"],
-        task_routes.TaskUpdate(allow_shell=False, run_when_busy=False),
+        task_routes.TaskUpdate(allow_shell=False, run_when_busy=False, max_steps=2),
     )
     assert updated["allow_shell"] is False
     assert updated["run_when_busy"] is False
+    assert updated["max_steps"] == 2
 
 
 @pytest.mark.asyncio
@@ -120,23 +123,27 @@ async def test_manage_tasks_tool_roundtrips_run_when_busy(task_db):
         "prompt": "Summarize the inbox",
         "schedule": "daily",
         "run_when_busy": True,
+        "max_steps": 1,
     }), owner="alice")
     assert created["exit_code"] == 0
 
     listed = await do_manage_tasks(json.dumps({"action": "list"}), owner="alice")
     task = next(item for item in listed["tasks"] if item["id"] == created["task_id"])
     assert task["run_when_busy"] is True
+    assert task["max_steps"] == 1
 
     edited = await do_manage_tasks(json.dumps({
         "action": "edit",
         "task_id": created["task_id"],
         "run_when_busy": False,
+        "max_steps": 2,
     }), owner="alice")
     assert edited["exit_code"] == 0
 
     listed = await do_manage_tasks(json.dumps({"action": "list"}), owner="alice")
     task = next(item for item in listed["tasks"] if item["id"] == created["task_id"])
     assert task["run_when_busy"] is False
+    assert task["max_steps"] == 2
 
 
 @pytest.mark.asyncio
@@ -384,6 +391,8 @@ def test_task_form_exposes_and_submits_run_when_busy():
     assert 'id="task-form-run-busy"' in source
     assert "existing?.run_when_busy ? 'checked' : ''" in source
     assert "payload.run_when_busy = !!runBusyEl.checked" in source
+    assert 'id="task-form-max-steps"' in source
+    assert "payload.max_steps = parseInt(maxStepsEl.value, 10)" in source
     assert "['error', 'failed', 'aborted'].includes(r.status)" in source
     assert "running: '#2196f3'" in source
 

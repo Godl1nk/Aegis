@@ -1177,6 +1177,9 @@ function _showForm(existing, initTaskType, initTriggerType) {
         <option value="">Use session default</option>
       </select>
 
+      <label class="task-form-label">Max AI steps <span style="opacity:0.5;font-weight:normal;font-size:10px;">(optional — 1 to 20)</span></label>
+      <input type="number" id="task-form-max-steps" class="task-form-input" min="1" max="20" value="${existing?.max_steps || ''}" placeholder="20 (default)" />
+
       <label class="task-form-label">Chain</label>
       <select id="task-form-chain" class="task-form-input">
         <option value="">None</option>
@@ -1647,6 +1650,9 @@ function _showForm(existing, initTaskType, initTriggerType) {
 
     const runBusyEl = document.getElementById('task-form-run-busy');
     if (runBusyEl) payload.run_when_busy = !!runBusyEl.checked;
+
+    const maxStepsEl = document.getElementById('task-form-max-steps');
+    if (maxStepsEl?.value) payload.max_steps = parseInt(maxStepsEl.value, 10);
 
     // Unattended shell/file-write access — defaults to OFF (reads + safe
     // tools only). Legacy tasks report allow_shell true and keep it unless
