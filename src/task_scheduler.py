@@ -2012,7 +2012,12 @@ class TaskScheduler:
                         # if the model never produces a final text response
                         tool_summary = data.get("stdout") or data.get("output") or data.get("result") or ""
                         if isinstance(tool_summary, str) and tool_summary.strip():
-                            tool_results.append(f"[{data.get('tool', '?')}] {tool_summary[:500]}")
+                            # A 500-character excerpt usually contained only the
+                            # first search hit, leaving recovery synthesis without
+                            # the remaining evidence needed for a useful report.
+                            # Keep a bounded but substantive excerpt per tool; the
+                            # combined prompt is capped again below.
+                            tool_results.append(f"[{data.get('tool', '?')}] {tool_summary[:12000]}")
                 except (json.JSONDecodeError, KeyError):
                     pass
 
@@ -2033,9 +2038,10 @@ class TaskScheduler:
                     f"<original_task>\n{user_content}\n</original_task>\n\n"
                 )
                 if tool_results:
+                    bounded_findings = "\n".join(tool_results[-5:])[:24000]
                     grace_context += (
                         "<tool_findings>\n"
-                        + "\n".join(tool_results[-5:])
+                        + bounded_findings
                         + "\n</tool_findings>"
                     )
                 else:

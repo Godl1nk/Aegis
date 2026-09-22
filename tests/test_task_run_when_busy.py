@@ -296,6 +296,49 @@ async def test_agent_loop_grace_completion_preserves_requested_deliverable(monke
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_grace_completion_keeps_substantive_tool_evidence(monkeypatch):
+    evidence = "FIRST HEADLINE\n" + ("market evidence " * 80) + "FINAL STOCK CATALYST"
+
+    async def stream_tool_result(**_kwargs):
+        yield 'data: ' + json.dumps({
+            "type": "tool_output",
+            "tool": "web_search",
+            "stdout": evidence,
+        })
+
+    captured = {}
+
+    async def complete_task(messages, **_kwargs):
+        captured["messages"] = messages
+        return "finished briefing"
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream_tool_result)
+    monkeypatch.setattr("src.task_endpoint.resolve_task_candidates", lambda **_kwargs: [])
+    monkeypatch.setattr("src.task_endpoint.task_llm_call_async", complete_task)
+
+    scheduler = TaskScheduler(session_manager=None)
+    task = SimpleNamespace(
+        name="Market brief",
+        prompt="Summarize the market and name supported stock ideas.",
+        owner="alice",
+        max_steps=1,
+        run_when_busy=True,
+    )
+
+    result = await scheduler._run_agent_loop(
+        "http://model.example/v1/chat/completions",
+        "model",
+        task,
+        "session-1",
+    )
+
+    assert result == "finished briefing"
+    grace_prompt = captured["messages"][-1]["content"]
+    assert "FIRST HEADLINE" in grace_prompt
+    assert "FINAL STOCK CATALYST" in grace_prompt
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_never_publishes_raw_tool_output_when_grace_fails(monkeypatch):
     async def stream_tool_result(**_kwargs):
         yield 'data: {"type":"tool_output","tool":"web_search","stdout":"RAW SOURCE DUMP https://example.com"}'
