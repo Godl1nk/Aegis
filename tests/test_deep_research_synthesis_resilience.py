@@ -28,6 +28,7 @@ def _researcher():
     r = DeepResearcher.__new__(DeepResearcher)
     r.synthesis_window = 10
     r.max_report_tokens = 4096
+    r.used_fallback_report = False
     return r
 
 
@@ -70,6 +71,37 @@ def test_fallback_report_preserves_findings():
     assert "No information could be gathered" not in report
 
 
+def test_fallback_report_does_not_publish_long_task_prompt_or_raw_worker_notes():
+    r = _researcher()
+    long_prompt = "Create a market briefing. " * 30
+    findings = [
+        {
+            "url": "https://example.com",
+            "title": "Worker output",
+            "rational": "LLM extraction (raw)",
+            "summary": "Need answer user's request. Need produce JSON with fields.",
+        }
+    ]
+
+    report = r._fallback_report(long_prompt, findings)
+
+    assert report.startswith("# Research findings")
+    assert long_prompt not in report
+    assert "Need answer user's request" not in report
+    assert "No reliable structured findings" in report
+
+
+def test_fallback_report_honors_no_link_instruction():
+    r = _researcher()
+    report = r._fallback_report(
+        "Summarize this. Do not include links or a Sources section.",
+        _FINDINGS,
+    )
+
+    assert "Diarization basics" in report
+    assert "https://ex.com" not in report
+
+
 def test_synthesis_failure_keeps_previous_report():
     """If synthesis raises, the previous report is preserved (not blanked) so the
     findings survive the round and the fallback can use them."""
@@ -84,3 +116,23 @@ def test_synthesis_failure_keeps_previous_report():
     prev = "existing report body"
     out = asyncio.run(r._synthesize("q", _FINDINGS, prev))
     assert out == prev  # unchanged, not emptied
+
+
+def test_final_report_does_not_expand_a_requested_concise_brief():
+    r = _researcher()
+    r.category = None
+    r._emit = lambda **k: None
+    calls = []
+
+    async def _fake_llm(messages, **kwargs):
+        calls.append(messages)
+        return "Short requested briefing."
+
+    r._llm = _fake_llm
+    result = asyncio.run(r._final_report(
+        "Create a concise market briefing under 500 words.",
+        "Verified market evidence.",
+    ))
+
+    assert result == "Short requested briefing."
+    assert len(calls) == 1

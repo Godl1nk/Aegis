@@ -125,7 +125,7 @@ Example: "NO — We still lack information about the economic impact."
 """
 
 FINAL_REPORT_PROMPT = """\
-Write a **long, detailed, comprehensive** research report answering this question:
+Write a polished research report answering this question:
 
 **Question:** {question}
 
@@ -133,15 +133,13 @@ Write a **long, detailed, comprehensive** research report answering this questio
 {report}
 
 Requirements:
-- Write at MINIMUM 1500 words — this should be a thorough, magazine-quality article
-- Use clear ## headings and ### subheadings to organize into logical sections
-- Each section should have multiple detailed paragraphs, not just bullet points
+- Follow any explicit output structure, length, citation, and formatting requirements in the question first
+- If the question does not specify a format or length, write a thorough report of at least 1500 words with clear ## headings and ### subheadings
 - Synthesize and analyze the information — explain WHY things matter, draw comparisons, provide context
 - Include specific data points, numbers, and statistics from the evidence
-- Include source URLs as inline citations [like this](url)
+- Include source URLs as inline citations unless the question explicitly says not to include links or sources
 - Note where sources agree and where they disagree
-- Add a brief executive summary at the top
-- End with a clear conclusion that directly answers the question
+- Add an executive summary and conclusion unless the requested format calls for different sections
 - Write in an engaging, informative style — not dry or robotic
 """
 
@@ -241,6 +239,7 @@ class DeepResearcher:
         self.findings: List[Dict] = []
         self.evolving_report: str = ""
         self.research_plan: str = ""
+        self.used_fallback_report: bool = False
 
     def cancel(self):
         """Request cooperative cancellation of the research loop."""
@@ -265,6 +264,7 @@ class DeepResearcher:
             prior_urls: URLs already visited (won't be re-fetched).
         """
         self._start_time = time.time()
+        self.used_fallback_report = False
         findings: List[Dict] = list(prior_findings) if prior_findings else []
         report = prior_report or ""
 
@@ -362,6 +362,7 @@ class DeepResearcher:
                     "Synthesis produced no report; returning %d gathered "
                     "finding(s) as a fallback", len(findings)
                 )
+                self.used_fallback_report = True
                 return self._fallback_report(question, findings)
             return "No information could be gathered for this question."
 
@@ -652,15 +653,12 @@ class DeepResearcher:
                     logger.info(f"Skipping low-quality extraction from {url}")
                     return None
                 return parsed
-            # If JSON parsing fails, treat entire response as evidence
-            return {
-                "url": url,
-                "title": title or page.get("title", ""),
-                "og_image": page.get("og_image", ""),
-                "rational": "LLM extraction (raw)",
-                "evidence": response[:3000],
-                "summary": response[:500],
-            }
+            # The extractor is explicitly required to return structured JSON.
+            # Publishing an unparseable response as evidence can expose model
+            # planning notes and echoed instructions in reports. Skip it and
+            # let the remaining sources carry the research run.
+            logger.warning("Skipping unstructured extraction from %s", url)
+            return None
         except Exception as e:
             logger.warning(f"LLM extraction failed for {url}: {e}")
             return None
@@ -752,8 +750,12 @@ class DeepResearcher:
                 timeout=180,
             )
 
-            # If report is too short, ask the LLM to expand it
-            if len(result.split()) < 400:
+            # Briefing-style questions often request a strict short format.
+            # Do not overwrite that request with the generic expansion pass.
+            wants_concise = bool(
+                re.search(r"\b(concise|brief(?:ing)?|under\s+\d+\s+words?)\b", question, re.I)
+            )
+            if len(result.split()) < 400 and not wants_concise:
                 logger.info(f"Final report too short ({len(result.split())} words), requesting expansion")
                 self._emit(phase="writing", message="Expanding report...")
                 expanded = await self._llm(
@@ -884,17 +886,22 @@ class DeepResearcher:
 
         return None
 
-    def _format_findings(self, findings: List[Dict]) -> str:
+    def _format_findings(self, findings: List[Dict], *, include_urls: bool = True) -> str:
         """Format findings list into readable text for synthesis prompt."""
         parts = []
         for i, f in enumerate(findings, 1):
+            if not isinstance(f, dict) or f.get("rational") == "LLM extraction (raw)":
+                continue
             url = f.get("url", "unknown")
             title = f.get("title", "")
             summary = f.get("summary", "")
             evidence = f.get("evidence", "")
             # Use summary if available, fall back to truncated evidence
             content = summary if summary else (evidence[:1000] if evidence else "(no content)")
-            parts.append(f"**Finding {i}** — [{title}]({url})\n{content}")
+            if is_low_quality(content):
+                continue
+            label = f"[{title}]({url})" if include_urls else (title or "Finding")
+            parts.append(f"**Finding {i}** — {label}\n{content}")
         return "\n\n".join(parts)
 
     def _fallback_report(self, question: str, findings: List[Dict]) -> str:
@@ -905,11 +912,21 @@ class DeepResearcher:
         material that was gathered instead of "No information could be gathered"
         (#1551).
         """
+        compact_question = re.sub(r"\s+", " ", question or "").strip()
+        heading = compact_question if len(compact_question) <= 160 else "Research findings"
+        question_lower = compact_question.lower()
+        include_urls = not any(
+            phrase in question_lower
+            for phrase in ("no links", "no urls", "without links", "do not include links", "do not include a sources")
+        )
+        formatted = self._format_findings(findings, include_urls=include_urls)
+        if not formatted:
+            formatted = "No reliable structured findings were available to publish."
         return (
-            f"# {question}\n\n"
+            f"# {heading}\n\n"
             "_Automatic synthesis did not complete, so this report lists the "
             f"{len(findings)} finding(s) gathered during research._\n\n"
-            f"{self._format_findings(findings)}"
+            f"{formatted}"
         )
 
     def get_stats(self) -> Dict:

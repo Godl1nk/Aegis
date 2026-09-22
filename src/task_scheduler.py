@@ -2056,7 +2056,13 @@ class TaskScheduler:
             except Exception as e:
                 logger.warning(f"Grace summarization failed: {e}")
                 if tool_results:
-                    full_text = "\n".join(tool_results[-5:])
+                    # Raw tool output can contain search-result dumps, source
+                    # URLs, or model-worker notes. Never publish that material
+                    # as the task's final answer when synthesis is unavailable.
+                    full_text = (
+                        "The task gathered source material but could not synthesize "
+                        "a reliable final result. No raw findings were published."
+                    )
 
         return full_text or "(no output)"
 
@@ -2134,6 +2140,45 @@ class TaskScheduler:
 
         started_ts = time.time()
         report = await researcher.research(task.prompt)
+        if getattr(researcher, "used_fallback_report", False):
+            findings_text = researcher._format_findings(
+                (getattr(researcher, "findings", []) or [])[-10:]
+            )
+            if findings_text.strip():
+                try:
+                    from src.prompt_security import untrusted_context_message
+                    from src.task_endpoint import task_llm_call_async
+
+                    report = await task_llm_call_async(
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "Complete the scheduled research task using only the "
+                                    "provided findings. Follow the task's requested structure, "
+                                    "length, and citation rules. Return only the final deliverable. "
+                                    "Never expose research-worker notes, planning text, echoed "
+                                    "instructions, or raw extraction output."
+                                ),
+                            },
+                            {"role": "user", "content": task.prompt},
+                            untrusted_context_message("research findings", findings_text),
+                        ],
+                        fallback_url=endpoint_url,
+                        fallback_model=model,
+                        fallback_headers=headers,
+                        owner=task.owner or None,
+                        timeout=90,
+                        max_tokens=max_tokens,
+                        wait_for_idle=not bool(getattr(task, "run_when_busy", False)),
+                    )
+                    report = strip_thinking(report or "").strip() or report
+                except Exception as exc:
+                    logger.warning(
+                        "Scheduled research fallback synthesis failed for task %s: %s",
+                        task.id,
+                        exc,
+                    )
         completed_ts = time.time()
         try:
             stats = researcher.get_stats() or {}
