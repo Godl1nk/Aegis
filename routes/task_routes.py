@@ -243,7 +243,11 @@ def _task_to_dict(t: ScheduledTask, include_last_run_result: bool = False) -> di
     if include_last_run_result and t.runs:
         last = t.runs[0]  # ordered desc by started_at
         d["last_run_status"] = last.status
-        d["last_run_result"] = (last.result or last.error or "")[:500]
+        if last.status in {"error", "failed", "aborted"}:
+            last_text = last.error or last.result or ""
+        else:
+            last_text = last.result or last.error or ""
+        d["last_run_result"] = last_text[:500]
     return d
 
 

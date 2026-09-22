@@ -885,7 +885,7 @@ function _renderList() {
       detail.appendChild(ex);
     }
     if (task.last_run_status) {
-      const isErr = task.last_run_status === 'error' || task.last_run_status === 'failed';
+      const isErr = task.last_run_status === 'error' || task.last_run_status === 'failed' || task.last_run_status === 'aborted';
       const color = isErr ? 'var(--red,#e06c75)' : 'var(--green,#50fa7b)';
       const result = (task.last_run_result || '').trim();
       const prev = result.length > 200 ? result.slice(0, 200) + '…' : result;
@@ -1768,7 +1768,10 @@ async function _showRunHistory(taskId, taskName) {
   } else {
     html += '<div class="task-runs-list">';
     for (const run of runs) {
-      const statusClass = run.status === 'success' ? 'task-run-success' : (run.status === 'error' || run.status === 'failed') ? 'task-run-error' : 'task-run-running';
+      const statusClass = run.status === 'success' ? 'task-run-success' : (run.status === 'error' || run.status === 'failed' || run.status === 'aborted') ? 'task-run-error' : 'task-run-running';
+      const resultText = ['error', 'failed', 'aborted'].includes(run.status)
+        ? (run.error || run.result || '—')
+        : (run.result || run.error || '—');
       html += `<div class="task-run-item ${statusClass}">
         <div class="task-run-item-header">
           ${_statusDot(run.status === 'success' ? 'active' : run.status)}
@@ -1776,7 +1779,7 @@ async function _showRunHistory(taskId, taskName) {
           ${run.model ? `<span class="task-run-model" style="font-size:10px;opacity:0.5;">${_esc(run.model.split('/').pop())}</span>` : ''}
           <span class="task-run-time" title="${run.started_at ? _esc(_relativeTime(run.started_at)) : ''}">${run.started_at ? _absoluteTime(run.started_at) : ''}</span>
         </div>
-        <div class="task-run-result">${_esc(run.result ? (run.result.length > 300 ? run.result.slice(0, 300) + '…' : run.result) : run.error || '—')}</div>
+        <div class="task-run-result">${_esc(resultText.length > 300 ? resultText.slice(0, 300) + '…' : resultText)}</div>
       </div>`;
     }
     html += '</div>';
@@ -2111,7 +2114,9 @@ async function _renderActivityView() {
       return;
     }
     _activityEntries = runs.map(r => {
-      let resultText = r.result || r.error || '';
+      let resultText = ['error', 'failed', 'aborted'].includes(r.status)
+        ? (r.error || r.result || '')
+        : (r.result || r.error || '');
       if (!resultText) {
         if (r.status === 'queued')  resultText = '_Queued — waiting for a free slot…_';
         if (r.status === 'running') resultText = '_Running…_';

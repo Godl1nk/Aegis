@@ -277,3 +277,28 @@ def test_task_form_exposes_and_submits_run_when_busy():
     assert 'id="task-form-run-busy"' in source
     assert "existing?.run_when_busy ? 'checked' : ''" in source
     assert "payload.run_when_busy = !!runBusyEl.checked" in source
+    assert "['error', 'failed', 'aborted'].includes(r.status)" in source
+
+
+def test_task_summary_prefers_abort_reason_over_stale_progress(task_db):
+    _seed_task(task_db, "aborted-task", run_when_busy=False)
+    db = task_db()
+    try:
+        db.add(TaskRun(
+            id="aborted-run",
+            task_id="aborted-task",
+            status="aborted",
+            started_at=_utcnow(),
+            finished_at=_utcnow(),
+            result="Starting…",
+            error="Stopped by user",
+        ))
+        db.commit()
+        task = db.query(ScheduledTask).filter(
+            ScheduledTask.id == "aborted-task"
+        ).first()
+        summary = task_routes._task_to_dict(task, include_last_run_result=True)
+        assert summary["last_run_status"] == "aborted"
+        assert summary["last_run_result"] == "Stopped by user"
+    finally:
+        db.close()
