@@ -445,6 +445,10 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         if is_admin_only_task_action(task_type, action) and not _is_admin(user):
             raise HTTPException(403, f"Action '{action}' requires admin privileges")
 
+    def _require_admin_for_output_target(user: str | None, output_target: str | None) -> None:
+        if (output_target or "").startswith("integration:") and not _is_admin(user):
+            raise HTTPException(403, "Integration task outputs require admin privileges")
+
     def _validate_then_task_id(db, then_task_id: Optional[str], user: Optional[str], current_task_id: Optional[str] = None) -> Optional[str]:
         target_id = (then_task_id or "").strip()
         if not target_id:
@@ -472,6 +476,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         # uses subprocess.run(shell=True) and ssh_command / run_script run
         # arbitrary commands.
         _require_admin_for_task_action(user, req.task_type, req.action)
+        _require_admin_for_output_target(user, req.output_target)
         if req.trigger_type == "schedule" and not req.schedule:
             raise HTTPException(400, "Schedule is required for schedule-triggered tasks")
         if req.trigger_type == "schedule" and req.schedule == "cron" and not req.cron_expression:
@@ -698,6 +703,8 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             next_task_type = req.task_type if req.task_type is not None else task.task_type
             next_action = req.action if req.action is not None else task.action
             _require_admin_for_task_action(user, next_task_type, next_action)
+            next_output_target = req.output_target if req.output_target is not None else task.output_target
+            _require_admin_for_output_target(user, next_output_target)
 
             if req.name is not None:
                 task.name = req.name
@@ -1007,12 +1014,29 @@ def setup_task_routes(task_scheduler) -> APIRouter:
     @router.get("/meta/output-targets")
     async def list_output_targets(request: Request):
         """List available output targets — only delivery/send tools, not all MCP tools."""
-        _owner(request)
+        user = _owner(request)
         targets = [
             {"value": "session", "label": "Session", "description": "Save result to a chat session"},
             {"value": "notification", "label": "Notification", "description": "Push a browser notification with the result (also saved to the session for history)"},
             {"value": "email", "label": "Email me", "description": "Send result through your configured SMTP account"},
         ]
+        if _is_admin(user):
+            try:
+                from src.integrations import load_integrations
+                for integration in load_integrations():
+                    if (
+                        integration.get("id")
+                        and integration.get("enabled", True)
+                        and integration.get("base_url")
+                        and (integration.get("preset") or "").strip().lower() == "discord_webhook"
+                    ):
+                        targets.append({
+                            "value": f"integration:{integration['id']}",
+                            "label": f"Discord → {integration.get('name') or 'Webhook'}",
+                            "description": "Send the completed task result to this Discord webhook",
+                        })
+            except Exception:
+                logger.exception("Failed to list integration task output targets")
         # Only include tools whose NAME clearly indicates an outbound delivery
         # action — match by verb in the tool name, not by any mention of "email"
         # in the description (which falsely picked up search_email, list_email,

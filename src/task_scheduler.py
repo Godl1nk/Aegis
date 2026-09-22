@@ -1722,6 +1722,10 @@ class TaskScheduler:
             await self._deliver_via_mcp(output, task, result)
             return
 
+        if output.startswith("integration:"):
+            await self._deliver_via_integration(output, task, result)
+            return
+
         if self._is_email_output_target(output):
             await self._deliver_via_email(output, task, result)
             return
@@ -1880,6 +1884,46 @@ class TaskScheduler:
         except Exception as e:
             logger.error("Task %s email delivery failed: %s", task.id, e, exc_info=True)
             raise
+
+    async def _deliver_via_integration(self, output: str, task, result: str):
+        """Deliver a task result through an approved outbound integration."""
+        from src.integrations import execute_api_call, get_integration
+        from src.task_action_policy import owner_has_admin_task_privileges
+
+        if not owner_has_admin_task_privileges(getattr(task, "owner", None)):
+            raise PermissionError("Integration task outputs require admin privileges")
+
+        integration_id = output.split(":", 1)[1].strip()
+        if not integration_id:
+            raise RuntimeError("Integration output target is missing an integration id")
+
+        integration = get_integration(integration_id)
+        if not integration or not integration.get("enabled", True):
+            raise RuntimeError("Task output integration is missing or disabled")
+
+        preset = (integration.get("preset") or "").strip().lower()
+        if preset != "discord_webhook":
+            raise RuntimeError(f"Unsupported task output integration: {preset or 'unknown'}")
+
+        title = str(getattr(task, "name", "") or "Aegis task")[:256]
+        description = str(result or "(no output)").strip() or "(no output)"
+        if len(description) > 4096:
+            description = description[:4080].rstrip() + "\n…"
+        response = await execute_api_call(
+            integration_id,
+            "POST",
+            "/",
+            body={
+                "embeds": [{
+                    "title": title,
+                    "description": description,
+                    "color": 5793266,
+                }],
+            },
+        )
+        if response.get("exit_code") != 0:
+            raise RuntimeError(response.get("error") or "Discord webhook delivery failed")
+        logger.info("Task %s delivered result to Discord integration %s", task.id, integration_id)
 
     async def _run_agent_loop(self, endpoint_url: str, model: str, task, session_id: str,
                               system_prompt: str | None = None,
