@@ -1973,8 +1973,9 @@ class TaskScheduler:
         # behind the primary endpoint so a downed primary won't silently yield
         # `(no output)`.
         try:
-            from src.interactive_gate import wait_for_interactive_quiet
-            await wait_for_interactive_quiet(f"agent task {task.name}")
+            # Foreground gating belongs to _execute_task_locked. Repeating it
+            # here left run_when_busy and forced manual runs stuck at
+            # "Starting…" after they had already entered the running state.
             from src.task_endpoint import resolve_task_candidates
             _task_fallbacks = resolve_task_candidates(
                 fallback_url=endpoint_url,

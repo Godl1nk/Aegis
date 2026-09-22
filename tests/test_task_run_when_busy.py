@@ -179,7 +179,6 @@ async def test_busy_task_skips_idle_gate_and_completes(monkeypatch, task_db):
         db.commit()
     finally:
         db.close()
-
     async def fail_if_waited(*_args, **_kwargs):
         raise AssertionError("run_when_busy task waited for foreground idle")
 
@@ -213,6 +212,37 @@ async def test_busy_task_skips_idle_gate_and_completes(monkeypatch, task_db):
         assert run.result == "done"
     finally:
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_busy_llm_agent_loop_does_not_reenter_idle_gate(monkeypatch):
+    async def fail_if_waited(*_args, **_kwargs):
+        raise AssertionError("agent loop re-entered the foreground idle gate")
+
+    async def stream_result(**_kwargs):
+        yield 'data: {"delta":"done"}'
+
+    monkeypatch.setattr(interactive_gate, "wait_for_interactive_quiet", fail_if_waited)
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream_result)
+    monkeypatch.setattr("src.task_endpoint.resolve_task_candidates", lambda **_kwargs: [])
+
+    scheduler = TaskScheduler(session_manager=None)
+    task = SimpleNamespace(
+        name="Always-on LLM",
+        prompt="Summarize markets",
+        owner="alice",
+        max_steps=1,
+        run_when_busy=True,
+    )
+
+    result = await scheduler._run_agent_loop(
+        "http://model.example/v1/chat/completions",
+        "model",
+        task,
+        "session-1",
+    )
+
+    assert result == "done"
 
 
 @pytest.mark.asyncio
