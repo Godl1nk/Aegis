@@ -1687,6 +1687,7 @@ class TaskScheduler:
                 fallback_model=model,
                 owner=task.owner,
                 timeout=120,
+                wait_for_idle=not bool(getattr(task, "run_when_busy", False)),
             )
 
         # Strip the model's chain-of-thought before saving/delivering. Task
@@ -2037,6 +2038,7 @@ class TaskScheduler:
                     fallback_headers=headers,
                     owner=task.owner or None,
                     timeout=30,
+                    wait_for_idle=not bool(getattr(task, "run_when_busy", False)),
                 )
                 full_text = (full_text or "").strip()
             except Exception as e:

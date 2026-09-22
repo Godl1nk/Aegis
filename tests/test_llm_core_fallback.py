@@ -55,6 +55,23 @@ def test_no_fallback_event_when_primary_succeeds(monkeypatch):
     assert not any('"fallback"' in c for c in chunks)
 
 
+def test_fallback_after_heartbeat_and_reasoning_without_answer(monkeypatch):
+    def per_model(model):
+        if model == "primary":
+            return [
+                'data: {"type": "heartbeat"}\n\n',
+                'data: {"delta": "checking", "thinking": true}\n\n',
+                'event: error\ndata: {"status": 502, "error": "Network error"}\n\n',
+            ]
+        return ['data: {"delta": "recovered"}\n\n', "data: [DONE]\n\n"]
+
+    chunks = _run_fallback(monkeypatch, per_model)
+
+    assert any('"fallback"' in chunk for chunk in chunks)
+    assert any('"delta": "recovered"' in chunk for chunk in chunks)
+    assert not any(chunk.startswith("event: error") for chunk in chunks)
+
+
 def test_dedupe_candidates_keeps_first_of_each_route():
     """(url, model) is the route key; later repeats are dropped, order preserved,
     the first tuple (with its headers) kept, malformed entries filtered."""

@@ -65,6 +65,7 @@ async def task_llm_call_async(
     **kwargs,
 ):
     """Call the shared background-task LLM candidate chain."""
+    wait_for_idle = bool(kwargs.pop("wait_for_idle", True))
     candidates = resolve_task_candidates(
         fallback_url=fallback_url,
         fallback_model=fallback_model,
@@ -73,6 +74,7 @@ async def task_llm_call_async(
     )
     if not candidates:
         raise RuntimeError("No LLM endpoint available for background task")
-    await wait_for_interactive_quiet("background task LLM")
+    if wait_for_idle:
+        await wait_for_interactive_quiet("background task LLM")
     kwargs.setdefault("workload", "background")
     return await llm_call_async_with_fallback(candidates, messages=messages, **kwargs)

@@ -3229,7 +3229,10 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
 
     `candidates` is a list of (url, model, headers). Each is tried in order,
     but only retried on a *pre-content* failure — i.e. an ``event: error``
-    that arrives before any assistant text / tool-call data has been yielded.
+    that arrives before any user-visible assistant text or tool call has been
+    yielded. Heartbeats, usage events, and hidden reasoning do not commit a
+    candidate; treating those as output stranded background tasks on a model
+    that later returned a 502 without an answer.
     Once a candidate has emitted real output we never switch (that would
     duplicate streamed tokens); a later error from that candidate passes
     through unchanged. The dead-host cooldown in stream_llm makes repeat
@@ -3262,7 +3265,9 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
                     break
                 yield chunk
                 continue
-            # Any data chunk other than the terminal [DONE] means real output.
+            # Only content that would make switching unsafe commits this
+            # candidate. Providers can emit heartbeat/usage/reasoning chunks
+            # for minutes before a transport failure; none is a final answer.
             if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                 try:
                     event_data = json.loads(chunk[6:])
@@ -3271,20 +3276,33 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
                 if event_data.get("type") == "model_actual":
                     yield chunk
                     continue
+                event_type = event_data.get("type")
+                commits_output = (
+                    (
+                        "delta" in event_data
+                        and bool(str(event_data.get("delta") or ""))
+                        and not bool(event_data.get("thinking"))
+                    )
+                    or (event_type == "tool_calls" and bool(event_data.get("calls")))
+                    or (
+                        event_type == "tool_call_delta"
+                        and bool(event_data.get("arg_delta"))
+                    )
+                )
                 # First real output from a NON-primary candidate: tell the client
                 # the selected model failed and another answered. Without this the
                 # fallback is invisible — a misconfigured provider looks like it
                 # works because the reply is shown under the originally selected
                 # model's name (e.g. a Bedrock/Claude endpoint that 400s every
                 # request but appears fine because another model silently answered).
-                if not emitted and i > 0:
+                if commits_output and not emitted and i > 0:
                     yield ('data: ' + json.dumps({
                         "type": "fallback",
                         "selected_model": primary_model,
                         "answered_by": model,
                         "reason": _summarize_stream_error(last_error),
                     }) + '\n\n')
-                emitted = True
+                emitted = emitted or commits_output
             yield chunk
         if not retried:
             return  # candidate finished (success, or terminal error already sent)
