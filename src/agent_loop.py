@@ -4952,6 +4952,11 @@ async def stream_agent_loop(
             if (
                 not guide_only
                 and not _force_answer
+                # Scheduled tasks already perform a compact recovery call over
+                # their captured tool findings. Retrying the full, tool-heavy
+                # conversation here can add another long reasoning round before
+                # that recovery path gets a chance to produce the deliverable.
+                and workload != "background"
                 and _empty_answer_nudges < 1
                 and not _strip_think_blocks(full_response).strip()
             ):

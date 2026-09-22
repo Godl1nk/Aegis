@@ -68,3 +68,28 @@ def test_no_rounds_exhausted_on_normal_finish(monkeypatch):
     # A plain answer (no tool block) -> done-break on round 1 -> no event.
     events = _run_loop(monkeypatch, "All done, here is your answer.", max_rounds=2)
     assert not any(e.get("type") == "rounds_exhausted" for e in events), events
+
+
+def test_background_reasoning_only_turn_skips_full_context_retry(monkeypatch):
+    _patch_common(monkeypatch)
+    calls = 0
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        yield 'data: {"delta":"internal reasoning","thinking":true}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1",
+        "m",
+        [{"role": "user", "content": "summarize the gathered market news"}],
+        max_rounds=3,
+        relevant_tools={"web_search"},
+        workload="background",
+    )))
+
+    assert calls == 1
+    assert not any(e.get("type") == "agent_step" for e in events), events
