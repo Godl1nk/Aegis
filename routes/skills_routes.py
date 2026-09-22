@@ -942,7 +942,10 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
     return {"skill": name, "result": "flagged", "verdict": verdict, "confidence": 0.35}
 
 
-async def _run_audit_all_job(key, skills_manager, names, url, model, headers, teacher, owner):
+async def _run_audit_all_job(
+    key, skills_manager, names, url, model, headers, teacher, owner,
+    progress_cb=None,
+):
     """Background: audit each named skill in sequence, recording progress."""
     import asyncio as _asyncio
     import time as _time
@@ -956,6 +959,14 @@ async def _run_audit_all_job(key, skills_manager, names, url, model, headers, te
         if len(job["log"]) > 1000:
             del job["log"][0:len(job["log"]) - 1000]
 
+    def report_progress(message):
+        if not progress_cb:
+            return
+        try:
+            progress_cb(message)
+        except Exception:
+            logger.debug("Skill audit progress update failed", exc_info=True)
+
     cancelled = False
     try:
         for nm in names:
@@ -964,6 +975,9 @@ async def _run_audit_all_job(key, skills_manager, names, url, model, headers, te
                 log("(cancelled)")
                 break
             job["current"] = nm
+            report_progress(
+                f"Auditing skill {job.get('done', 0) + 1}/{len(names)}: {nm}"
+            )
             skills = skills_manager.load(owner=owner)
             sk = next((s for s in skills if s.get("name") == nm), None)
             if not sk:
@@ -996,8 +1010,10 @@ async def _run_audit_all_job(key, skills_manager, names, url, model, headers, te
                 pass
             job["results"].append(res)
             job["done"] = len(job["results"])
+            report_progress(f"Audited {job['done']}/{len(names)} skill(s)")
     except _asyncio.CancelledError:
         cancelled = True
+        raise
     finally:
         job["current"] = None
         job["status"] = "cancelled" if cancelled or job.get("cancel") else "done"

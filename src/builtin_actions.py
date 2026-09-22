@@ -1514,7 +1514,11 @@ async def action_audit_skills(owner: str, **kwargs) -> Tuple[str, bool]:
         if not names:
             raise TaskNoop("no unaudited skills")
 
-        url, model, headers, teacher = _resolve_audit_models()
+        progress_cb = kwargs.get("progress_cb")
+        if progress_cb:
+            progress_cb(f"Preparing skill audit for {len(names)} skill(s)…")
+
+        url, model, headers, teacher = _resolve_audit_models(owner=owner)
         try:
             from src.llm_core import seconds_since_model_activity
             recent = seconds_since_model_activity(url, model)
@@ -1537,7 +1541,10 @@ async def action_audit_skills(owner: str, **kwargs) -> Tuple[str, bool]:
             ],
             "started": _time.time(), "cancel": False,
         }
-        await _run_audit_all_job(key, sm, names, url, model, headers, teacher, owner)
+        await _run_audit_all_job(
+            key, sm, names, url, model, headers, teacher, owner,
+            progress_cb=progress_cb,
+        )
         job = _skill_audit_jobs.get(key, {})
         counts = {}
         for r in job.get("results", []):

@@ -403,7 +403,7 @@ function _absoluteTime(iso) {
 }
 
 function _statusDot(status) {
-  const colors = { active: '#4caf50', paused: '#ff9800', completed: '#888', error: '#f44336', failed: '#f44336' };
+  const colors = { active: '#4caf50', running: '#2196f3', queued: '#ff9800', paused: '#ff9800', completed: '#888', skipped: '#888', aborted: '#f44336', error: '#f44336', failed: '#f44336' };
   const c = colors[status] || '#888';
   return `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${c};box-shadow:0 0 6px ${c}, 0 0 3px ${c};flex-shrink:0;position:relative;top:4px;"></span>`;
 }

@@ -20,6 +20,7 @@ clear_fake_database_modules()
 import core.database as cdb
 import routes.task_routes as task_routes
 import src.interactive_gate as interactive_gate
+import routes.skills_routes as skills_routes
 from core.database import ScheduledTask, TaskRun
 from src.task_scheduler import TaskScheduler
 from src.tools.system import do_manage_tasks
@@ -278,6 +279,7 @@ def test_task_form_exposes_and_submits_run_when_busy():
     assert "existing?.run_when_busy ? 'checked' : ''" in source
     assert "payload.run_when_busy = !!runBusyEl.checked" in source
     assert "['error', 'failed', 'aborted'].includes(r.status)" in source
+    assert "running: '#2196f3'" in source
 
 
 def test_task_summary_prefers_abort_reason_over_stale_progress(task_db):
@@ -302,3 +304,63 @@ def test_task_summary_prefers_abort_reason_over_stale_progress(task_db):
         assert summary["last_run_result"] == "Stopped by user"
     finally:
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_action_run_replaces_starting_with_action_progress(monkeypatch):
+    import src.builtin_actions as builtin_actions
+
+    async def action_probe(**_kwargs):
+        return "done", True
+
+    monkeypatch.setitem(builtin_actions.BUILTIN_ACTIONS, "probe", action_probe)
+    scheduler = TaskScheduler.__new__(TaskScheduler)
+    progress = []
+    scheduler._set_run_progress = lambda run_id, message: progress.append((run_id, message))
+
+    result = await scheduler._execute_action(
+        SimpleNamespace(action="probe", owner="alice", name="Probe", prompt=None),
+        run_id="run-1",
+    )
+
+    assert result == ("done", True)
+    assert progress == [("run-1", "Running Probe…")]
+
+
+@pytest.mark.asyncio
+async def test_skill_audit_reports_progress_and_propagates_cancellation(monkeypatch):
+    key = ("alice",)
+    skills_routes._skill_audit_jobs[key] = {
+        "status": "running",
+        "total": 1,
+        "done": 0,
+        "current": None,
+        "results": [],
+        "log": [],
+        "cancel": False,
+    }
+
+    class Skills:
+        def load(self, owner=None):
+            return [{"name": "probe-skill"}]
+
+    async def cancelled(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(skills_routes, "_audit_one_skill", cancelled)
+    progress = []
+    with pytest.raises(asyncio.CancelledError):
+        await skills_routes._run_audit_all_job(
+            key,
+            Skills(),
+            ["probe-skill"],
+            "http://model",
+            "model",
+            {},
+            None,
+            "alice",
+            progress_cb=progress.append,
+        )
+
+    assert progress == ["Auditing skill 1/1: probe-skill"]
+    assert skills_routes._skill_audit_jobs[key]["status"] == "cancelled"
