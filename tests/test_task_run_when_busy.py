@@ -246,6 +246,47 @@ async def test_busy_llm_agent_loop_does_not_reenter_idle_gate(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_grace_completion_preserves_requested_deliverable(monkeypatch):
+    async def stream_tool_result(**_kwargs):
+        yield 'data: {"type":"tool_output","tool":"web_search","stdout":"Markets rose after the rate decision."}'
+
+    captured = {}
+
+    async def complete_task(messages, **_kwargs):
+        captured["messages"] = messages
+        return "Markets rose after the rate decision."
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream_tool_result)
+    monkeypatch.setattr("src.task_endpoint.resolve_task_candidates", lambda **_kwargs: [])
+    monkeypatch.setattr("src.task_endpoint.task_llm_call_async", complete_task)
+
+    scheduler = TaskScheduler(session_manager=None)
+    prompt = "Write a concise market brief. Do not include links or a Sources section."
+    task = SimpleNamespace(
+        name="Market brief",
+        prompt=prompt,
+        owner="alice",
+        max_steps=1,
+        run_when_busy=True,
+    )
+
+    result = await scheduler._run_agent_loop(
+        "http://model.example/v1/chat/completions",
+        "model",
+        task,
+        "session-1",
+    )
+
+    assert result == "Markets rose after the rate decision."
+    grace_prompt = captured["messages"][-1]["content"]
+    assert prompt in grace_prompt
+    assert "Return only the requested deliverable" in grace_prompt
+    assert "Do not describe your process" in grace_prompt
+    assert "Summarize what you accomplished" not in grace_prompt
+    assert "Markets rose after the rate decision." in grace_prompt
+
+
+@pytest.mark.asyncio
 async def test_foreground_stop_leaves_busy_tasks_running(monkeypatch, task_db):
     _seed_task(task_db, "busy-ok", run_when_busy=True)
     _seed_task(task_db, "idle-only", run_when_busy=False)
