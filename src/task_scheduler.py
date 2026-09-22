@@ -2049,7 +2049,12 @@ class TaskScheduler:
                     fallback_model=model,
                     fallback_headers=headers,
                     owner=task.owner or None,
-                    timeout=30,
+                    # Reasoning models can spend well over 30 seconds before
+                    # emitting the concise final answer.  The old deadline
+                    # routinely timed out this recovery call after the search
+                    # work had already succeeded, leaving only the safe error
+                    # notice for scheduled briefings.
+                    timeout=180,
                     wait_for_idle=not bool(getattr(task, "run_when_busy", False)),
                 )
                 full_text = (full_text or "").strip()

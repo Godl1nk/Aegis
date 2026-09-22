@@ -252,8 +252,9 @@ async def test_agent_loop_grace_completion_preserves_requested_deliverable(monke
 
     captured = {}
 
-    async def complete_task(messages, **_kwargs):
+    async def complete_task(messages, **kwargs):
         captured["messages"] = messages
+        captured["kwargs"] = kwargs
         return "Markets rose after the rate decision."
 
     monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream_tool_result)
@@ -284,6 +285,7 @@ async def test_agent_loop_grace_completion_preserves_requested_deliverable(monke
     assert "Do not describe your process" in grace_prompt
     assert "Summarize what you accomplished" not in grace_prompt
     assert "Markets rose after the rate decision." in grace_prompt
+    assert captured["kwargs"]["timeout"] >= 180
 
 
 @pytest.mark.asyncio
