@@ -1700,6 +1700,9 @@ class TaskScheduler:
         except Exception:
             pass
 
+        if not (result or "").strip():
+            raise RuntimeError("Model returned an empty response")
+
         return result
 
     async def _deliver_task_result(self, task, result: str, db, model: str = None):
@@ -1966,6 +1969,7 @@ class TaskScheduler:
             pass
         full_text = ""
         tool_results = []
+        stream_error = None
 
         # Honor per-task max_steps (defense against runaway agent loops).
         # Falls back to 20 if not set — the historical default.
@@ -1978,12 +1982,18 @@ class TaskScheduler:
             # here left run_when_busy and forced manual runs stuck at
             # "Starting…" after they had already entered the running state.
             from src.task_endpoint import resolve_task_candidates
-            _task_fallbacks = resolve_task_candidates(
+            _task_candidates = resolve_task_candidates(
                 fallback_url=endpoint_url,
                 fallback_model=model,
                 fallback_headers=headers,
                 owner=task.owner or None,
-            )[1:]
+            )
+            # The configured Background Tasks endpoint may differ from the
+            # session-derived primary. Keep it in the fallback chain.
+            _task_fallbacks = [
+                candidate for candidate in _task_candidates
+                if candidate[:2] != (endpoint_url, model)
+            ]
         except Exception:
             _task_fallbacks = []
         async for event_str in stream_agent_loop(
@@ -1999,6 +2009,19 @@ class TaskScheduler:
             fallbacks=_task_fallbacks,
             workload="background",
         ):
+            if event_str.startswith("event: error"):
+                try:
+                    error_data = json.loads(event_str.split("data: ", 1)[1])
+                    status = error_data.get("status")
+                    if status == 401:
+                        stream_error = "Model endpoint authentication failed (HTTP 401); check its API key"
+                    elif isinstance(status, int) and 100 <= status <= 599:
+                        stream_error = f"Model endpoint request failed (HTTP {status})"
+                    else:
+                        stream_error = "Model endpoint request failed"
+                except (IndexError, ValueError, AttributeError):
+                    stream_error = "Model endpoint request failed"
+                continue
             if event_str.startswith("data: ") and not event_str.startswith("data: [DONE]"):
                 try:
                     data = json.loads(event_str[6:])
@@ -2020,6 +2043,14 @@ class TaskScheduler:
                             tool_results.append(f"[{data.get('tool', '?')}] {tool_summary[:12000]}")
                 except (json.JSONDecodeError, KeyError):
                     pass
+
+        # stream_agent_loop emits a friendly empty-response delta after a
+        # terminal provider error. It is a chat notice, not a successful task
+        # result, and must never be delivered to Discord as a briefing.
+        if stream_error:
+            raise RuntimeError(stream_error)
+        if full_text.strip() == "The model returned an empty response. Please try again or switch to a different model.":
+            full_text = ""
 
         # Grace completion — if the model exhausted rounds on tool calls
         # without producing a final text response, do one last LLM call that
@@ -2075,7 +2106,9 @@ class TaskScheduler:
                         "a reliable final result. No raw findings were published."
                     )
 
-        return full_text or "(no output)"
+        if not full_text.strip():
+            raise RuntimeError("Model returned an empty response")
+        return full_text
 
     async def _execute_research_task(self, task, db) -> str:
         """Execute a deep research task using DeepResearcher."""

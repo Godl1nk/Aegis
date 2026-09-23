@@ -296,6 +296,45 @@ async def test_agent_loop_grace_completion_preserves_requested_deliverable(monke
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_rejects_provider_error_instead_of_delivering_empty_notice(monkeypatch):
+    async def failed_stream(**_kwargs):
+        yield 'event: error\ndata: {"status":401,"text":"invalid API key"}\n\n'
+        yield 'data: {"delta":"The model returned an empty response. Please try again or switch to a different model."}\n\n'
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", failed_stream)
+    monkeypatch.setattr("src.task_endpoint.resolve_task_candidates", lambda **_kwargs: [])
+
+    scheduler = TaskScheduler(session_manager=None)
+    task = SimpleNamespace(prompt="Write a market brief", owner="alice", max_steps=1, run_when_busy=True)
+    with pytest.raises(RuntimeError, match="authentication failed \\(HTTP 401\\)"):
+        await scheduler._run_agent_loop("http://model.example/v1/chat/completions", "model", task, "session-1")
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_keeps_configured_task_endpoint_as_fallback(monkeypatch):
+    captured = {}
+
+    async def stream_result(**kwargs):
+        captured["fallbacks"] = kwargs["fallbacks"]
+        yield 'data: {"delta":"finished briefing"}\n\n'
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", stream_result)
+    monkeypatch.setattr("src.task_endpoint.resolve_task_candidates", lambda **_kwargs: [
+        ("http://configured.example/v1/chat/completions", "configured", {"Authorization": "configured-key"}),
+        ("http://model.example/v1/chat/completions", "model", {}),
+    ])
+
+    scheduler = TaskScheduler(session_manager=None)
+    task = SimpleNamespace(prompt="Write a market brief", owner="alice", max_steps=1, run_when_busy=True)
+    result = await scheduler._run_agent_loop("http://model.example/v1/chat/completions", "model", task, "session-1")
+
+    assert result == "finished briefing"
+    assert captured["fallbacks"] == [
+        ("http://configured.example/v1/chat/completions", "configured", {"Authorization": "configured-key"}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_grace_completion_keeps_substantive_tool_evidence(monkeypatch):
     evidence = "FIRST HEADLINE\n" + ("market evidence " * 80) + "FINAL STOCK CATALYST"
 
