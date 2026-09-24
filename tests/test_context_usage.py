@@ -85,6 +85,23 @@ def test_reload_uses_latest_request_not_cumulative_billing(monkeypatch):
     assert context_usage.session_context_usage(s)["basis"] == "history"
 
 
+def test_fallback_request_is_shown_separately_from_selected_model_window(monkeypatch):
+    monkeypatch.setattr(context_usage, "get_context_length_known", lambda *a: (131072, True))
+    s = session([ChatMessage("user", "hello"), ChatMessage("assistant", "Hi!", {
+        "requested_model": "qwen", "model": "qwen-fallback",
+        "context_tokens": 5045, "context_output_tokens": 12,
+        "context_percent": 3.8, "context_length": 131072,
+    })])
+    result = context_usage.session_context_usage(s)
+    assert result["basis"] == "history"
+    assert result["used_tokens"] == estimate_tokens(s.get_context_messages())
+    assert result["last_request"] == {
+        "input_tokens": 5045, "model": "qwen-fallback", "context_percent": 3.8,
+    }
+    s.model = "another-model"
+    assert "last_request" not in context_usage.session_context_usage(s)
+
+
 def test_compaction_snapshot_uses_reduced_history(monkeypatch):
     monkeypatch.setattr(context_usage, "get_context_length_known", lambda *a: (32768, True))
     s = session([ChatMessage("system", "summary", {"compacted": True}), ChatMessage("user", "continue")])

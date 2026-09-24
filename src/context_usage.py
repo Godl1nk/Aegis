@@ -35,4 +35,15 @@ def session_context_usage(session):
         result.update(used_tokens=context_tokens + output_tokens,
                       usage_source=metadata.get("context_usage_source", metadata.get("usage_source", "real")), basis="request",
                       trimmed=bool(metadata.get("context_trimmed")))
+    elif (latest.get("role") == "assistant" and metadata.get("requested_model") == session.model
+          and metadata.get("model") != session.model
+          and isinstance(context_tokens, (int, float)) and context_tokens > 0):
+        # A fallback's request count cannot be divided by the selected model's
+        # window. Keep the composer on saved history, but expose the last
+        # reply's input count so the two meters can be explained together.
+        result["last_request"] = {
+            "input_tokens": context_tokens,
+            "model": metadata.get("model"),
+            "context_percent": metadata.get("context_percent"),
+        }
     return result

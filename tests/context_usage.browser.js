@@ -66,11 +66,20 @@ async function checks() {
   document.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape'}));
   assert(!document.getElementById('composer-context-details'), 'Escape failed');
   button.blur();
+  select('fallback');
+  await waitFor(() => button.textContent.includes('<1%'));
+  assert(button.getAttribute('aria-label').includes('Saved chat: ~102 tokens'), 'Fallback history label missing');
+  button.dispatchEvent(new MouseEvent('mouseenter'));
+  await waitFor(() => document.getElementById('composer-context-details'));
+  const details = document.getElementById('composer-context-details').textContent;
+  assert(details.includes('Last reply used 5,045 input tokens (4% shown)'), 'Fallback reply usage not explained');
+  assert(!details.includes('tokens remaining'), 'History must not claim exact remaining capacity');
+  document.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape'}));
   setContextSession({sessionId: null, model: 'Qwen-QA', endpointUrl: 'http://offline'});
   assert(button.textContent.trim() === '—', 'New chat retained old percentage');
   select('known');
   await waitFor(() => button.textContent.includes('20%'));
-  status.textContent = 'PASS: hover, mouse-out, no-click, keyboard focus, Escape, draft, warnings, isolation, races, unknown limit, compaction, new chat';
+  status.textContent = 'PASS: hover, mouse-out, no-click, keyboard focus, Escape, draft, warnings, isolation, races, unknown limit, compaction, fallback explanation, new chat';
 }
 for (const [label, action] of [
   ['Run checks', checks], ['Known model', () => select('known')], ['Unknown limit', () => select('unknown')],

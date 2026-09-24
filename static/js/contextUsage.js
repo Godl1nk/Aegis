@@ -14,6 +14,7 @@ let keyboardNavigation = false;
 
 const number = value => Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : 0;
 const fmt = value => Math.round(value).toLocaleString();
+export const contextPercentLabel = percent => percent > 0 && percent < 1 ? '<1%' : `${Math.round(percent)}%`;
 
 export function contextView(data, draft = '') {
   const draftTokens = draft ? Math.floor(draft.length * 0.3) + 4 : 0;
@@ -82,10 +83,11 @@ function render() {
   const available = snapshot != null;
   button.dataset.level = view.level;
   button.style.setProperty('--context-fill', Math.min(view.percent || 0, 100));
-  button.querySelector('.context-percent').textContent = view.percent == null ? '—' : `${Math.round(view.percent)}%`;
+  button.querySelector('.context-percent').textContent = view.percent == null ? '—' : contextPercentLabel(view.percent);
+  const scope = snapshot?.basis === 'request' ? 'Last request' : 'Saved chat';
   const label = !selection?.sessionId ? 'Context usage available after starting a chat'
     : !available ? 'Context usage unavailable'
-    : `${view.estimated ? 'Estimated ' : ''}context: ${fmt(view.used)} tokens${view.limit ? ` / ${fmt(view.limit)} (${Math.round(view.percent)}% used)` : ' — model limit unknown'}`;
+    : `${scope}: ${view.estimated ? '~' : ''}${fmt(view.used)} tokens${view.limit ? ` / ${fmt(view.limit)} (${contextPercentLabel(view.percent)} used)` : ' — model limit unknown'}`;
   button.setAttribute('aria-label', label);
   if (!popup) return;
   popup.replaceChildren();
@@ -98,10 +100,16 @@ function render() {
   add('Context usage', 'context-heading');
   add(label);
   if (available) {
-    if (view.limit) add(`${fmt(Math.max(0, view.limit - view.used))} tokens remaining${view.percent >= 85 ? ' · Near the limit' : ''}`);
+    if (view.percent >= 85) add('Near the listed model window', 'context-status');
+    if (snapshot.basis !== 'request' && snapshot.last_request) {
+      const prior = snapshot.last_request;
+      const model = String(prior.model || '').split('/').pop();
+      const percent = Number(prior.context_percent);
+      add(`Last reply used ${fmt(number(prior.input_tokens))} input tokens${percent > 0 && Number.isFinite(percent) ? ` (${contextPercentLabel(percent)} shown)` : ''}${model ? ` with ${model}` : ''}.`, 'context-note');
+    }
     add(snapshot.basis === 'request'
-      ? 'Last prepared request, including its reported output when available. The next request may differ.'
-      : 'Saved history estimate. Skills, tool schemas, retrieved content and pending attachments are added when the request is prepared.', 'context-note');
+      ? 'Last prepared request, including its response output when available. The next request may differ.'
+      : 'Saved chat only. The reply footer measures its prepared request; instructions, tools, retrieved content and attachments can make it much larger.', 'context-note');
     const _autoParts = [
       snapshot.compact_threshold ? `at about ${Math.round(number(snapshot.compact_threshold) * 100)}% usage` : null,
       number(snapshot.compact_token_cap) ? `past ${fmt(number(snapshot.compact_token_cap))} tokens` : null,
@@ -110,7 +118,8 @@ function render() {
       ? `Auto-compaction: older messages are summarized before a request ${_autoParts.join(' or ')}, when enough history exists. Recent messages are kept.`
       : 'Automatic compaction is off — trimming still guards against overloads. Recent messages are kept.', 'context-note');
     if (view.draftTokens) add(`Draft: ~${fmt(view.draftTokens)} additional tokens.`, 'context-note');
-    if (view.estimated) add('Approximate token count; provider-reported usage replaces estimates when available.', 'context-note');
+    if (view.estimated) add('Approximate token count; a prepared request may report usage for its own model.', 'context-note');
+    if (view.limit) add('The model window may come from a catalog when the server does not report its active limit.', 'context-note');
     add('Output needs room too. Agent input budgets or fallback trimming may reduce context earlier. Compaction is lossy, not unlimited memory.', 'context-note');
     if (!view.limit) add('The model limit could not be verified; no percentage is assumed.', 'context-note');
     if (snapshot.compacted) add('Earlier messages have been compacted.', 'context-status');
@@ -183,7 +192,7 @@ function init() {
   });
   window.addEventListener('resize', closeDetails);
   window.addEventListener('odysseus:chat-busy-change', e => {
-    if (!e.detail?.active && snapshot?.basis !== 'request') void refresh();
+    if (!e.detail?.active && (snapshot?.basis !== 'request' || snapshot?.model !== selection?.model)) void refresh();
   });
 }
 

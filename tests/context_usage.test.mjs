@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { contextView, mergeDiscoverySnapshot, sanitizeUsageData } from '../static/js/contextUsage.js';
+import { contextPercentLabel, contextView, mergeDiscoverySnapshot, sanitizeUsageData } from '../static/js/contextUsage.js';
+
+test('small nonzero usage is not displayed as zero', () => {
+  assert.equal(contextPercentLabel(102 / 131072 * 100), '<1%');
+  assert.equal(contextPercentLabel(0), '0%');
+  assert.equal(contextPercentLabel(3.8), '4%');
+});
 
 test('context percentage and thresholds', () => {
   for (const [used, expected] of [[0, 'normal'], [699, 'normal'], [700, 'warning'], [850, 'danger'], [1200, 'danger']]) {
