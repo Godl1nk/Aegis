@@ -4,6 +4,7 @@ from pathlib import Path
 
 
 CHAT_JS = (Path(__file__).resolve().parent.parent / "static/js/chat.js").read_text(encoding="utf-8")
+CHAT_ROUTES = (Path(__file__).resolve().parent.parent / "routes/chat_routes.py").read_text(encoding="utf-8")
 
 
 def _function_source(name: str) -> str:
@@ -16,6 +17,14 @@ def test_resumed_stream_renders_approval_request():
     body = _function_source("export async function resumeStream")
     assert "json.type === 'approval_request'" in body
     assert "_renderApprovalCard(json" in body
+
+
+def test_agent_route_forwards_approval_and_tool_progress_events():
+    # The agent can emit these events, but the chat route must pass them to
+    # the browser before an approval can be shown or progress can update.
+    agent_events = CHAT_ROUTES.split('elif data.get("type") in (', 1)[-1].split('):', 1)[0]
+    assert '"approval_request"' in agent_events
+    assert '"tool_progress"' in agent_events
 
 
 def test_background_stream_preserves_and_renders_approval_request():

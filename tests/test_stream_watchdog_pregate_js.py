@@ -46,6 +46,16 @@ def test_image_attachments_get_vision_aware_wait_spinner():
     assert "Large local model is pre-filling context" in CHAT_JS
 
 
+def test_vision_wait_uses_long_timeout_and_timeout_error_remains_renderable():
+    timeout = CHAT_JS[CHAT_JS.index("const timeoutMs ="):CHAT_JS.index("timeoutId = setTimeout", CHAT_JS.index("const timeoutMs ="))]
+    assert "_hasImageAttach" in timeout
+    assert "RESEARCH_TIMEOUT_MS" in timeout
+    # The timeout's catch branch must read a binding outside the try block;
+    # otherwise a vision timeout turns into a blank reply and ReferenceError.
+    outer = CHAT_JS[CHAT_JS.index("let timedOut = false;"):CHAT_JS.index("    try {\n      // Re-enable auto-scroll")]
+    assert "let _isAgent = false;" in outer
+
+
 def test_vision_describe_skips_thinking():
     """Thinking-enabled Qwen burned 1000+ <think> tokens before the image
     description — a minute of invisible pre-stream latency per image. The

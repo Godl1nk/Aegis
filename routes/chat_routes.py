@@ -1591,7 +1591,7 @@ def setup_chat_routes(
                                     web_sources = data.get("data", [])
                                     yield chunk
                                 elif data.get("type") in (
-                                    "tool_start", "tool_output", "agent_step",
+                                    "tool_start", "tool_progress", "tool_output", "approval_request", "agent_step",
                                     "doc_stream_phase", "doc_stream_cancel",
                                     "doc_stream_open", "doc_stream_delta",
                                     "doc_update", "doc_suggestions", "ui_control",

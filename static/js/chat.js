@@ -1164,6 +1164,7 @@ import { createAgentTurn, mergeAgentTurnActivity } from './agentTurn.js';
     let finalMeta = null;
     let spinner = null;
     let timedOut = false;
+    let _isAgent = false;
     let processingProbeTimer = null;
     let processingProbeAbort = null;
     let _renderStream = () => {};
@@ -1540,10 +1541,11 @@ import { createAgentTurn, mergeAgentTurnActivity } from './agentTurn.js';
       currentAbort = abortCtrl;
 
       const _tState = Storage.loadToggleState();
-      const _isAgent = (_tState.mode || 'chat') === 'agent';
+      _isAgent = (_tState.mode || 'chat') === 'agent';
 
-      // Timeout: 6 min for research and agent mode, 3 min otherwise
-      const timeoutMs = el('research-toggle').checked || _isAgent ? RESEARCH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
+      // Vision preprocessing can take minutes on local models before chat starts.
+      const timeoutMs = el('research-toggle').checked || _isAgent || _hasImageAttach
+        ? RESEARCH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
       timeoutId = setTimeout(() => {
         if (!abortCtrl.signal.aborted) {
           timedOut = true;
