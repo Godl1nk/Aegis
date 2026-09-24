@@ -102,6 +102,24 @@ def test_responses_payload_max_output_tokens():
     assert generic["max_output_tokens"] == 100
 
 
+def test_responses_payload_preserves_image_between_text_blocks():
+    data_url = "data:image/png;base64,iVBORw0KGgo="
+    payload = llm_core._build_chatgpt_responses_payload(
+        "vision-model",
+        [{"role": "user", "content": [
+            {"type": "text", "text": "What is shown?"},
+            {"type": "image_url", "image_url": {"url": data_url}},
+            {"type": "text", "text": "Name the colors."},
+        ]}],
+        0.0, 100, stream=False,
+    )
+    assert payload["input"][0]["content"] == [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": data_url},
+        {"type": "input_text", "text": "Name the colors."},
+    ]
+
+
 def test_parse_responses_response():
     data = {"output": [
         {"type": "reasoning", "summary": []},

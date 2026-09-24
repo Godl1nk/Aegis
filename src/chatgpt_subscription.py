@@ -306,10 +306,29 @@ def build_responses_input(messages: list[dict]) -> list[dict]:
         if role == "tool":
             role = "user"
         content = msg.get("content")
+        input_type = "output_text" if role == "assistant" else "input_text"
         if isinstance(content, list):
-            text = "\n".join(str(part.get("text") or part.get("content") or "") for part in content if isinstance(part, dict))
+            blocks: list[dict] = []
+            text_parts: list[str] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if role != "assistant" and part.get("type") in ("image_url", "input_image"):
+                    image = part.get("image_url") or {}
+                    url = image.get("url") if isinstance(image, dict) else image
+                    if isinstance(url, str) and url:
+                        if text_parts:
+                            blocks.append({"type": input_type, "text": "\n".join(text_parts)})
+                            text_parts = []
+                        blocks.append({"type": "input_image", "image_url": url})
+                        continue
+                text_parts.append(str(part.get("text") or part.get("content") or ""))
+            if text_parts:
+                blocks.append({"type": input_type, "text": "\n".join(text_parts)})
+            if not blocks:
+                blocks.append({"type": input_type, "text": ""})
         else:
             text = "" if content is None else str(content)
-        input_type = "output_text" if role == "assistant" else "input_text"
-        input_items.append({"role": role, "content": [{"type": input_type, "text": text}]})
+            blocks = [{"type": input_type, "text": text}]
+        input_items.append({"role": role, "content": blocks})
     return input_items
