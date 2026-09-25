@@ -4904,6 +4904,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
           <option value="csv">csv</option>
           <option value="email">email</option>
           <option value="pdf">pdf</option>
+          <option value="docx">docx</option>
         </select>
         <!-- Close + Copy/Export moved to the bottom action footer (#doc-actions-footer)
              so regular docs match the email footer layout. -->
@@ -9391,7 +9392,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         if (!silent && uiModule) uiModule.showError('Document no longer exists');
         return;
       }
-      if (!res.ok) throw new Error(`Document save failed: HTTP ${res.status}`);
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `Document save failed: HTTP ${res.status}`);
+      }
       const doc = await res.json();
       const badge = document.getElementById('doc-version-badge');
       if (badge) { const _v = doc.version_count || 1; badge.textContent = `v${_v}`; badge.style.display = _v > 1 ? '' : 'none'; }
@@ -9406,7 +9410,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       console.error('Failed to save document:', e);
       const now = Date.now();
       if (uiModule && (!silent || now - _lastAutoSaveErrorAt > 10000)) {
-        uiModule.showError(silent ? 'Autosave failed' : 'Failed to save document');
+        uiModule.showError((silent ? 'Autosave failed: ' : 'Failed to save document: ') + (e.message || e));
         _lastAutoSaveErrorAt = now;
       }
     }
@@ -9502,6 +9506,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       const baseTitle = dotIdx > 0 ? name.slice(0, dotIdx) : name;
       const isSpreadsheet = ['.xlsx','.xls','.ods'].includes(ext);
       const isPdf = ext === '.pdf';
+      if (ext === '.doc') {
+        if (uiModule && uiModule.showError) uiModule.showError('Convert legacy .doc files to .docx before import');
+        fi.remove();
+        return;
+      }
       // Spreadsheets need the library's per-sheet split — defer to it.
       if (isSpreadsheet) {
         openLibrary();
@@ -9510,13 +9519,17 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       }
       try {
         let docId = null;
-        if (isPdf) {
+        if (isPdf || ext === '.docx') {
           const fd = new FormData();
           fd.append('file', file);
           const sid = (sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId()) || _lastSessionId || '';
           if (sid) fd.append('session_id', sid);
-          const r = await fetch(`${API_BASE}/api/documents/import-pdf`, { method: 'POST', body: fd, credentials: 'same-origin' });
-          if (!r.ok) throw new Error('PDF import failed');
+          const endpoint = isPdf ? 'import-pdf' : 'import-docx';
+          const r = await fetch(`${API_BASE}/api/documents/${endpoint}`, { method: 'POST', body: fd, credentials: 'same-origin' });
+          if (!r.ok) {
+            const detail = await r.json().catch(() => ({}));
+            throw new Error(detail.detail || `${isPdf ? 'PDF' : 'Word'} import failed`);
+          }
           const j = await r.json();
           docId = j.doc_id || j.id;
         } else {
@@ -9611,11 +9624,15 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     options.push({ label: 'Import from library', fn: () => openLibrary() });
     options.push({ label: 'Import from device', fn: () => _importFromDevice(), _divider: true });
     if (isForm) options.push({ label: 'Filled PDF (.pdf)', fn: _downloadFilledPdf });
-    options.push(
-      { label: 'Export Markdown', fn: exportDocument },
-      { label: 'Print as PDF', fn: exportAsPdf },
-      { label: 'Export as Word', fn: exportAsDocx },
-    );
+    if (docs.get(activeDocId)?.language === 'docx') {
+      options.push({ label: 'Preserved Word (.docx)', fn: exportAsDocx });
+    } else {
+      options.push(
+        { label: 'Export Markdown', fn: exportDocument },
+        { label: 'Print as PDF', fn: exportAsPdf },
+        { label: 'Export as Word', fn: exportAsDocx },
+      );
+    }
 
     options.forEach(opt => {
       const item = document.createElement('button');
@@ -9706,6 +9723,38 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (!activeDocId) return;
     const textarea = document.getElementById('doc-editor-textarea');
     if (!textarea) return;
+    if (docs.get(activeDocId)?.language === 'docx') {
+      try {
+        const current = await fetch(`${API_BASE}/api/document/${activeDocId}`, { credentials: 'same-origin' });
+        if (!current.ok) throw new Error('Could not read the Word document');
+        const saved = await current.json();
+        if (textarea.value !== saved.current_content) {
+          const save = await fetch(`${API_BASE}/api/document/${activeDocId}`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+            body: JSON.stringify({ content: textarea.value }),
+          });
+          if (!save.ok) {
+            const detail = await save.json().catch(() => ({}));
+            throw new Error(detail.detail || `Word save failed (HTTP ${save.status})`);
+          }
+        }
+        const response = await fetch(`${API_BASE}/api/document/${activeDocId}/export-docx`, { credentials: 'same-origin' });
+        if (!response.ok) {
+          const detail = await response.json().catch(() => ({}));
+          throw new Error(detail.detail || `Word export failed (HTTP ${response.status})`);
+        }
+        const url = URL.createObjectURL(await response.blob());
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = _getExportBaseName() + '.docx';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        if (uiModule) uiModule.showToast('Exported original Word document with edits');
+      } catch (e) {
+        if (uiModule) uiModule.showError(e.message || 'Word export failed');
+      }
+      return;
+    }
     try {
       await ensureDocx();
     } catch (e) {

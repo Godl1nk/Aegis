@@ -11,6 +11,7 @@ SQLAlchemy
 pypdf
 # PDF page rendering and form-filling. PyMuPDF is AGPL-3.0; see ACKNOWLEDGMENTS.md.
 PyMuPDF
+python-docx
 beautifulsoup4
 charset-normalizer
 numpy

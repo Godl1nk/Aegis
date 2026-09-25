@@ -712,6 +712,34 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
         const res = await fetch(`${API_BASE}/api/document/${doc.id}`);
         if (!res.ok) throw new Error('Failed');
         const full = await res.json();
+        if (/<!--\s*pdf_(?:form_)?source\s+upload_id="/.test(full.current_content || '')) {
+          const pdf = await fetch(`${API_BASE}/api/document/${doc.id}/export-pdf`);
+          if (!pdf.ok) {
+            const detail = await pdf.json().catch(() => ({}));
+            throw new Error(detail.detail || 'PDF export failed');
+          }
+          const url = URL.createObjectURL(await pdf.blob());
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = (full.title || 'document') + '.pdf';
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+          return;
+        }
+        if (full.language === 'docx') {
+          const word = await fetch(`${API_BASE}/api/document/${doc.id}/export-docx`);
+          if (!word.ok) {
+            const detail = await word.json().catch(() => ({}));
+            throw new Error(detail.detail || 'Word export failed');
+          }
+          const url = URL.createObjectURL(await word.blob());
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = (full.title || 'document') + '.docx';
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+          return;
+        }
         const extMap = { javascript: '.js', python: '.py', html: '.html', css: '.css', markdown: '.md', json: '.json', yaml: '.yml', bash: '.sh', sql: '.sql', rust: '.rs', go: '.go', java: '.java', c: '.c', cpp: '.cpp', typescript: '.ts', ruby: '.rb', php: '.php', xml: '.xml', toml: '.toml', ini: '.ini' };
         const ext = extMap[full.language] || '.txt';
         const blob = new Blob([full.current_content || ''], { type: 'text/plain' });
@@ -1345,6 +1373,34 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     }));
     for (const doc of docs) {
       if (!doc) continue;
+      if (/<!--\s*pdf_(?:form_)?source\s+upload_id="/.test(doc.current_content || '')) {
+        const response = await fetch(`${API_BASE}/api/document/${doc.id}/export-pdf`);
+        if (!response.ok) {
+          if (uiModule) uiModule.showError(`Could not export ${doc.title || 'PDF document'}`);
+          continue;
+        }
+        const url = URL.createObjectURL(await response.blob());
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = (doc.title || 'document') + '.pdf';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        continue;
+      }
+      if (doc.language === 'docx') {
+        const response = await fetch(`${API_BASE}/api/document/${doc.id}/export-docx`);
+        if (!response.ok) {
+          if (uiModule) uiModule.showError(`Could not export ${doc.title || 'Word document'}`);
+          continue;
+        }
+        const url = URL.createObjectURL(await response.blob());
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = (doc.title || 'document') + '.docx';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        continue;
+      }
       const ext = extMap[doc.language] || '.txt';
       const filename = (doc.title || 'document') + (doc.title && doc.title.includes('.') ? '' : ext);
       const blob = new Blob([doc.current_content || ''], { type: 'text/plain' });
@@ -1489,7 +1545,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
       '.scss': 'css', '.sass': 'css', '.less': 'css',
       '.csv': 'csv', '.tsv': 'csv',
       '.xlsx': 'csv', '.xls': 'csv', '.ods': 'csv',
-      '.docx': 'markdown', '.doc': 'markdown',
+      '.docx': 'docx',
     };
 
     let imported = 0;
@@ -1508,6 +1564,20 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
 
         const isSpreadsheet = ['.xlsx', '.xls', '.ods'].includes(ext);
         const isPdf = ext === '.pdf';
+
+        if (ext === '.doc') throw new Error('Legacy .doc files must be converted to .docx before import');
+
+        if (ext === '.docx') {
+          const fd = new FormData();
+          fd.append('file', file);
+          const res = await fetch(`${API_BASE}/api/documents/import-docx`, { method: 'POST', body: fd });
+          if (!res.ok) {
+            const detail = await res.json().catch(() => ({}));
+            throw new Error(detail.detail || `Word import failed (HTTP ${res.status})`);
+          }
+          imported++;
+          continue;
+        }
 
         if (isPdf) {
           // Backend handles save + AcroForm detection in one shot — picks the

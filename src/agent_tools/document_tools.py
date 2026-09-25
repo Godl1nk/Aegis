@@ -48,6 +48,22 @@ def clear_active_document(doc_id: Optional[str] = None) -> bool:
     return False
 
 
+def _validate_word_tool_edit(db, doc, edited_content: str, owner: Optional[str]) -> Optional[str]:
+    if doc.language != "docx":
+        return None
+    from src.constants import UPLOAD_DIR
+    from src.upload_handler import UploadHandler
+    from src.word_document import UnsafeWordEdit, render_document_edit
+    import os
+
+    try:
+        handler = UploadHandler(os.path.dirname(UPLOAD_DIR), UPLOAD_DIR)
+        render_document_edit(db, doc, edited_content, handler, owner)
+    except (UnsafeWordEdit, ValueError) as exc:
+        return str(exc)
+    return None
+
+
 def _owned_document_query(query, Document, owner: Optional[str]):
     if owner is None:
         # A bare Python `False` is not a valid SQL expression — SQLAlchemy 1.4
@@ -477,6 +493,10 @@ class UpdateDocumentTool:
                     summary=f"Created from PDF edit by {_active_model or 'AI'}",
                 )
 
+            word_error = _validate_word_tool_edit(db, doc, new_content, owner)
+            if word_error:
+                return {"error": f"Word edit rejected to preserve the original document: {word_error}"}
+
             new_ver = doc.version_count + 1
             ver = DocumentVersion(
                 id=str(uuid.uuid4()),
@@ -605,6 +625,10 @@ class EditDocumentTool:
                     owner=owner,
                     summary=f"Created from PDF edit by {_active_model or 'AI'} ({applied} edit(s))",
                 )
+
+            word_error = _validate_word_tool_edit(db, doc, updated_content, owner)
+            if word_error:
+                return {"error": f"Word edit rejected to preserve the original document: {word_error}"}
 
             new_ver = doc.version_count + 1
             ver = DocumentVersion(

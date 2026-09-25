@@ -42,12 +42,31 @@ def create_office_document(
         doc_id = str(uuid.uuid4())
         ver_id = str(uuid.uuid4())
         sess = db.query(DbSession).filter(DbSession.id == session_id).first()
+        content = body_text
+        language = "markdown"
+        if upload_id.lower().endswith(".docx") and sess:
+            # Chat DOCX attachments should retain their source package just
+            # like Library imports. Other Office formats remain text copies.
+            from src.constants import UPLOAD_DIR
+            from src.upload_handler import UploadHandler
+            from src.word_document import import_content
+            import os
+
+            handler = UploadHandler(os.path.dirname(UPLOAD_DIR), UPLOAD_DIR)
+            source = handler.resolve_upload(upload_id, owner=sess.owner)
+            if source:
+                try:
+                    with open(source["path"], "rb") as word_file:
+                        content = import_content(word_file.read(), upload_id)
+                    language = "docx"
+                except Exception:
+                    logger.warning("Could not retain DOCX source for %s; using extracted text", upload_id, exc_info=True)
         doc = Document(
             id=doc_id,
             session_id=session_id,
             title=title,
-            language="markdown",
-            current_content=body_text,
+            language=language,
+            current_content=content,
             version_count=1,
             is_active=True,
             owner=sess.owner if sess else None,
@@ -56,7 +75,7 @@ def create_office_document(
             id=ver_id,
             document_id=doc_id,
             version_number=1,
-            content=body_text,
+            content=content,
             summary="Imported from Office attachment",
             source="upload",
         )

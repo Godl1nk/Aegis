@@ -167,13 +167,28 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             doc_id = str(uuid.uuid4())
             ver_id = str(uuid.uuid4())
 
+            initial_content = req.content
+            if language == "docx":
+                from src.word_document import UnsafeWordEdit, import_content, render_edited_word, source_upload_id
+                upload_id = source_upload_id(req.content)
+                path = _locate_current_user_upload(request, upload_id, user) if upload_id else None
+                if not path:
+                    raise HTTPException(400, "Word document must reference an owned .docx import")
+                with open(path, "rb") as source:
+                    source_bytes = source.read()
+                try:
+                    initial_content = import_content(source_bytes, upload_id)
+                    render_edited_word(source_bytes, initial_content, req.content)
+                except (ValueError, UnsafeWordEdit) as exc:
+                    raise HTTPException(422, str(exc)) from exc
+
             doc = Document(
                 id=doc_id,
                 session_id=req.session_id,
                 title=req.title,
                 language=language,
                 current_content=req.content,
-                version_count=1,
+                version_count=2 if initial_content != req.content else 1,
                 is_active=True,
                 # Stamp ownership directly so the doc survives its session
                 # being deleted. Fall back to the session's owner when the
@@ -184,12 +199,15 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 id=ver_id,
                 document_id=doc_id,
                 version_number=1,
-                content=req.content,
+                content=initial_content,
                 summary="Initial version",
                 source="user",
             )
             db.add(doc)
             db.add(ver)
+            if initial_content != req.content:
+                db.add(DocumentVersion(id=str(uuid.uuid4()), document_id=doc_id, version_number=2,
+                                       content=req.content, summary="Cloned Word edit", source="user"))
             db.commit()
             db.refresh(doc)
             try:
@@ -306,6 +324,73 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 db.commit()
                 db.refresh(doc)
             return _doc_to_dict(doc)
+        finally:
+            db.close()
+
+    @router.post("/api/documents/import-docx")
+    async def import_docx(request: Request, file: UploadFile = File(...), session_id: Optional[str] = Form(None)) -> Dict[str, Any]:
+        """Import a Word file while retaining its original OOXML package."""
+        import os
+        from src.auth_helpers import require_privilege
+        from src.word_document import import_content
+
+        user = require_privilege(request, "can_use_documents")
+        if not (file.filename or "").lower().endswith(".docx"):
+            raise HTTPException(400, "Only .docx Word files are supported")
+        if upload_handler is None:
+            raise HTTPException(503, "Upload storage is unavailable")
+        db = SessionLocal()
+        try:
+            if session_id:
+                _get_session_or_404(db, session_id, user)
+            meta = upload_handler.save_upload(file, request.client.host if request.client else "unknown", owner=user)
+            path = _locate_current_user_upload(request, meta["id"], user)
+            if not path:
+                raise HTTPException(500, "Saved Word file could not be located")
+            try:
+                with open(path, "rb") as source:
+                    content = import_content(source.read(), meta["id"])
+            except Exception as exc:
+                raise HTTPException(400, f"Invalid Word file: {exc}") from exc
+            doc_id = str(uuid.uuid4())
+            title = os.path.splitext(meta.get("original_name") or file.filename or "Document")[0]
+            doc = Document(id=doc_id, session_id=session_id, title=title, language="docx",
+                           current_content=content, version_count=1, is_active=True, owner=user)
+            db.add(doc)
+            db.add(DocumentVersion(id=str(uuid.uuid4()), document_id=doc_id, version_number=1,
+                                   content=content, summary="Imported Word file", source="upload"))
+            db.commit()
+            return _doc_to_dict(doc)
+        except HTTPException:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    @router.get("/api/document/{doc_id}/export-docx")
+    async def export_docx(doc_id: str, request: Request):
+        from fastapi.responses import Response
+        from src.word_document import UnsafeWordEdit, render_document_edit
+
+        user = get_current_user(request)
+        db = SessionLocal()
+        try:
+            doc = db.query(Document).filter(Document.id == doc_id).first()
+            if not doc:
+                raise HTTPException(404, "Document not found")
+            _verify_doc_owner(db, doc, user)
+            if doc.language != "docx" or upload_handler is None:
+                raise HTTPException(400, "Document is not an imported Word file")
+            try:
+                data = render_document_edit(db, doc, doc.current_content, upload_handler, user,
+                                            getattr(request.app.state, "auth_manager", None))
+            except UnsafeWordEdit as exc:
+                raise HTTPException(422, str(exc)) from exc
+            filename = _slug(doc.title)
+            if not filename.lower().endswith(".docx"):
+                filename += ".docx"
+            return Response(data, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            headers={"Content-Disposition": f'attachment; filename="{filename}"'})
         finally:
             db.close()
 
@@ -584,15 +669,26 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                     except HTTPException:
                         continue   # skip docs the user doesn't own
                     ext = _ext.get(doc.language or "text", ".txt")
+                    if doc.language == "docx":
+                        ext = ".docx"
                     base = (doc.title or "document").strip() or "document"
                     base = re.sub(r"[^\w\-. ]+", "", base)[:60].strip() or doc.id
-                    name = base if "." in base else base + ext
+                    name = base if base.lower().endswith(ext) else base + ext
                     i = 1
                     while name in used:
-                        name = f"{base}-{i}" + ("" if "." in base else ext)
+                        name = f"{base}-{i}{ext}"
                         i += 1
                     used.add(name)
-                    zf.writestr(name, doc.current_content or "")
+                    if doc.language == "docx":
+                        from src.word_document import UnsafeWordEdit, render_document_edit
+                        try:
+                            data = render_document_edit(db, doc, doc.current_content, upload_handler, user,
+                                                        getattr(request.app.state, "auth_manager", None))
+                        except UnsafeWordEdit as exc:
+                            raise HTTPException(422, f"Cannot export {doc.title}: {exc}") from exc
+                        zf.writestr(name, data)
+                    else:
+                        zf.writestr(name, doc.current_content or "")
                     wrote += 1
             if not wrote:
                 raise HTTPException(404, "No documents found")
@@ -637,6 +733,13 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 return _doc_to_dict(doc)
 
             _assert_pdf_marker_upload_owned(request, incoming_content, user, upload_handler)
+            if doc.language == "docx":
+                from src.word_document import UnsafeWordEdit, render_document_edit
+                try:
+                    render_document_edit(db, doc, incoming_content, upload_handler, user,
+                                         getattr(request.app.state, "auth_manager", None))
+                except UnsafeWordEdit as exc:
+                    raise HTTPException(422, str(exc)) from exc
 
             # Check if we can coalesce with the latest version
             latest_ver = db.query(DocumentVersion).filter(

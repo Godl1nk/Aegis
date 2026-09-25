@@ -252,6 +252,23 @@ class UploadHandler:
     def cleanup_old_uploads(self):
         """Remove uploaded files older than CLEANUP_DAYS days."""
         try:
+            # Imported PDFs and Word files are document sources, not disposable
+            # chat attachments. Keep their binaries (and PDF field sidecars)
+            # for as long as a document references them.
+            from core.database import SessionLocal, Document
+            from src.pdf_form_doc import find_source_upload_id
+            from src.word_document import source_upload_id
+            db = SessionLocal()
+            try:
+                linked_uploads = set()
+                for (content,) in db.query(Document.current_content).filter(
+                    Document.current_content.like('%source upload_id="%')
+                ).all():
+                    upload_id = find_source_upload_id(content) or source_upload_id(content)
+                    if upload_id:
+                        linked_uploads.add(upload_id)
+            finally:
+                db.close()
             cutoff_date = datetime.now() - timedelta(days=self.cleanup_days)
             cleaned_count = 0
             
@@ -265,6 +282,8 @@ class UploadHandler:
                         dir_date = datetime(int(path_parts[-3]), int(path_parts[-2]), int(path_parts[-1]))
                         if dir_date < cutoff_date:
                             for file in files:
+                                if any(file == upload_id or file.startswith(upload_id + ".") for upload_id in linked_uploads):
+                                    continue
                                 file_path = os.path.join(root, file)
                                 try:
                                     os.remove(file_path)
