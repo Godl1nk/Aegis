@@ -211,6 +211,12 @@ export function setContextSession(value) {
   void refresh();
 }
 
+export function refreshContextUsage() {
+  pending?.abort();
+  pending = null;
+  void refresh();
+}
+
 export function sanitizeUsageData(prevSnapshot, data) {
   // A non-positive count is never a measurement: any real request carries at
   // least the user message, so providers reporting 0/0 (empty, error-adjacent
