@@ -239,6 +239,8 @@ def _process_office_document(
     session_id: str | None = None,
     auto_opened_docs: list[Dict[str, Any]] | None = None,
     owner: str | None = None,
+    upload_id: str | None = None,
+    upload_handler=None,
 ) -> str:
     """Extract an Office/EPUB document to Markdown via the optional markitdown dep.
 
@@ -259,7 +261,7 @@ def _process_office_document(
 
     markdown = convert_to_markdown(path)
     if markdown and markdown.strip():
-        title = os.path.splitext(os.path.basename(path))[0]
+        title = os.path.splitext(os.path.basename(display_name))[0]
         body, marker = _truncate_inline(markdown)
 
         # Persist the full extracted text as a Document. The agent's existing
@@ -270,9 +272,12 @@ def _process_office_document(
                 from src.office_doc import create_office_document
                 doc_id = create_office_document(
                     session_id=session_id,
-                    upload_id=os.path.basename(path),
+                    upload_id=upload_id or os.path.basename(path),
                     title=title,
                     body_text=markdown,
+                    owner=owner,
+                    upload_handler=upload_handler,
+                    source_path=path,
                 )
                 if doc_id and auto_opened_docs is not None:
                     from src.database import SessionLocal, Document
@@ -633,6 +638,8 @@ def build_user_content(
                     session_id=session_id,
                     auto_opened_docs=auto_opened_docs,
                     owner=owner,
+                    upload_id=fid,
+                    upload_handler=upload_handler,
                 )
 
             extracted_text, inline_attachment_remaining = _fit_inline_attachment_text(

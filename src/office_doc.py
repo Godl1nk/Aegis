@@ -18,8 +18,12 @@ def create_office_document(
     upload_id: str,
     title: str,
     body_text: Optional[str] = None,
+    *,
+    owner: Optional[str] = None,
+    upload_handler=None,
+    source_path: Optional[str] = None,
 ) -> Optional[str]:
-    """Create a markdown Document for an Office attachment and set it active.
+    """Create a source-backed Word or text-copy Office document and set it active.
 
     Returns the new doc_id, or None on failure / empty body. The full
     extracted body lives in `current_content`, so the agent can fetch
@@ -44,7 +48,8 @@ def create_office_document(
         sess = db.query(DbSession).filter(DbSession.id == session_id).first()
         content = body_text
         language = "markdown"
-        if upload_id.lower().endswith(".docx") and sess:
+        document_owner = owner or (sess.owner if sess else None)
+        if upload_id.lower().endswith(".docx"):
             # Chat DOCX attachments should retain their source package just
             # like Library imports. Other Office formats remain text copies.
             from src.constants import UPLOAD_DIR
@@ -52,15 +57,13 @@ def create_office_document(
             from src.word_document import import_content
             import os
 
-            handler = UploadHandler(os.path.dirname(UPLOAD_DIR), UPLOAD_DIR)
-            source = handler.resolve_upload(upload_id, owner=sess.owner)
-            if source:
-                try:
-                    with open(source["path"], "rb") as word_file:
-                        content = import_content(word_file.read(), upload_id)
-                    language = "docx"
-                except Exception:
-                    logger.warning("Could not retain DOCX source for %s; using extracted text", upload_id, exc_info=True)
+            handler = upload_handler or UploadHandler(os.path.dirname(UPLOAD_DIR), UPLOAD_DIR)
+            source = handler.resolve_upload(upload_id, owner=document_owner)
+            if not source or (source_path and os.path.realpath(source["path"]) != os.path.realpath(source_path)):
+                raise ValueError(f"Word source {upload_id} could not be verified")
+            with open(source["path"], "rb") as word_file:
+                content = import_content(word_file.read(), upload_id)
+            language = "docx"
         doc = Document(
             id=doc_id,
             session_id=session_id,
@@ -69,7 +72,7 @@ def create_office_document(
             current_content=content,
             version_count=1,
             is_active=True,
-            owner=sess.owner if sess else None,
+            owner=document_owner,
         )
         ver = DocumentVersion(
             id=ver_id,

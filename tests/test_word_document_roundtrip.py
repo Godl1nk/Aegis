@@ -113,3 +113,47 @@ def test_upload_cleanup_preserves_document_sources(tmp_path, monkeypatch):
     assert handler.cleanup_old_uploads() == 1
     assert source.exists()
     assert not expired.exists()
+
+
+def test_chat_attachment_opens_as_word_document_in_library(tmp_path, monkeypatch):
+    from core import database
+    from src import database as database_alias
+    from src.document_processor import build_user_content
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'chat.db'}")
+    database.Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine)
+    monkeypatch.setattr(database_alias, 'SessionLocal', sessions)
+    monkeypatch.setattr(database_alias, 'Document', database.Document, raising=False)
+    monkeypatch.setattr(database_alias, 'DocumentVersion', database.DocumentVersion, raising=False)
+    monkeypatch.setattr(database_alias, 'Session', database.Session, raising=False)
+    with sessions() as db:
+        db.add(database.Session(id='chat', name='Chat', endpoint_url='local', model='test', owner='alice'))
+        db.commit()
+
+    source = tmp_path / UPLOAD_ID
+    source.write_bytes(_sample_word())
+
+    class Uploads:
+        def resolve_upload(self, upload_id, owner=None):
+            return {'path': str(source), 'name': 'Report.docx', 'mime': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'} if upload_id == UPLOAD_ID and owner == 'alice' else None
+
+        def _inside_upload_dir(self, path):
+            return path == str(source)
+
+        def is_image_file(self, name, mime):
+            return False
+
+        def is_audio_file(self, name, mime):
+            return False
+
+        def is_document_file(self, name, mime):
+            return True
+
+    opened = []
+    build_user_content('Read this', [UPLOAD_ID], str(tmp_path), Uploads(),
+                       session_id='chat', auto_opened_docs=opened, owner='alice')
+    assert len(opened) == 1
+    assert opened[0]['title'] == 'Report'
+    assert opened[0]['language'] == 'docx'
+    assert opened[0]['content'].startswith(f'<!-- word_source upload_id="{UPLOAD_ID}" -->')
