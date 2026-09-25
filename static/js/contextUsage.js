@@ -240,7 +240,8 @@ export function applyModelContextLength(endpointUrl, model, length, selectionVer
 
 if (typeof window !== 'undefined') window.addEventListener('odysseus:model-context-length-changed', e => {
   const selected = document.getElementById('model-picker-label')?.dataset;
-  if (sameContextSelection({ ...selection, model: selected?.modelId, endpointUrl: selected?.endpointUrl }, e.detail?.endpointUrl, e.detail?.model)) {
+  if (snapshot && (!snapshot.model || snapshot.model === e.detail?.model) &&
+      sameContextSelection({ sessionId: true, model: selected?.modelId, endpointUrl: selected?.endpointUrl }, e.detail?.endpointUrl, e.detail?.model)) {
     applyModelContextLength(e.detail.endpointUrl, e.detail.model, e.detail.length, true);
   }
 });
