@@ -6,7 +6,7 @@ import settingsModule from './settings.js';
 import { providerLogo, providerLogoFromUrl } from './providers.js';
 import { sortModelObjects } from './modelSort.js';
 import { PROVIDER_DEVICE_FLOWS, formatDeviceFlowError, runProviderDeviceFlow } from './providerDeviceFlow.js';
-import { refreshContextUsage } from './contextUsage.js';
+import { applyModelContextLength } from './contextUsage.js';
 
 let initialized = false;
 let modalEl = null;
@@ -677,6 +677,7 @@ async function loadEndpoints() {
         // because clicking it bubbled up to here.
         if (e.target.closest('.admin-btn-sm, .admin-btn-delete, .mcp-tools-list, .mcp-tools-header, .mcp-tools-search, input, label, select')) return;
         const epId = header.dataset.admEpHeader;
+        const endpointUrl = data.find(ep => String(ep.id) === epId)?.base_url || '';
         const panel = row.querySelector(`[data-adm-ep-models-panel="${epId}"]`);
         if (!panel) return;
         panel.classList.toggle('hidden');
@@ -805,7 +806,7 @@ async function loadEndpoints() {
                   if (!res.ok) throw new Error(`HTTP ${res.status}`);
                   btn.dataset.contextLength = length || '';
                   btn.textContent = `Context: ${length ? length.toLocaleString() : 'Auto'}`;
-                  refreshContextUsage();
+                  applyModelContextLength(endpointUrl, btn.dataset.epModelContext, length);
                   uiModule.showToast?.('Context window saved');
                 } catch (_) { uiModule.showToast?.('Failed to save context window'); }
               });
@@ -831,7 +832,7 @@ async function loadEndpoints() {
                       valueBtn.dataset.contextLength = result.context_length_override;
                       valueBtn.textContent = `Context: ${Number(result.context_length_override).toLocaleString()}`;
                     }
-                    refreshContextUsage();
+                    applyModelContextLength(endpointUrl, btn.dataset.epModelDetect, result.context_length_override);
                     uiModule.showToast?.('Detected context window saved');
                   }
                 } catch (_) { uiModule.showToast?.('Could not detect context window'); }

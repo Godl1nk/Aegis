@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { contextPercentLabel, contextView, mergeDiscoverySnapshot, sanitizeUsageData } from '../static/js/contextUsage.js';
+import { contextPercentLabel, contextView, mergeDiscoverySnapshot, sanitizeUsageData, sameContextSelection } from '../static/js/contextUsage.js';
+
+test('model window changes match only the selected endpoint and model', () => {
+  const selected = { sessionId: 's', model: 'm', endpointUrl: 'http://host/v1/chat/completions' };
+  assert.equal(sameContextSelection(selected, 'http://host/v1', 'm'), true);
+  assert.equal(sameContextSelection(selected, 'http://other/v1', 'm'), false);
+  assert.equal(sameContextSelection(selected, 'http://host/v1', 'other'), false);
+});
 
 test('small nonzero usage is not displayed as zero', () => {
   assert.equal(contextPercentLabel(102 / 131072 * 100), '<1%');

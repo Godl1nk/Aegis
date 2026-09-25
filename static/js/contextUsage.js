@@ -219,6 +219,25 @@ export function refreshContextUsage() {
   void refresh();
 }
 
+export function sameContextSelection(value, endpointUrl, model) {
+  const normalize = url => String(url || '').trim().replace(/\/(?:chat\/completions|completions|models|v1\/messages)\/?$/, '').replace(/\/+$/, '');
+  return !!value?.sessionId && value.model === model && normalize(value.endpointUrl) === normalize(endpointUrl);
+}
+
+export function applyModelContextLength(endpointUrl, model, length) {
+  if (!sameContextSelection(selection, endpointUrl, model)) return;
+  if (length == null) {
+    snapshot = null;
+    revision++;
+    render();
+    refreshContextUsage();
+    return;
+  }
+  snapshot = { ...snapshot, context_length: length, context_length_known: true };
+  revision++;
+  render();
+}
+
 export function sanitizeUsageData(prevSnapshot, data) {
   // A non-positive count is never a measurement: any real request carries at
   // least the user message, so providers reporting 0/0 (empty, error-adjacent
