@@ -196,12 +196,6 @@ function init() {
   window.addEventListener('odysseus:chat-busy-change', e => {
     if (!e.detail?.active && (snapshot?.basis !== 'request' || snapshot?.model !== selection?.model)) void refresh();
   });
-  window.addEventListener('odysseus:model-context-length-changed', e => {
-    const selected = document.getElementById('model-picker-label')?.dataset;
-    if (sameContextSelection({ ...selection, model: selected?.modelId, endpointUrl: selected?.endpointUrl }, e.detail?.endpointUrl, e.detail?.model)) {
-      applyModelContextLength(e.detail.endpointUrl, e.detail.model, e.detail.length, true);
-    }
-  });
 }
 
 export function setContextSession(value) {
@@ -243,6 +237,13 @@ export function applyModelContextLength(endpointUrl, model, length, selectionVer
   revision++;
   render();
 }
+
+if (typeof window !== 'undefined') window.addEventListener('odysseus:model-context-length-changed', e => {
+  const selected = document.getElementById('model-picker-label')?.dataset;
+  if (sameContextSelection({ ...selection, model: selected?.modelId, endpointUrl: selected?.endpointUrl }, e.detail?.endpointUrl, e.detail?.model)) {
+    applyModelContextLength(e.detail.endpointUrl, e.detail.model, e.detail.length, true);
+  }
+});
 
 export function sanitizeUsageData(prevSnapshot, data) {
   // A non-positive count is never a measurement: any real request carries at
