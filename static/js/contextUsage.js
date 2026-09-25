@@ -150,7 +150,9 @@ async function refresh() {
   pending = controller;
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
-    const response = await fetch(`/api/session/${encodeURIComponent(selection.sessionId)}/context_info`, { signal: controller.signal });
+    const response = await fetch(`/api/session/${encodeURIComponent(selection.sessionId)}/context_info?ts=${Date.now()}`, {
+      signal: controller.signal, cache: 'no-store',
+    });
     if (!response.ok) throw new Error('Context unavailable');
     const data = await response.json();
     if (data.used_tokens == null) throw new Error('Context unavailable');
