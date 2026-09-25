@@ -16,6 +16,7 @@ from urllib.parse import urlparse, urlunparse
 from fastapi import APIRouter, HTTPException, Form, Query, Body, Request, Response
 from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from core.database import SessionLocal, ModelEndpoint, Session as DbSession
 from core.log_safety import redact_url as _redact_url_for_log
 from core.middleware import require_admin
@@ -23,6 +24,7 @@ from src.constants import COOKBOOK_STATE_FILE
 from src.llm_core import _detect_provider, _host_match, ANTHROPIC_MODELS, _normalize_api_method, _resolve_provider
 from src.tls_overrides import llm_verify
 from src.settings import load_settings as _load_settings, save_settings as _save_settings
+from src.model_context import _model_ctx_from_entry, _normalize_base_for_compare
 from src.endpoint_resolver import (
     normalize_base as _normalize_base,
     build_chat_url,
@@ -32,6 +34,85 @@ from src.endpoint_resolver import (
 from src.auth_helpers import _auth_disabled, effective_user, owner_filter
 
 logger = logging.getLogger(__name__)
+
+
+def _context_overrides_for(base_url: str) -> dict:
+    all_overrides = _load_settings().get("model_context_lengths", {})
+    if not isinstance(all_overrides, dict):
+        return {}
+    models = all_overrides.get(_normalize_base_for_compare(base_url), {})
+    return models if isinstance(models, dict) else {}
+
+
+def _save_model_context_override(base_url: str, model: str, length: Optional[int]) -> None:
+    settings = _load_settings().copy()
+    all_overrides = settings.get("model_context_lengths", {})
+    all_overrides = dict(all_overrides) if isinstance(all_overrides, dict) else {}
+    key = _normalize_base_for_compare(base_url)
+    models = dict(all_overrides.get(key, {}))
+    if length is None:
+        models.pop(model, None)
+    else:
+        models[model] = length
+    if models:
+        all_overrides[key] = models
+    else:
+        all_overrides.pop(key, None)
+    settings["model_context_lengths"] = all_overrides
+    _save_settings(settings)
+
+
+def _detect_model_context(ep: ModelEndpoint, model: str) -> Optional[int]:
+    """Use only endpoint-reported metadata tied to the exact requested model."""
+    base = _normalize_base(ep.base_url)
+    if _probe_target_allowed(base):
+        return None
+    url = _safe_build_models_url(base, getattr(ep, "api_method", None))
+    if not url:
+        return None
+    headers = _safe_build_headers(ep.api_key, base, getattr(ep, "api_method", None))
+    try:
+        response = httpx.get(url, headers=headers, timeout=8, verify=llm_verify())
+        response.raise_for_status()
+        data = response.json()
+        entries = data.get("data") or data.get("models") or []
+        if not isinstance(entries, list):
+            return None
+        matches = [item for item in entries if isinstance(item, dict) and (item.get("id") or item.get("name")) == model]
+        if len(matches) != 1:
+            return None
+        reported = _model_ctx_from_entry(matches[0])
+        if reported:
+            return reported
+        # llama.cpp exposes its active serving limit at /props or /slots.
+        # These server-wide values only identify this model on a single-model
+        # endpoint; a multi-model proxy could otherwise supply the wrong limit.
+        if len(entries) != 1 or _classify_endpoint(base, _effective_endpoint_kind(ep, base)) != "local":
+            return None
+        root = _normalize_base_for_compare(base)
+        if root.endswith("/v1"):
+            root = root[:-3]
+        for path in ("/props", "/slots"):
+            try:
+                server = httpx.get(root + path, headers=headers, timeout=5, verify=llm_verify())
+                if not server.is_success:
+                    continue
+                payload = server.json()
+                if path == "/props" and isinstance(payload, dict):
+                    generation = payload.get("default_generation_settings") or {}
+                    value = generation.get("n_ctx") if isinstance(generation, dict) else None
+                elif path == "/slots" and isinstance(payload, list) and payload:
+                    values = {slot.get("n_ctx") for slot in payload if isinstance(slot, dict)}
+                    value = values.pop() if len(values) == 1 else None
+                else:
+                    value = None
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    return value
+            except (httpx.HTTPError, ValueError, TypeError, KeyError):
+                continue
+    except (httpx.HTTPError, ValueError, TypeError):
+        return None
+    return None
 
 _SPEECH_ENDPOINT_SETTINGS = (
     ("tts_provider", "tts_model", "tts-1", "Text to Speech"),
@@ -2324,6 +2405,7 @@ def setup_model_routes(model_discovery):
             pinned = _normalize_model_ids(getattr(ep, "pinned_models", None))
             pinned_set = set(pinned)
             image_set = set(_normalize_model_ids(getattr(ep, "image_models", None)))
+            context_overrides = _context_overrides_for(ep.base_url)
             return [
                 {
                     "id": m,
@@ -2331,9 +2413,56 @@ def setup_model_routes(model_discovery):
                     "is_hidden": m in hidden,
                     "is_pinned": m in pinned_set,
                     "is_image": m in image_set,
+                    "context_length_override": context_overrides.get(m),
                 }
                 for m in _merge_model_ids(all_models, pinned)
             ]
+        finally:
+            db.close()
+
+    @router.put("/model-endpoints/{ep_id}/context-length")
+    async def set_model_context_length(ep_id: str, request: Request):
+        require_admin(request)
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Body must be a JSON object")
+        model = body.get("model")
+        length = body.get("context_length")
+        if not isinstance(model, str) or not model.strip() or len(model) > 512:
+            raise HTTPException(400, "Invalid model ID")
+        if length is not None and (not isinstance(length, int) or isinstance(length, bool) or not 1 <= length <= 10_000_000):
+            raise HTTPException(400, "Context length must be 1–10,000,000 tokens or null")
+        db = SessionLocal()
+        try:
+            ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+            if not ep:
+                raise HTTPException(404, "Endpoint not found")
+            if model not in _merge_model_ids(_cached_model_ids(ep), _normalize_model_ids(getattr(ep, "pinned_models", None))):
+                raise HTTPException(400, "Model is not listed on this endpoint")
+            _save_model_context_override(ep.base_url, model, length)
+            return {"model": model, "context_length_override": length}
+        finally:
+            db.close()
+
+    @router.post("/model-endpoints/{ep_id}/context-detect")
+    async def detect_model_context_length(ep_id: str, request: Request):
+        require_admin(request)
+        body = await request.json()
+        model = body.get("model") if isinstance(body, dict) else None
+        if not isinstance(model, str) or not model.strip() or len(model) > 512:
+            raise HTTPException(400, "Invalid model ID")
+        db = SessionLocal()
+        try:
+            ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+            if not ep:
+                raise HTTPException(404, "Endpoint not found")
+            if model not in _merge_model_ids(_cached_model_ids(ep), _normalize_model_ids(getattr(ep, "pinned_models", None))):
+                raise HTTPException(400, "Model is not listed on this endpoint")
+            length = await run_in_threadpool(_detect_model_context, ep, model)
+            if length is None:
+                return {"model": model, "detected": False}
+            _save_model_context_override(ep.base_url, model, length)
+            return {"model": model, "detected": True, "context_length_override": length}
         finally:
             db.close()
 

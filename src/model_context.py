@@ -241,6 +241,14 @@ _context_cache: Dict[Tuple[str, str], Tuple[int, bool]] = {}
 def _get_context_length_cached(endpoint_url: str, model: str) -> Tuple[int, bool]:
     """Return (context_length, known). ``known`` is False only when the value is a
     bare DEFAULT_CONTEXT fallback (no endpoint report and not in the known table)."""
+    from src.settings import get_setting
+    overrides = get_setting("model_context_lengths", {})
+    if isinstance(overrides, dict):
+        models = overrides.get(_normalize_base_for_compare(endpoint_url), {})
+        if isinstance(models, dict):
+            override = models.get(model)
+            if isinstance(override, int) and not isinstance(override, bool) and override > 0:
+                return override, True
     configured_kind = _configured_endpoint_kind(endpoint_url)
     is_local = is_local_endpoint(endpoint_url)
     # Key on (endpoint_url, model): the same model id can be served by two
@@ -398,6 +406,7 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
     ``known`` is False only for the bare DEFAULT_CONTEXT fallback."""
     known = _lookup_known(model)
     api_ctx = None
+    prefetched_models = None
     configured_kind = _configured_endpoint_kind(endpoint_url)
 
     # Large OpenAI-compatible proxies can make /models expensive. If the
@@ -417,9 +426,19 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
             return api_ctx, True
         return DEFAULT_CONTEXT, False
 
-    # Try llama.cpp /slots endpoint first — reports actual serving context
+    # /slots is server-wide. Only assign it to a model after /models proves
+    # this is a single-model server serving the requested exact ID.
     if is_local_endpoint(endpoint_url):
         try:
+            from src.endpoint_resolver import build_models_url
+            catalog = httpx.get(build_models_url(endpoint_url), timeout=REQUEST_TIMEOUT)
+            if catalog.is_success:
+                prefetched_models = catalog.json().get("data") or []
+            slots_match = (isinstance(prefetched_models, list) and len(prefetched_models) == 1
+                           and isinstance(prefetched_models[0], dict)
+                           and prefetched_models[0].get("id") == model)
+            if not slots_match:
+                raise ValueError("server-wide slots cannot identify this model")
             base = endpoint_url.split("/v1")[0] if "/v1" in endpoint_url else endpoint_url.rsplit("/", 1)[0]
             r = httpx.get(f"{base}/slots", timeout=REQUEST_TIMEOUT)
             if r.is_success:
@@ -447,11 +466,13 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
 
     models_url = build_models_url(endpoint_url)
     try:
-        r = httpx.get(models_url, timeout=REQUEST_TIMEOUT)
-        if r.is_success:
-            data = r.json()
-            models_list = data.get("data") or []
+        if prefetched_models is not None:
+            models_list = prefetched_models
+        else:
+            r = httpx.get(models_url, timeout=REQUEST_TIMEOUT)
+            models_list = (r.json().get("data") or []) if r.is_success else []
 
+        if isinstance(models_list, list):
             for m in models_list:
                 mid = m.get("id", "")
                 if mid == model or mid.split("/")[-1] == model.split("/")[-1]:

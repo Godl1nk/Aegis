@@ -50,6 +50,8 @@ DEFAULT_JSON_TEMPLATE = """{
 }"""
 
 DEFAULT_SETTINGS = {
+    # Explicit serving context windows, keyed by endpoint URL and model ID.
+    "model_context_lengths": {},
     # Agent email safety: when True, the MCP send_email / reply_to_email
     # tools don't SMTP directly. They stage the composed message into the
     # scheduled_emails table with status='agent_draft' and return a

@@ -178,6 +178,34 @@ class TestLookupKnown:
         result = _lookup_known("deepseek-r1:free")
         assert result == 64000
 
+
+def test_context_override_is_exact_per_endpoint_and_model(monkeypatch):
+    from src import settings
+    monkeypatch.setattr(settings, "get_setting", lambda key, default=None: {
+        "https://provider-a.test/v1": {"same-model": 32768},
+        "https://provider-b.test/v1": {"same-model": 65536},
+    })
+    monkeypatch.setattr(model_context, "_configured_endpoint_kind", lambda url: "api")
+    monkeypatch.setattr(model_context, "_query_context_length", lambda url, model: (128000, True))
+    model_context._context_cache.clear()
+    assert model_context.get_context_length_known("https://provider-a.test/v1/chat/completions", "same-model") == (32768, True)
+    assert model_context.budget_context_for_model("https://provider-b.test/v1", "same-model") == 65536
+    assert model_context.get_context_length_known("https://provider-a.test/v1", "other-model") == (128000, True)
+
+
+def test_local_multi_model_catalog_does_not_assign_server_slots_to_one_model(monkeypatch):
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        assert url.endswith("/models")
+        return _FakeResp({"data": [{"id": "target"}, {"id": "other"}]})
+
+    monkeypatch.setattr(model_context.httpx, "get", fake_get)
+    context, known = model_context._query_context_length("http://127.0.0.1:9999/v1", "target")
+    assert (context, known) == (model_context.DEFAULT_CONTEXT, False)
+    assert len(calls) == 1
+
     def test_o1_mini_not_shadowed_by_o1(self):
         """'o1' (200k) precedes 'o1-mini' (128k) in the table; longest match wins."""
         assert _lookup_known("o1-mini") == 128000

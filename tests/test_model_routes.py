@@ -977,6 +977,61 @@ def test_get_models_returns_pinned_when_probe_empty(monkeypatch):
     assert result[0]["is_pinned"] is True
 
 
+def test_context_detect_uses_exact_catalog_model_and_single_model_slots(monkeypatch):
+    ep = _make_endpoint()
+    monkeypatch.setattr(model_routes, "_probe_target_allowed", lambda base: None)
+    monkeypatch.setattr(model_routes, "_classify_endpoint", lambda base, kind: "local")
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        if url.endswith("/models"):
+            payload = {"data": [{"id": "target"}]}
+        elif url.endswith("/props"):
+            payload = {"default_generation_settings": {"n_ctx": 32768}}
+        else:
+            raise AssertionError(url)
+        return SimpleNamespace(is_success=True, json=lambda: payload, raise_for_status=lambda: None)
+
+    monkeypatch.setattr(model_routes.httpx, "get", fake_get)
+    assert model_routes._detect_model_context(ep, "target") == 32768
+    assert calls[-1].endswith("/props")
+
+
+def test_context_detect_rejects_ambiguous_shared_endpoint(monkeypatch):
+    ep = _make_endpoint()
+    monkeypatch.setattr(model_routes, "_probe_target_allowed", lambda base: None)
+
+    def fake_get(url, **kwargs):
+        assert url.endswith("/models")
+        return SimpleNamespace(is_success=True, json=lambda: {"data": [{"id": "target"}, {"id": "other"}]}, raise_for_status=lambda: None)
+
+    monkeypatch.setattr(model_routes.httpx, "get", fake_get)
+    assert model_routes._detect_model_context(ep, "target") is None
+
+
+def test_context_override_route_saves_and_clears_one_model(monkeypatch):
+    ep = _make_endpoint(cached_models=json.dumps(["target", "other"]))
+    db = _PinnedFakeDb([ep])
+    settings = {"model_context_lengths": {"http://localhost:9999/v1": {"other": 8192}}}
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
+    monkeypatch.setattr(model_routes, "_load_settings", lambda: settings)
+    monkeypatch.setattr(model_routes, "_save_settings", lambda value: settings.update(value))
+    endpoint = _get_route("/api/model-endpoints/{ep_id}/context-length", "PUT")
+
+    result = asyncio.run(endpoint("ep1", _PinnedFakeRequest(body={"model": "target", "context_length": 32768})))
+    assert result["context_length_override"] == 32768
+    assert settings["model_context_lengths"]["http://localhost:9999/v1"] == {"other": 8192, "target": 32768}
+
+    asyncio.run(endpoint("ep1", _PinnedFakeRequest(body={"model": "target", "context_length": None})))
+    assert settings["model_context_lengths"]["http://localhost:9999/v1"] == {"other": 8192}
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(endpoint("ep1", _PinnedFakeRequest(body={"model": "target", "context_length": True})))
+    assert exc.value.status_code == 400
+
+
 def test_reprobe_preserves_pinned_models(monkeypatch):
     ep = _make_endpoint(pinned_models=json.dumps(["deploy-1"]))
     db = _PinnedFakeDb([ep])

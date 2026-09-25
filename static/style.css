@@ -15780,6 +15780,18 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
   cursor: pointer;
   transition: opacity 0.15s, border-color 0.15s, background 0.15s, color 0.15s;
 }
+.adm-model-context-btn {
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, var(--fg) 22%, transparent);
+  border-radius: 5px;
+  background: none;
+  color: var(--fg);
+  font-size: 10px;
+  padding: 2px 5px;
+  cursor: pointer;
+}
+.adm-model-context-btn:hover { border-color: var(--accent, var(--red)); }
+.adm-model-context-btn:disabled { opacity: 0.5; cursor: wait; }
 .adm-model-row:hover .adm-model-img-btn { opacity: 0.55; }
 /* Touch devices have no hover: hover-revealed controls must rest visible,
    or they're functionally invisible (still hit-testable, but users can't

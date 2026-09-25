@@ -747,6 +747,8 @@ async function loadEndpoints() {
                 <input type="checkbox" class="adm-cb-hidden" data-ep-model-id="${esc(m.id)}" ${!m.is_hidden ? 'checked' : ''}>
                 <span class="adm-check-dot" aria-hidden="true"></span>
                 <span>${esc(m.display)}</span>
+                <button type="button" class="adm-model-context-btn" data-ep-model-context="${esc(m.id)}" data-context-length="${m.context_length_override || ''}" title="Set this model's serving context window (tokens). Empty value restores automatic behavior.">Context: ${m.context_length_override ? Number(m.context_length_override).toLocaleString() : 'Auto'}</button>
+                <button type="button" class="adm-model-context-btn" data-ep-model-detect="${esc(m.id)}" title="Detect this model's reported context window">Detect</button>
                 <button type="button" class="adm-model-img-btn${m.is_image ? ' active' : ''}" data-ep-model-img="${esc(m.id)}" title="${m.is_image ? 'Marked as image-generation model — click to unmark' : 'Mark as image-generation model (appears in the image-model picker)'}" aria-pressed="${m.is_image ? 'true' : 'false'}">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
                 </button>
@@ -776,6 +778,62 @@ async function loadEndpoints() {
             });
             panel.querySelectorAll('input[type=checkbox]').forEach(cb => {
               cb.addEventListener('change', () => _saveEpModelState(epId, panel));
+            });
+            panel.querySelectorAll('[data-ep-model-context]').forEach(btn => {
+              btn.addEventListener('click', async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const value = await uiModule.styledPrompt('Enter the serving context window in tokens. Leave blank to use automatic behavior.', {
+                  title: `Context window — ${btn.dataset.epModelContext}`,
+                  defaultValue: btn.dataset.contextLength,
+                  placeholder: 'e.g. 32768',
+                  maxLength: 8,
+                });
+                if (value === null) return;
+                const trimmed = value.trim();
+                const length = trimmed ? Number(trimmed) : null;
+                if (trimmed && (!/^\d+$/.test(trimmed) || !Number.isSafeInteger(length) || length < 1 || length > 10000000)) {
+                  uiModule.showToast?.('Enter a whole number from 1 to 10,000,000');
+                  return;
+                }
+                try {
+                  const res = await fetch(`/api/model-endpoints/${encodeURIComponent(epId)}/context-length`, {
+                    method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model: btn.dataset.epModelContext, context_length: length }),
+                  });
+                  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                  btn.dataset.contextLength = length || '';
+                  btn.textContent = `Context: ${length ? length.toLocaleString() : 'Auto'}`;
+                  uiModule.showToast?.('Context window saved');
+                } catch (_) { uiModule.showToast?.('Failed to save context window'); }
+              });
+            });
+            panel.querySelectorAll('[data-ep-model-detect]').forEach(btn => {
+              btn.addEventListener('click', async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                btn.disabled = true;
+                btn.textContent = 'Checking…';
+                try {
+                  const res = await fetch(`/api/model-endpoints/${encodeURIComponent(epId)}/context-detect`, {
+                    method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model: btn.dataset.epModelDetect }),
+                  });
+                  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                  const result = await res.json();
+                  if (!result.detected) {
+                    uiModule.showToast?.('This provider did not report a model-specific context window. Set it manually.');
+                  } else {
+                    const valueBtn = Array.from(panel.querySelectorAll('[data-ep-model-context]')).find(b => b.dataset.epModelContext === btn.dataset.epModelDetect);
+                    if (valueBtn) {
+                      valueBtn.dataset.contextLength = result.context_length_override;
+                      valueBtn.textContent = `Context: ${Number(result.context_length_override).toLocaleString()}`;
+                    }
+                    uiModule.showToast?.('Detected context window saved');
+                  }
+                } catch (_) { uiModule.showToast?.('Could not detect context window'); }
+                finally { btn.disabled = false; btn.textContent = 'Detect'; }
+              });
             });
             // Per-model image-generation marks. The button lives inside the
             // row <label>, so preventDefault keeps the click from toggling the
