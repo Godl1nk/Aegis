@@ -13,7 +13,7 @@ import markdownModule from './markdown.js';
 import codeRunnerModule from './codeRunner.js';
 import { langIcon } from './langIcons.js';
 import spinnerModule from './spinner.js';
-import { openLibrary, closeLibrary, isLibraryOpen, initLibrary } from './documentLibrary.js';
+import { openLibrary, closeLibrary, isLibraryOpen, initLibrary } from './documentLibrary.js?v=20260926word';
 import signatureModule from './signature.js';
 import * as Modals from './modalManager.js';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';

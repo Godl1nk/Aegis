@@ -12,7 +12,7 @@ import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
 import chatModule from './js/chat.js';
 import compareModule from './js/compare/index.js';
-import documentModule from './js/document.js';
+import documentModule from './js/document.js?v=20260926word';
 import searchChatModule from './js/search-chat.js';
 import { makeWindowDraggable } from './js/windowDrag.js';
 import markdownModule from './js/markdown.js';
