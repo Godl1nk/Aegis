@@ -76,21 +76,18 @@ def _remember_sticky_tool(session_id: Optional[str], tool_name: str) -> None:
     bucket.add(tool_name)
 
 
-# Per-session integrity-gate state (server memory only, never persisted):
-# "bypass" set by a session-scope approval dialog choice, "tainted" carried
-# from a run that saw external untrusted context without approval, so the
-# next run starts armed. Bounded LRU-ish like _SESSION_STICKY_TOOLS. Lost on
-# restart, which fails closed (next run simply re-arms on fresh evidence).
+# Per-session scheduled-task approval state (server memory only, never
+# persisted). Bounded like _SESSION_STICKY_TOOLS; a restart asks again.
 _SESSION_GATE_STATE: "collections.OrderedDict[str, dict]" = collections.OrderedDict()
 _SESSION_GATE_CAP = 256
 
 
 def _gate_session_state(session_id: Optional[str]) -> dict:
     if not session_id:
-        return {"bypass": False, "tainted": False}
+        return {"bypass": False}
     state = _SESSION_GATE_STATE.get(session_id)
     if state is None:
-        state = {"bypass": False, "tainted": False}
+        state = {"bypass": False}
         _SESSION_GATE_STATE[session_id] = state
         while len(_SESSION_GATE_STATE) > _SESSION_GATE_CAP:
             _SESSION_GATE_STATE.popitem(last=False)
@@ -100,11 +97,11 @@ def _gate_session_state(session_id: Optional[str]) -> dict:
 
 
 def _tool_gate_enabled() -> bool:
-    """Kill switch for the post-external-context integrity gate (default on).
+    """Kill switch for scheduled-task creation approval (default on).
 
     Honored so automated contexts (notably the test suite via conftest) can
     run multi-tool flows without a human to click approval dialogs. Yolo
-    sessions bypass per-run instead; this flag removes the gate entirely.
+    sessions bypass per-run instead; this flag removes this approval entirely.
     """
     return os.environ.get("ODYSSEUS_TOOL_GATE", "on").strip().lower() not in (
         "off", "0", "false", "no",
@@ -4010,10 +4007,8 @@ async def stream_agent_loop(
     )
     _awaiting_user = False  # set by ask_user → end the turn and wait for a choice
 
-    # Post-external-context integrity gate (src.tool_capabilities): a
-    # run-local security context that arms once untrusted content (tool
-    # output, wrapped external blocks) enters the run, after which effectful
-    # tools need explicit user authorization via the approval dialog.
+    # Scheduled-task creation approval (src.tool_capabilities). Other tool
+    # calls remain governed by their own policies and command checks.
     # Disabled wholesale by ODYSSEUS_TOOL_GATE=off (automated contexts).
     _tool_gate_ctx = None
     if _tool_gate_enabled():
@@ -4022,8 +4017,6 @@ async def stream_agent_loop(
         _gate_state = _gate_session_state(session_id)
         if _gate_state.get("bypass"):
             _tool_gate_ctx.approval_gate_bypassed = True
-        if _gate_state.get("tainted"):
-            _tool_gate_ctx.external_untrusted_context_seen = True
         _tool_gate_ctx.observe_messages(messages)
         try:
             from src.command_approval import is_session_yolo_enabled
@@ -5179,10 +5172,8 @@ async def stream_agent_loop(
 
                 async def _run_tool():
                     try:
-                        # Integrity gate: after external untrusted context has
-                        # entered this run, effectful tools need explicit user
-                        # authorization (approval dialog when a human is
-                        # watching, fail-closed placeholder otherwise).
+                        # Scheduled-task creation needs an interactive approval
+                        # when a human is watching, or fails closed otherwise.
                         if _tool_gate_ctx is not None:
                             _gate_decision = _tool_gate_ctx.decision_for(
                                 block.tool_type, block.content)
@@ -5214,9 +5205,7 @@ async def stream_agent_loop(
                                     else:
                                         _gate_reason = _gate_wait.get("message") or _gate_reason
                                 if not _gate_proceed:
-                                    logger.info(
-                                        "Tool gate denied %s post-external-context",
-                                        block.tool_type)
+                                    logger.info("Task creation approval denied for %s", block.tool_type)
                                     return (
                                         f"{block.tool_type}: approval required",
                                         {"approval_required": True,
@@ -5232,14 +5221,6 @@ async def stream_agent_loop(
                             progress_cb=_push_progress,
                             workspace=workspace,
                         )
-                        if _tool_gate_ctx is not None:
-                            _tool_gate_ctx.observe_tool_result(
-                                block.tool_type, result, block.content)
-                            if session_id:
-                                _gate_st = _gate_session_state(session_id)
-                                _gate_st["tainted"] = bool(
-                                    _tool_gate_ctx.external_untrusted_context_seen
-                                    and not _tool_gate_ctx.approval_gate_bypassed)
                         return desc, result
                     finally:
                         # Sentinel so the drainer knows to stop.

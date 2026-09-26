@@ -550,21 +550,6 @@ def tool_result_should_arm_gate(
     )
 
 
-POST_EXTERNAL_BLOCKED_EFFECTS = frozenset(
-    {
-        ToolEffect.READ_PRIVATE,
-        ToolEffect.WRITE_WORKSPACE,
-        ToolEffect.WRITE_PRIVATE,
-        ToolEffect.EXECUTE_CODE,
-        ToolEffect.NETWORK_EGRESS,
-        ToolEffect.EXTERNAL_SIDE_EFFECT,
-        ToolEffect.UI_SIDE_EFFECT,
-        ToolEffect.ADMIN_CHANGE,
-        ToolEffect.DESTRUCTIVE,
-    }
-)
-
-
 @dataclass(frozen=True)
 class ToolGateDecision:
     allowed: bool
@@ -652,9 +637,7 @@ class ToolRunSecurityContext:
             self.external_untrusted_context_seen = True
 
     def decision_for(self, tool_name: Any, content: Any = None) -> ToolGateDecision:
-        # Checked before the bypasses below, because neither may lift it, and
-        # kept independent of external_untrusted_context_seen so it holds on a
-        # run where that gate never arms and raises no prompt to bypass.
+        # API-token restrictions remain independent of interactive approval.
         if self.delegated_credential and is_public_blocked_tool(tool_name):
             return ToolGateDecision(
                 False,
@@ -663,24 +646,17 @@ class ToolRunSecurityContext:
                     "It requires an interactive session."
                 ),
             )
+        # The interactive tool card is for scheduled-task creation only.
+        # Other tool effects have their own policy, ownership, and (for shell)
+        # dangerous-command checks; reading external content must not turn a
+        # user-requested memory edit or document action into an approval card.
+        if tool_name != "manage_tasks" or _action_from_content(tool_name, content) != "create":
+            return ToolGateDecision(True)
         if self.approval_gate_bypassed:
             return ToolGateDecision(True)
-        if not self.external_untrusted_context_seen:
-            return ToolGateDecision(True)
-        capabilities = capabilities_for_action(tool_name, content)
-        blocked_effects = capabilities.effects & POST_EXTERNAL_BLOCKED_EFFECTS
-        if capabilities.known and not blocked_effects:
-            return ToolGateDecision(True)
-        effects = ", ".join(sorted(effect.value for effect in blocked_effects))
-        if not capabilities.known:
-            effects = "unknown/high-impact"
         return ToolGateDecision(
             False,
-            (
-                "External untrusted context has already influenced this run. "
-                f"Tool '{tool_name}' requires a separate user-authorized action "
-                f"because it can cause {effects}."
-            ),
+            "Creating a scheduled task requires your approval.",
         )
 
     def observe_tool_result(
