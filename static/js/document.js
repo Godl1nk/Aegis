@@ -2065,7 +2065,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const visible = vis('doc-stream-indicator')
       || vis('doc-version-badge')
       || vis('doc-export-pdf-btn')
-      || vis('doc-pdf-view-btn');
+      || vis('doc-pdf-view-btn')
+      || vis('doc-word-view-btn');
     hdr.style.display = visible ? '' : 'none';
   }
 
@@ -2074,6 +2075,29 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const exportBtn = document.getElementById('doc-export-pdf-btn');
     const pdfViewBtn = document.getElementById('doc-pdf-view-btn');
     const pdfPane = document.getElementById('doc-pdf-view');
+    const wordPane = document.getElementById('doc-word-view');
+    const wordButton = document.getElementById('doc-word-view-btn');
+    const wordDoc = docs.get(activeDocId);
+    const isWord = wordDoc?.language === 'docx' && /^<!-- word_source upload_id="[^"]+" -->/.test(wordDoc.content || '');
+    if (wordButton) {
+      wordButton.style.display = isWord ? '' : 'none';
+      wordButton.textContent = wordDoc?._wordSourceVisible ? 'View pages' : 'Edit text';
+    }
+    if (wordPane) {
+      const showWord = isWord && !wordDoc._wordSourceVisible;
+      const wrap = document.getElementById('doc-editor-wrap');
+      wordPane.style.display = showWord ? '' : 'none';
+      if (showWord) {
+        if (wrap) wrap.style.display = 'none';
+        const frame = wordPane.querySelector('iframe');
+        if (frame && frame.dataset.docId !== activeDocId) {
+          frame.src = `${API_BASE}/api/document/${activeDocId}/render-docx?t=${Date.now()}`;
+          frame.dataset.docId = activeDocId;
+        }
+      } else if (isWord && wrap) {
+        wrap.style.display = '';
+      }
+    }
     const langSelect = document.getElementById('doc-language-select');
     const live = document.getElementById('doc-editor-textarea')?.value
       || docs.get(activeDocId)?.content
@@ -4482,6 +4506,12 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     }
     const pdfView = document.getElementById('doc-pdf-view');
     if (pdfView) pdfView.style.display = 'none';
+    const wordView = document.getElementById('doc-word-view');
+    if (wordView) {
+      wordView.style.display = 'none';
+      const frame = wordView.querySelector('iframe');
+      if (frame) { frame.removeAttribute('src'); delete frame.dataset.docId; }
+    }
     const wrap = document.getElementById('doc-editor-wrap');
     if (wrap) wrap.style.display = '';
   }
@@ -4878,6 +4908,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         <span style="flex:1"></span>
         <button id="doc-export-pdf-btn" class="doc-action-icon-btn" title="Export PDF" style="display:none;opacity:0.7;gap:4px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 18 15 15"/></svg> <span style="font-size:11px;">Export PDF</span></button>
         <button id="doc-pdf-view-btn" class="doc-action-icon-btn" title="Toggle PDF view" style="display:none;opacity:0.7;gap:4px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> <span style="font-size:11px;">PDF</span></button>
+        <button id="doc-word-view-btn" class="doc-action-icon-btn" title="Switch between page preview and text editing" style="display:none;">Edit text</button>
         <select id="doc-language-select" class="doc-language-select">
           <option value="python">python</option>
           <option value="javascript">javascript</option>
@@ -5020,6 +5051,9 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       <iframe id="doc-html-preview" class="doc-html-preview" sandbox="allow-scripts allow-modals" style="display:none"></iframe>
       <div id="doc-pdf-view" style="display:none;width:100%;flex:1;min-height:0;overflow:auto;background:#525659;padding:20px 0;position:relative;">
         <div id="doc-pdf-save-pill" style="display:none;position:absolute;top:8px;right:14px;padding:4px 10px;border-radius:12px;font-size:11px;z-index:5;pointer-events:none;background:transparent;color:transparent;"></div>
+      </div>
+      <div id="doc-word-view" style="display:none;width:100%;flex:1;min-height:0;background:#525659;">
+        <iframe title="Word document pages" style="width:100%;height:100%;border:0;"></iframe>
       </div>
       <!-- Action footer sits AFTER all the content/preview panes so it stays
            pinned to the bottom no matter which pane (editor / md-preview /
@@ -5795,6 +5829,18 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       const pane = document.getElementById('doc-pdf-view');
       const visible = pane && pane.style.display !== 'none';
       _setPdfViewActive(!visible);
+    });
+    document.getElementById('doc-word-view-btn')?.addEventListener('click', async () => {
+      const doc = docs.get(activeDocId);
+      if (!doc || doc.language !== 'docx') return;
+      if (doc._wordSourceVisible) {
+        await saveDocument({ silent: true });
+        const frame = document.querySelector('#doc-word-view iframe');
+        if (frame) { frame.removeAttribute('src'); delete frame.dataset.docId; }
+      }
+      doc._wordSourceVisible = !doc._wordSourceVisible;
+      _syncHeaderActions();
+      _syncHeaderBarVisibility();
     });
 
     // Toolbar buttons toggle: clicking the active mode clears it. Otherwise

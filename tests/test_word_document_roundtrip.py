@@ -59,6 +59,7 @@ def test_word_import_edit_and_export_route_keeps_original_layout(tmp_path, monke
     from core.database import Base
     from routes import document_routes
     from src.upload_handler import UploadHandler
+    from src import word_preview
 
     engine = create_engine(f"sqlite:///{tmp_path / 'documents.db'}")
     Base.metadata.create_all(engine)
@@ -68,6 +69,11 @@ def test_word_import_edit_and_export_route_keeps_original_layout(tmp_path, monke
     app = FastAPI()
     app.include_router(document_routes.setup_document_routes(None, UploadHandler(str(tmp_path), str(tmp_path / 'uploads'))))
     original = _sample_word()
+    previewed = []
+    def fake_preview(word_bytes):
+        previewed.append(word_bytes)
+        return b"%PDF-1.4\n%%EOF"
+    monkeypatch.setattr(word_preview, "render_word_pdf", fake_preview)
 
     with TestClient(app) as client:
         imported = client.post('/api/documents/import-docx', files={"file": ("Report.docx", original)} )
@@ -75,6 +81,11 @@ def test_word_import_edit_and_export_route_keeps_original_layout(tmp_path, monke
         document = imported.json()
         doc_id = document['id']
         assert client.get(f'/api/document/{doc_id}/export-docx').content == original
+        initial_preview = client.get(f'/api/document/{doc_id}/render-docx')
+        assert initial_preview.status_code == 200
+        assert initial_preview.headers['content-type'] == 'application/pdf'
+        assert initial_preview.headers['cache-control'] == 'private, no-store'
+        assert previewed[-1] == original
 
         edited = document['current_content'].replace('Revenue increased', 'Sales increased')
         saved = client.put(f'/api/document/{doc_id}', json={"content": edited})
@@ -84,6 +95,9 @@ def test_word_import_edit_and_export_route_keeps_original_layout(tmp_path, monke
         result = Document(io.BytesIO(exported.content))
         assert result.paragraphs[1].text == 'Sales increased'
         assert result.paragraphs[1].runs[1].bold
+        edited_preview = client.get(f'/api/document/{doc_id}/render-docx')
+        assert edited_preview.status_code == 200
+        assert previewed[-1] == exported.content
 
         unsafe = client.put(f'/api/document/{doc_id}', json={"content": edited + '\nNew paragraph'})
         assert unsafe.status_code == 422

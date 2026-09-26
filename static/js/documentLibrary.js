@@ -960,12 +960,14 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
       // PDF-backed docs have a marker comment in their markdown — show the
       // rendered PDF in an iframe instead of dumping markdown source.
       const isPdfDoc = /<!--\s*pdf_(?:form_)?source\s+upload_id="[^"]+"/.test(content);
+      const isWordDoc = lang === 'docx' && /<!--\s*word_source\s+upload_id="[^"]+"/.test(content);
       const existingFrame = preview.querySelector('.doclib-card-pdf-frame');
 
-      if (isPdfDoc) {
+      if (isPdfDoc || isWordDoc) {
         const frame = document.createElement('iframe');
         frame.className = 'doclib-card-pdf-frame';
-        frame.src = `${API_BASE}/api/document/${doc.id}/render-pdf?t=${Date.now()}`;
+        frame.title = isWordDoc ? 'Word document preview' : 'PDF document preview';
+        frame.src = `${API_BASE}/api/document/${doc.id}/${isWordDoc ? 'render-docx' : 'render-pdf'}?t=${Date.now()}`;
         frame.style.cssText = 'width:100%;height:60vh;border:1px solid var(--border);border-radius:6px;background:var(--bg);opacity:0;transition:opacity 0.15s ease;';
         if (existingPre) existingPre.remove();
         if (existingFrame) existingFrame.remove();

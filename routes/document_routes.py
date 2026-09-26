@@ -394,6 +394,42 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         finally:
             db.close()
 
+    @router.get("/api/document/{doc_id}/render-docx")
+    async def render_docx(doc_id: str, request: Request):
+        """Render the current, safely edited Word file as an inline PDF."""
+        import asyncio
+        from fastapi.responses import Response
+        from src.word_document import UnsafeWordEdit, render_document_edit
+        from src.word_preview import WordPreviewUnavailable, render_word_pdf
+
+        user = get_current_user(request)
+        db = SessionLocal()
+        try:
+            doc = db.query(Document).filter(Document.id == doc_id).first()
+            if not doc:
+                raise HTTPException(404, "Document not found")
+            _verify_doc_owner(db, doc, user)
+            if doc.language != "docx" or upload_handler is None:
+                raise HTTPException(400, "Document is not an imported Word file")
+            try:
+                word_bytes = render_document_edit(
+                    db, doc, doc.current_content, upload_handler, user,
+                    getattr(request.app.state, "auth_manager", None),
+                )
+            except UnsafeWordEdit as exc:
+                raise HTTPException(422, str(exc)) from exc
+        finally:
+            db.close()
+        try:
+            pdf_bytes = await asyncio.to_thread(render_word_pdf, word_bytes)
+        except WordPreviewUnavailable as exc:
+            logger.warning("Word preview failed for %s: %s", doc_id, exc)
+            raise HTTPException(503, str(exc)) from exc
+        return Response(pdf_bytes, media_type="application/pdf",
+                        headers={"Content-Disposition": "inline; filename=preview.pdf",
+                                 "Cache-Control": "private, no-store",
+                                 "X-Content-Type-Options": "nosniff"})
+
     # ---- GET /api/documents/library ----
     @router.get("/api/documents/library")
     async def documents_library(

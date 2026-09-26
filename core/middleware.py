@@ -104,8 +104,12 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
         # Tool render endpoints
         is_tool_render = path.startswith("/api/tools/") and path.endswith("/render")
-        # Document library PDF preview endpoint
-        is_document_pdf_preview = path.startswith("/api/document/") and path.endswith("/render-pdf")
+        # Document page previews are embedded only by this same-origin UI.
+        is_document_pdf_preview = (
+            path.startswith("/api/document/")
+            and len(path.split("/")) == 5
+            and path.rsplit("/", 1)[-1] in {"render-pdf", "render-docx"}
+        )
         # Visual report pages are self-contained HTML — need inline scripts + external images
         is_report = path.startswith("/api/research/report/")
 

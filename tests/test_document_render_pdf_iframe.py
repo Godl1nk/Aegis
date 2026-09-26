@@ -62,6 +62,12 @@ async def test_doc_render_pdf_same_origin_framing():
     assert "frame-ancestors 'self'" in csp
 
 
+async def test_doc_render_word_same_origin_framing():
+    resp = await _dispatch("/api/document/abc-123/render-docx")
+    assert resp.headers.get("X-Frame-Options") == "SAMEORIGIN"
+    assert "frame-ancestors 'self'" in resp.headers.get("Content-Security-Policy", "")
+
+
 async def test_doc_render_pdf_keeps_baseline_security_headers():
     """Assert that baseline security headers are preserved on the render-pdf path."""
     resp = await _dispatch("/api/document/abc-123/render-pdf")
@@ -84,6 +90,8 @@ async def test_doc_path_matching_is_precise():
         "/api/document/abc-123/render-pdfx",
         "/api/document/abc-123/render-pdf/foo",
         "/api/documents/abc-123/render-pdf",
+        "/api/document/abc-123/render-docxx",
+        "/api/documents/abc-123/render-docx",
     ]:
         resp = await _dispatch(path)
         assert resp.headers.get("X-Frame-Options") == "DENY"
