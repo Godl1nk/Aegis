@@ -36,14 +36,18 @@ def session_context_usage(session):
                       usage_source=metadata.get("context_usage_source", metadata.get("usage_source", "real")), basis="request",
                       trimmed=bool(metadata.get("context_trimmed")))
     elif (latest.get("role") == "assistant" and metadata.get("requested_model") == session.model
-          and metadata.get("model") != session.model
-          and isinstance(context_tokens, (int, float)) and context_tokens > 0):
-        # A fallback's request count cannot be divided by the selected model's
-        # window. Keep the composer on saved history, but expose the last
-        # reply's input count so the two meters can be explained together.
-        result["last_request"] = {
-            "input_tokens": context_tokens,
-            "model": metadata.get("model"),
-            "context_percent": metadata.get("context_percent"),
-        }
+          and isinstance(metadata.get("model"), str) and metadata["model"] != session.model
+          and isinstance(context_tokens, (int, float)) and context_tokens > 0
+          and isinstance(output_tokens, (int, float)) and output_tokens >= 0):
+        # The last reply used a fallback model. Its request count is still the
+        # useful measurement, but resolve that model's own window rather than
+        # dividing by the currently selected model's window.
+        actual_model = metadata["model"]
+        actual_length, actual_known = get_context_length_known(session.endpoint_url, actual_model)
+        result.update(model=actual_model, requested_model=session.model,
+                      context_length=actual_length if actual_known else None,
+                      context_length_known=actual_known,
+                      used_tokens=context_tokens + output_tokens,
+                      usage_source=metadata.get("context_usage_source", metadata.get("usage_source", "real")),
+                      basis="request", trimmed=bool(metadata.get("context_trimmed")))
     return result

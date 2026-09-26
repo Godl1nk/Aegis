@@ -85,21 +85,38 @@ def test_reload_uses_latest_request_not_cumulative_billing(monkeypatch):
     assert context_usage.session_context_usage(s)["basis"] == "history"
 
 
-def test_fallback_request_is_shown_separately_from_selected_model_window(monkeypatch):
-    monkeypatch.setattr(context_usage, "get_context_length_known", lambda *a: (131072, True))
+def test_fallback_request_uses_its_own_model_window(monkeypatch):
+    lookups = []
+    def context_for(endpoint, model):
+        lookups.append(model)
+        return (131072, True) if model == "qwen" else (32768, True)
+    monkeypatch.setattr(context_usage, "get_context_length_known", context_for)
     s = session([ChatMessage("user", "hello"), ChatMessage("assistant", "Hi!", {
         "requested_model": "qwen", "model": "qwen-fallback",
         "context_tokens": 5045, "context_output_tokens": 12,
         "context_percent": 3.8, "context_length": 131072,
     })])
     result = context_usage.session_context_usage(s)
-    assert result["basis"] == "history"
-    assert result["used_tokens"] == estimate_tokens(s.get_context_messages())
-    assert result["last_request"] == {
-        "input_tokens": 5045, "model": "qwen-fallback", "context_percent": 3.8,
-    }
+    assert result["basis"] == "request"
+    assert result["used_tokens"] == 5057
+    assert result["model"] == "qwen-fallback"
+    assert result["requested_model"] == "qwen"
+    assert result["context_length"] == 32768
+    assert lookups == ["qwen", "qwen-fallback"]
     s.model = "another-model"
-    assert "last_request" not in context_usage.session_context_usage(s)
+    assert context_usage.session_context_usage(s)["basis"] == "history"
+
+
+def test_fallback_window_unknown_does_not_reuse_selected_window(monkeypatch):
+    monkeypatch.setattr(context_usage, "get_context_length_known",
+                        lambda _endpoint, model: (131072, True) if model == "qwen" else (128000, False))
+    s = session([ChatMessage("assistant", "answer", {
+        "requested_model": "qwen", "model": "other", "context_tokens": 5000,
+    })])
+    result = context_usage.session_context_usage(s)
+    assert result["used_tokens"] == 5000
+    assert result["context_length"] is None
+    assert result["context_length_known"] is False
 
 
 def test_compaction_snapshot_uses_reduced_history(monkeypatch):

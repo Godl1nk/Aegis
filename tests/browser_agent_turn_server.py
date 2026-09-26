@@ -63,12 +63,17 @@ def context_page():
 async def context_info(session_id: str):
     if session_id == "slow":
         await asyncio.sleep(0.3)
+    if session_id == "fallback":
+        return {
+            "model": "Qwen-QA-fallback", "requested_model": "Qwen-QA",
+            "used_tokens": 5057, "context_length": 131072,
+            "context_length_known": True, "basis": "request", "usage_source": "real",
+        }
     return {
-        "model": "Qwen-QA", "used_tokens": 102 if session_id == "fallback" else 1000 if session_id == "compacted" else 2000,
-        "context_length": None if session_id == "unknown" else 131072 if session_id == "fallback" else 10000,
+        "model": "Qwen-QA", "used_tokens": 1000 if session_id == "compacted" else 2000,
+        "context_length": None if session_id == "unknown" else 10000,
         "context_length_known": session_id != "unknown", "basis": "history",
         "usage_source": "estimated", "compacted": session_id == "compacted", "compact_threshold": 0.85,
-        "last_request": {"input_tokens": 5045, "model": "Qwen-QA-fallback", "context_percent": 3.8} if session_id == "fallback" else None,
     }
 
 

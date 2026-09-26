@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { contextPercentLabel, contextView, mergeDiscoverySnapshot, sanitizeUsageData, sameContextSelection } from '../static/js/contextUsage.js';
+import { contextPercentLabel, contextView, mergeDiscoverySnapshot, mergeStreamingSnapshot, sanitizeUsageData, sameContextSelection } from '../static/js/contextUsage.js';
 
 test('model window changes match only the selected endpoint and model', () => {
   const selected = { sessionId: 's', model: 'm', endpointUrl: 'http://host/v1/chat/completions' };
@@ -77,4 +77,15 @@ test('positive counts always replace', () => {
   const prev = { used_tokens: 6500, model: 'm' };
   assert.equal(sanitizeUsageData(prev, { used_tokens: 6600, model: 'm' }).used_tokens, 6600);
   assert.equal(sanitizeUsageData(null, { used_tokens: 100, model: 'm' }).used_tokens, 100);
+});
+
+test('streaming model switch drops the previous model window', () => {
+  const fallback = { model: 'fallback', used_tokens: 5057, context_length: 32768, context_length_known: true };
+  const selected = mergeStreamingSnapshot(fallback, { model: 'qwen', used_tokens: 6000, basis: 'request' });
+  assert.equal(selected.model, 'qwen');
+  assert.equal(selected.context_length, null);
+  assert.equal(selected.context_length_known, false);
+  assert.equal(contextView(selected).percent, null);
+  const discovered = mergeStreamingSnapshot(selected, { model: 'qwen', context_length: 131072, context_length_known: true });
+  assert.equal(discovered.context_length, 131072);
 });

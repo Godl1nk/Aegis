@@ -67,19 +67,23 @@ async function checks() {
   assert(!document.getElementById('composer-context-details'), 'Escape failed');
   button.blur();
   select('fallback');
-  await waitFor(() => button.textContent.includes('<1%'));
-  assert(button.getAttribute('aria-label').includes('Saved chat: ~102 tokens'), 'Fallback history label missing');
+  await waitFor(() => button.textContent.includes('4%'));
+  assert(button.getAttribute('aria-label').includes('Last request (fallback model): 5,057 tokens'), 'Fallback request label missing');
   button.dispatchEvent(new MouseEvent('mouseenter'));
   await waitFor(() => document.getElementById('composer-context-details'));
   const details = document.getElementById('composer-context-details').textContent;
-  assert(details.includes('Last reply used 5,045 input tokens (4% shown)'), 'Fallback reply usage not explained');
+  assert(details.includes('A fallback model answered (Qwen-QA-fallback)'), 'Fallback model not explained');
   assert(!details.includes('tokens remaining'), 'History must not claim exact remaining capacity');
   document.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape'}));
+  history.replaceState(null, '', '#6c5db906-46c7-465d-bc28-1f0f031e8f4f');
   setContextSession({sessionId: null, model: 'Qwen-QA', endpointUrl: 'http://offline'});
-  assert(button.textContent.trim() === '—', 'New chat retained old percentage');
+  assert(button.getAttribute('aria-label') === 'Loading chat context…', 'Restoring chat shown as new');
+  history.replaceState(null, '', location.pathname);
+  setContextSession(null);
+  assert(button.getAttribute('aria-label') === 'Context usage available after starting a chat', 'New chat retained old context');
   select('known');
   await waitFor(() => button.textContent.includes('20%'));
-  status.textContent = 'PASS: hover, mouse-out, no-click, keyboard focus, Escape, draft, warnings, isolation, races, unknown limit, compaction, fallback explanation, new chat';
+  status.textContent = 'PASS: hover, mouse-out, no-click, keyboard focus, Escape, draft, warnings, isolation, races, unknown limit, compaction, fallback context, new chat';
 }
 for (const [label, action] of [
   ['Run checks', checks], ['Known model', () => select('known')], ['Unknown limit', () => select('unknown')],

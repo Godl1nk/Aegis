@@ -79,13 +79,16 @@ function scheduleClose() {
 function render() {
   const button = document.getElementById('composer-context');
   if (!button) return;
-  const view = contextView(snapshot, document.getElementById('message')?.value || '');
+  const fallbackRequest = snapshot?.basis === 'request' && snapshot?.model && snapshot.model !== selection?.model;
+  const view = contextView(snapshot, fallbackRequest ? '' : (document.getElementById('message')?.value || ''));
   const available = snapshot != null;
   button.dataset.level = view.level;
   button.style.setProperty('--context-fill', Math.min(view.percent || 0, 100));
   button.querySelector('.context-percent').textContent = view.percent == null ? '—' : contextPercentLabel(view.percent);
-  const scope = snapshot?.basis === 'request' ? 'Last request' : 'Saved chat';
-  const label = !selection?.sessionId ? 'Context usage available after starting a chat'
+  const scope = fallbackRequest ? 'Last request (fallback model)'
+    : snapshot?.basis === 'request' ? 'Last request' : 'Saved chat';
+  const restoringChat = !selection?.sessionId && /^#[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(window.location.hash);
+  const label = !selection?.sessionId ? (restoringChat ? 'Loading chat context…' : 'Context usage available after starting a chat')
     : !available ? 'Context usage unavailable'
     : `${scope}: ${view.estimated ? '~' : ''}${fmt(view.used)} tokens${view.limit ? ` / ${fmt(view.limit)} (${contextPercentLabel(view.percent)} used)` : ' — model limit unknown'}`;
   button.setAttribute('aria-label', label);
@@ -108,7 +111,7 @@ function render() {
       add(`Last reply used ${fmt(number(prior.input_tokens))} input tokens${percent > 0 && Number.isFinite(percent) ? ` (${contextPercentLabel(percent)} shown)` : ''}${model ? ` with ${model}` : ''}.`, 'context-note');
     }
     add(snapshot.basis === 'request'
-      ? 'Last prepared request, including its response output when available. The next request may differ.'
+      ? `${fallbackRequest ? `A fallback model answered (${String(snapshot.model).split('/').pop()}). ` : ''}Last prepared request, including its response output when available. The next request may differ.`
       : 'Saved chat only. The reply footer measures its prepared request; instructions, tools, retrieved content and attachments can make it much larger.', 'context-note');
     const _autoParts = [
       snapshot.compact_threshold ? `at about ${Math.round(number(snapshot.compact_threshold) * 100)}% usage` : null,
@@ -259,17 +262,20 @@ export function sanitizeUsageData(prevSnapshot, data) {
   return data;
 }
 
+export function mergeStreamingSnapshot(prevSnapshot, data) {
+  if (prevSnapshot?.model && data?.model && prevSnapshot.model !== data.model) {
+    // A fresh request switched between selected and fallback models. The old
+    // window must never be reused for the new model's token count.
+    return { ...data, context_length: data.context_length_known ? data.context_length : null,
+      context_length_known: !!data.context_length_known };
+  }
+  return { ...prevSnapshot, ...data };
+}
+
 export function updateContextUsage(sessionId, data) {
   if (!selection?.sessionId || sessionId !== selection.sessionId || !data) return;
   data = sanitizeUsageData(snapshot, data);
-  if (data.model && data.model !== selection.model && data.model !== snapshot?.model) {
-    // Never combine a fallback model's token count with the selected model's limit.
-    snapshot = { ...data, context_length: null, context_length_known: false };
-    revision++;
-    render();
-    return;
-  }
-  snapshot = { ...snapshot, ...data };
+  snapshot = mergeStreamingSnapshot(snapshot, data);
   revision++;
   render();
 }
