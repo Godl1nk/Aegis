@@ -1,4 +1,5 @@
 import io
+import zipfile
 
 import pytest
 from docx import Document
@@ -44,6 +45,19 @@ def test_safe_text_edit_keeps_styles_tables_and_header():
     assert result.sections[0].header.paragraphs[0].text == "Confidential"
 
 
+def test_word_edit_changes_only_main_document_package_part():
+    original = _sample_word()
+    content = import_content(original, UPLOAD_ID)
+    edited = render_edited_word(original, content, content.replace('Revenue', 'Sales'))
+    with zipfile.ZipFile(io.BytesIO(original)) as before, zipfile.ZipFile(io.BytesIO(edited)) as after:
+        assert before.namelist() == after.namelist()
+        for name in before.namelist():
+            if name == 'word/document.xml':
+                assert before.read(name) != after.read(name)
+            else:
+                assert before.read(name) == after.read(name)
+
+
 def test_cross_style_edit_preserves_other_document_objects():
     original = _sample_word()
     content = import_content(original, UPLOAD_ID)
@@ -68,6 +82,82 @@ def test_filling_empty_paragraph_preserves_document():
         original, content, content.replace('Heading\n', 'Heading\nCompleted')
     )))
     assert [p.text for p in result.paragraphs] == ['Heading', 'Completed']
+
+
+def test_new_logbook_lines_stay_inside_their_table_cell():
+    document = Document()
+    table = document.add_table(rows=2, cols=1)
+    table.cell(0, 0).paragraphs[0].text = 'Contents :'
+    table.cell(1, 0).paragraphs[0].text = 'Next week'
+    stream = io.BytesIO()
+    document.save(stream)
+    original = stream.getvalue()
+    content = import_content(original, UPLOAD_ID)
+    edited = content.replace('Contents :\n', 'Contents :\nDay 1: Safety induction\nDay 2: Unit tour\n')
+    result = Document(io.BytesIO(render_edited_word(original, content, edited)))
+    assert len(result.tables[0].rows) == 2
+    assert [p.text for p in result.tables[0].cell(0, 0).paragraphs] == [
+        'Contents :', 'Day 1: Safety induction', 'Day 2: Unit tour'
+    ]
+    assert result.tables[0].cell(1, 0).text == 'Next week'
+
+
+def test_new_line_after_repeated_logbook_heading_uses_selected_cell():
+    document = Document()
+    table = document.add_table(rows=2, cols=1)
+    table.cell(0, 0).paragraphs[0].text = 'Contents :'
+    table.cell(1, 0).paragraphs[0].text = 'Contents :'
+    document.add_paragraph('End')
+    stream = io.BytesIO()
+    document.save(stream)
+    original = stream.getvalue()
+    content = import_content(original, UPLOAD_ID)
+    edited = content.replace('Contents :\nEnd', 'Contents :\nDay 2 note\nEnd')
+    result = Document(io.BytesIO(render_edited_word(original, content, edited)))
+    assert result.tables[0].cell(0, 0).text == 'Contents :'
+    assert [p.text for p in result.tables[0].cell(1, 0).paragraphs] == [
+        'Contents :', 'Day 2 note'
+    ]
+
+
+def test_edit_and_insert_lines_in_same_word_paragraph_position():
+    document = Document()
+    document.add_paragraph('Objective(s):')
+    document.add_paragraph('Contents :')
+    document.add_paragraph('Next week')
+    stream = io.BytesIO()
+    document.save(stream)
+    original = stream.getvalue()
+    content = import_content(original, UPLOAD_ID)
+    edited = content.replace('Contents :\n', 'Contents: Practice P&IDs\nLearned process flow\n')
+    result = Document(io.BytesIO(render_edited_word(original, content, edited)))
+    assert [p.text for p in result.paragraphs] == [
+        'Objective(s):', 'Contents: Practice P&IDs', 'Learned process flow', 'Next week'
+    ]
+
+
+def test_inserting_lines_before_first_paragraph_keeps_order():
+    document = Document()
+    document.add_paragraph('Existing')
+    stream = io.BytesIO()
+    document.save(stream)
+    original = stream.getvalue()
+    content = import_content(original, UPLOAD_ID)
+    edited = content.replace('Existing', 'First\nSecond\nExisting')
+    result = Document(io.BytesIO(render_edited_word(original, content, edited)))
+    assert [p.text for p in result.paragraphs] == ['First', 'Second', 'Existing']
+
+
+def test_adding_lines_to_empty_word_document():
+    document = Document()
+    stream = io.BytesIO()
+    document.save(stream)
+    original = stream.getvalue()
+    content = import_content(original, UPLOAD_ID)
+    result = Document(io.BytesIO(render_edited_word(
+        original, content, content + 'First\nSecond'
+    )))
+    assert [p.text for p in result.paragraphs] == ['First', 'Second']
 
 
 def test_edit_touching_word_tab_is_rejected():

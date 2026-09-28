@@ -2167,6 +2167,13 @@ def _build_system_prompt(
                     f'multiple <<<FIND>>>...<<<REPLACE>>>...<<<END>>> blocks. Do NOT make many separate '
                     f'edit_document calls — one call with several blocks is faster and avoids flooding the UI.'
                 )
+                if (active_document.language or '').lower() == 'docx':
+                    doc_ctx += (
+                        '\nFor this Word template, add lines with edit_document by replacing a '
+                        'specific existing line or short block with that same text followed by the '
+                        'new lines. Include nearby unique text in FIND when headings repeat, so the '
+                        'entry lands in the intended table cell. Keep the word_source marker intact.'
+                    )
                 if _document_writing_style:
                     doc_ctx += (
                         "\n\nDOCUMENT WRITING STYLE — use only for normal prose writing/revision in this "
