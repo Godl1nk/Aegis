@@ -26,7 +26,7 @@ import tasksModule from './js/tasks.js?v=20260923tasksteps';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
 import humanizeModule from './js/humanize.js';
-import adminModule from './js/admin.js';
+import adminModule from './js/admin.js?v=20260928thinking';
 import settingsModule from './js/settings.js';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js';

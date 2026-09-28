@@ -1005,6 +1005,7 @@ async function initReasoningEffortSettings() {
         }),
       });
       if (!res.ok) throw new Error('HTTP ' + res.status);
+      window.dispatchEvent(new CustomEvent('odysseus:reasoning-effort-changed', { detail: { source: 'settings' } }));
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
       setTimeout(() => { msg.textContent = ''; }, 1500);
     } catch (e) {
@@ -1106,6 +1107,19 @@ async function initReasoningEffortSettings() {
     overrides = (stored && typeof stored === 'object' && !Array.isArray(stored)) ? { ...stored } : {};
     await renderRows();
   } catch (e) { console.warn('Failed to load thinking effort settings', e); }
+
+  window.addEventListener('odysseus:reasoning-effort-changed', async (event) => {
+    if (event.detail?.source === 'settings') return;
+    try {
+      const res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+      if (!res.ok) return;
+      const settings = await res.json();
+      defSel.value = settings.reasoning_effort_default || 'auto';
+      const stored = settings.reasoning_effort_by_model;
+      overrides = stored && typeof stored === 'object' && !Array.isArray(stored) ? { ...stored } : {};
+      await renderRows();
+    } catch (_) { /* keep the current controls if refresh fails */ }
+  });
 
   defSel.addEventListener('change', save);
   if (addBtn) addBtn.addEventListener('click', async () => {

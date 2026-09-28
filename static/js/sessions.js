@@ -6,7 +6,7 @@ import uiModule, { autoResize, styledPrompt } from './ui.js';
 import chatRenderer from './chatRenderer.js';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js';
-import effortPickerModule, { initEffortPicker } from './effortPicker.js';
+import effortPickerModule, { initEffortPicker } from './effortPicker.js?v=20260928thinking';
 import themeModule from './theme.js';
 import spinnerModule from './spinner.js';
 import workspaceModule from './workspace.js';

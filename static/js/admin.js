@@ -750,6 +750,7 @@ async function loadEndpoints() {
                 <span>${esc(m.display)}</span>
                 <button type="button" class="adm-model-context-btn" data-ep-model-context="${esc(m.id)}" data-context-length="${m.context_length_override || ''}" title="Set this model's serving context window (tokens). Empty value restores automatic behavior.">Context: ${m.context_length_override ? Number(m.context_length_override).toLocaleString() : 'Auto'}</button>
                 <button type="button" class="adm-model-context-btn" data-ep-model-detect="${esc(m.id)}" title="Detect this model's reported context window">Detect</button>
+                <button type="button" class="adm-model-context-btn" data-ep-model-thinking="${esc(m.id)}" title="Set thinking effort for this model">Thinking: Default</button>
                 <button type="button" class="adm-model-img-btn${m.is_image ? ' active' : ''}" data-ep-model-img="${esc(m.id)}" title="${m.is_image ? 'Marked as image-generation model — click to unmark' : 'Mark as image-generation model (appears in the image-model picker)'}" aria-pressed="${m.is_image ? 'true' : 'false'}">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
                 </button>
@@ -836,6 +837,92 @@ async function loadEndpoints() {
                   }
                 } catch (_) { uiModule.showToast?.('Could not detect context window'); }
                 finally { btn.disabled = false; btn.textContent = 'Detect'; }
+              });
+            });
+            const thinkingLabels = { inherit: 'Default', auto: 'Auto', off: 'Off', low: 'Low', medium: 'Medium', high: 'High' };
+            const paintThinking = (model, value) => {
+              panel.querySelectorAll('[data-ep-model-thinking]').forEach(btn => {
+                if (btn.dataset.epModelThinking === model) btn.textContent = `Thinking: ${thinkingLabels[value] || 'Default'}`;
+              });
+            };
+            fetch('/api/auth/settings', { credentials: 'same-origin' }).then(async res => {
+              if (!res.ok) return;
+              const settings = await res.json();
+              const stored = settings.reasoning_effort_by_model || {};
+              panel.querySelectorAll('[data-ep-model-thinking]').forEach(btn => {
+                const value = Object.entries(stored).find(([key]) => key.toLowerCase() === btn.dataset.epModelThinking.toLowerCase())?.[1];
+                paintThinking(btn.dataset.epModelThinking, value || 'inherit');
+              });
+            }).catch(() => {});
+            panel.querySelectorAll('[data-ep-model-thinking]').forEach(btn => {
+              btn.addEventListener('click', async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const model = btn.dataset.epModelThinking;
+                btn.disabled = true;
+                try {
+                  const [controlRes, settingsRes] = await Promise.all([
+                    fetch(`/api/models/reasoning-control?model=${encodeURIComponent(model)}&endpoint_id=${encodeURIComponent(epId)}`, { credentials: 'same-origin' }),
+                    fetch('/api/auth/settings', { credentials: 'same-origin' }),
+                  ]);
+                  if (!controlRes.ok || !settingsRes.ok) throw new Error('Could not load thinking settings');
+                  const control = await controlRes.json();
+                  const settings = await settingsRes.json();
+                  if (!control.mechanism) {
+                    uiModule.showToast?.('This model has no known thinking-effort control');
+                    btn.disabled = false;
+                    return;
+                  }
+                  const stored = settings.reasoning_effort_by_model;
+                  const overrides = stored && typeof stored === 'object' && !Array.isArray(stored) ? { ...stored } : {};
+                  const previousKey = Object.keys(overrides).find(key => key.toLowerCase() === model.toLowerCase());
+                  const current = previousKey ? overrides[previousKey] : 'inherit';
+                  const choices = [['inherit', 'Use default'], ['auto', 'Auto (provider default)'], ['off', 'Off'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High']];
+                  const supported = Array.isArray(control.supported) ? control.supported : [];
+                  const select = document.createElement('select');
+                  select.className = 'admin-btn-sm';
+                  select.setAttribute('aria-label', `Thinking effort for ${model}`);
+                  choices.filter(([value]) => value === 'inherit' || supported.includes(value)).forEach(([value, label]) => {
+                    const option = document.createElement('option');
+                    option.value = value;
+                    option.textContent = label;
+                    select.appendChild(option);
+                  });
+                  select.value = Array.from(select.options).some(option => option.value === current) ? current : 'inherit';
+                  btn.hidden = true;
+                  btn.after(select);
+                  const close = () => { select.remove(); btn.hidden = false; btn.disabled = false; };
+                  select.addEventListener('blur', () => { if (!select.disabled) close(); }, { once: true });
+                  select.addEventListener('keydown', (event) => {
+                    if (event.key === 'Escape') { event.preventDefault(); close(); btn.focus(); }
+                  });
+                  select.addEventListener('change', async () => {
+                    select.disabled = true;
+                    const value = select.value;
+                    try {
+                      const latestRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+                      if (!latestRes.ok) throw new Error(`HTTP ${latestRes.status}`);
+                      const latest = (await latestRes.json()).reasoning_effort_by_model;
+                      const next = latest && typeof latest === 'object' && !Array.isArray(latest) ? { ...latest } : {};
+                      const latestKey = Object.keys(next).find(key => key.toLowerCase() === model.toLowerCase());
+                      if (latestKey) delete next[latestKey];
+                      if (value !== 'inherit') next[model] = value;
+                      const res = await fetch('/api/auth/settings', {
+                        method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ reasoning_effort_by_model: next }),
+                      });
+                      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                      paintThinking(model, value);
+                      window.dispatchEvent(new CustomEvent('odysseus:reasoning-effort-changed'));
+                      uiModule.showToast?.('Thinking effort saved');
+                    } catch (_) { uiModule.showToast?.('Failed to save thinking effort'); }
+                    close();
+                  });
+                  select.focus();
+                } catch (_) {
+                  btn.disabled = false;
+                  uiModule.showToast?.('Could not load thinking settings');
+                }
               });
             });
             // Per-model image-generation marks. The button lives inside the

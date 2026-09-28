@@ -70,8 +70,7 @@ async function _savePreference(model, value) {
     }
   } catch (_) { /* fall through with an empty map */ }
 
-  if (value === 'auto') delete existing[model];
-  else existing[model] = value;
+  existing[model] = value;
 
   const res = await fetch('/api/auth/settings', {
     method: 'POST',
@@ -80,6 +79,7 @@ async function _savePreference(model, value) {
     body: JSON.stringify({ reasoning_effort_by_model: existing }),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  window.dispatchEvent(new CustomEvent('odysseus:reasoning-effort-changed'));
 }
 
 function _renderMenu() {
@@ -180,6 +180,10 @@ export function initEffortPicker() {
   // reads as "the button does nothing".
   if (btn.dataset.effortBound === '1') { refreshEffortPicker(); return; }
   btn.dataset.effortBound = '1';
+  window.addEventListener('odysseus:reasoning-effort-changed', () => {
+    _currentKey = '';
+    refreshEffortPicker();
+  });
 
   btn.addEventListener('click', (e) => {
     e.stopPropagation();

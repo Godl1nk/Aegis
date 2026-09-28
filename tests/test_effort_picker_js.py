@@ -84,8 +84,8 @@ def test_saving_merges_rather_than_replaces_overrides():
     save = JS[JS.index("async function _savePreference"):]
     save = save[: save.index("\n}")]
     assert "existing" in save and "..." in save
-    # "auto" is the absence of an override, not a stored value.
-    assert "delete existing[model]" in save
+    # Explicit Auto must override a non-Auto global default for this model.
+    assert "existing[model] = value" in save
 
 
 def test_init_is_idempotent():
