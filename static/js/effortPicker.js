@@ -96,6 +96,9 @@ function _renderMenu() {
     + (l.sub ? `<span class="effort-sub">${_esc(l.sub)}</span>` : '')
     + '</button>'
   )).join('');
+  const custom = _current.supports_custom_effort
+    ? `<button type="button" role="menuitem" class="effort-picker-item${_current.preference?.startsWith('custom:') ? ' is-active' : ''}" data-value="custom"><span>${_esc(_current.preference?.startsWith('custom:') ? `Custom: ${_current.preference.slice(7)}` : 'Custom…')}</span></button>`
+    : '';
 
   // Say why the graded levels are missing, rather than leaving a short list
   // looking like a bug.
@@ -103,18 +106,34 @@ function _renderMenu() {
   if (!_current.supports_effort && _current.mechanism) {
     note = `<div class="effort-picker-note">${_esc(_current.model)} supports on/off only — it has no graded effort levels.</div>`;
   }
-  menu.innerHTML = rows + note;
+  menu.innerHTML = rows + custom + note;
 
   menu.querySelectorAll('.effort-picker-item').forEach(item => {
     item.addEventListener('click', async (e) => {
       e.stopPropagation();
-      const value = item.dataset.value;
+      let value = item.dataset.value;
+      const model = _current.model;
       _closeIfOpen();
+      if (value === 'custom') {
+        const entered = await window.uiModule?.styledPrompt?.('Enter a provider-specific effort value. The provider must support it.', {
+          title: `Custom thinking effort — ${_current.model}`,
+          defaultValue: _current.preference?.startsWith('custom:') ? _current.preference.slice(7) : '',
+          placeholder: 'e.g. xhigh', maxLength: 32,
+        });
+        if (entered == null) return;
+        const trimmed = entered.trim();
+        if (!/^[A-Za-z][A-Za-z0-9_-]{0,31}$/.test(trimmed)) {
+          window.uiModule?.showError?.('Custom effort must start with a letter and use 1–32 letters, numbers, underscores, or hyphens');
+          return;
+        }
+        value = `custom:${trimmed}`;
+      }
+      if (_current.model !== model) return;
       const prev = _current.preference;
       _current.preference = value;          // optimistic
       _paint();
       try {
-        await _savePreference(_current.model, value);
+        await _savePreference(model, value);
       } catch (err) {
         _current.preference = prev;
         _paint();
@@ -137,7 +156,7 @@ function _paint() {
   if (!wrap || !btn || !label) return;
   if (!_current || !_current.mechanism) { _hide(); return; }
   const level = LEVELS.find(l => l.value === _current.preference) || LEVELS[0];
-  label.textContent = level.label;
+  label.textContent = _current.preference?.startsWith('custom:') ? _current.preference.slice(7) : level.label;
   btn.classList.toggle('is-set', _current.preference !== 'auto');
   btn.title = `Thinking effort for ${_current.model} (${_current.mechanism})`;
   wrap.classList.remove('hidden');

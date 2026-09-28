@@ -1978,7 +1978,7 @@ def setup_model_routes(model_discovery):
         if chosen is None:
             chosen = get_user_setting("reasoning_effort_default", owner, "auto")
         preference = normalize_preference(chosen)
-        if preference not in control.supported:
+        if preference not in control.supported and not (preference.startswith("custom:") and control.supports_custom_effort):
             preference = "auto"
         return {
             "model": model,

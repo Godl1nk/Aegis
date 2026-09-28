@@ -199,6 +199,37 @@ def test_graded_effort_reaches_effort_models():
     assert payload == {"reasoning_effort": "low"}
 
 
+def test_custom_effort_is_passed_through_only_for_string_effort_controls():
+    payload = {}
+    applied = apply_reasoning_control(payload, provider="openai", model="gpt-5.1",
+                                      preference="custom:xhigh")
+    assert applied == "custom:xhigh"
+    assert payload == {"reasoning_effort": "xhigh"}
+
+    ollama = {}
+    apply_reasoning_control(ollama, provider="ollama", model="gpt-oss:20b",
+                            preference="custom:max")
+    assert ollama == {"think": "max"}
+
+    adaptive = {"max_tokens": 8192}
+    apply_reasoning_control(adaptive, provider="anthropic", model="claude-sonnet-4-6",
+                            preference="custom:max")
+    assert adaptive["output_config"] == {"effort": "max"}
+
+    boolean = {}
+    applied = apply_reasoning_control(boolean, provider="ollama", model="qwen3-8b",
+                                      preference="custom:xhigh")
+    assert applied == PREF_AUTO
+    assert boolean == {}
+    assert not resolve_reasoning_control("anthropic", "claude-sonnet-4-5").to_dict()["supports_custom_effort"]
+    assert resolve_reasoning_control("openai", "gpt-5.1").to_dict()["supports_custom_effort"]
+
+
+@pytest.mark.parametrize("raw", ["custom:", "custom:2high", "custom:x high", "custom:high!", "custom:" + "x" * 33])
+def test_invalid_custom_effort_reverts_to_auto(raw):
+    assert normalize_preference(raw) == PREF_AUTO
+
+
 def test_gemini_openai_compat_uses_reasoning_effort():
     low, high = {}, {}
     apply_reasoning_control(low, provider="google", model="gemini-3-pro", url="",

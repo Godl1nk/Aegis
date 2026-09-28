@@ -1041,6 +1041,19 @@ async function initReasoningEffortSettings() {
         if (l.value === pref) o.selected = true;
         levelSel.appendChild(o);
       });
+      if (control?.supports_custom_effort || (typeof pref === 'string' && pref.startsWith('custom:'))) {
+        if (typeof pref === 'string' && pref.startsWith('custom:')) {
+          const currentCustom = document.createElement('option');
+          currentCustom.value = pref;
+          currentCustom.textContent = `Current: ${pref.slice(7)}`;
+          currentCustom.selected = true;
+          levelSel.appendChild(currentCustom);
+        }
+        const custom = document.createElement('option');
+        custom.value = 'custom';
+        custom.textContent = 'Custom…';
+        levelSel.appendChild(custom);
+      }
 
       const note = document.createElement('span');
       note.className = 'settings-hint';
@@ -1060,12 +1073,29 @@ async function initReasoningEffortSettings() {
 
       modelSel.addEventListener('change', async () => {
         delete overrides[model];
-        overrides[modelSel.value] = levelSel.value || 'auto';
+        overrides[modelSel.value] = pref;
         await save(); await renderRows();
       });
       levelSel.addEventListener('change', async () => {
-        overrides[model] = levelSel.value || 'auto';
+        let value = levelSel.value || 'auto';
+        if (value === 'custom') {
+          const entered = await uiModule.styledPrompt('Enter a provider-specific effort value. The provider must support it.', {
+            title: `Custom thinking effort — ${model}`,
+            defaultValue: typeof pref === 'string' && pref.startsWith('custom:') ? pref.slice(7) : '',
+            placeholder: 'e.g. xhigh', maxLength: 32,
+          });
+          if (entered === null) { await renderRows(); return; }
+          const trimmed = entered.trim();
+          if (!/^[A-Za-z][A-Za-z0-9_-]{0,31}$/.test(trimmed)) {
+            msg.textContent = 'Custom effort must start with a letter and use 1–32 letters, numbers, underscores, or hyphens';
+            msg.style.color = 'var(--red)';
+            await renderRows(); return;
+          }
+          value = `custom:${trimmed}`;
+        }
+        overrides[model] = value;
         await save();
+        await renderRows();
       });
       del.addEventListener('click', async () => {
         delete overrides[model];

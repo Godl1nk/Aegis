@@ -16,6 +16,7 @@ Preference values:
     auto             leave the serving path's own default (see AUTO below)
     off              ask for no reasoning at all
     low/medium/high  graded effort, for models that grade it
+    custom:<value>   provider-specific text effort, only on string controls
 
 AUTO is deliberately not "send nothing". It reproduces the behaviour that was
 hardcoded before this module existed, so upgrading changes nothing until a user
@@ -50,6 +51,7 @@ PREF_MEDIUM = "medium"
 PREF_HIGH = "high"
 PREFERENCES = (PREF_AUTO, PREF_OFF, PREF_LOW, PREF_MEDIUM, PREF_HIGH)
 _GRADED = (PREF_LOW, PREF_MEDIUM, PREF_HIGH)
+_CUSTOM_EFFORT = re.compile(r"^custom:([A-Za-z][A-Za-z0-9_-]{0,31})$")
 
 _MISTRAL_EFFORT_DEFAULT = os.getenv("ODYSSEUS_MISTRAL_REASONING_EFFORT", "high")
 
@@ -76,12 +78,21 @@ class ReasoningControl:
     def can_disable(self) -> bool:
         return PREF_OFF in self.supported
 
+    @property
+    def supports_custom_effort(self) -> bool:
+        return (
+            self.mechanism == REASONING_CONTROL_EFFORT
+            or (self.mechanism == REASONING_CONTROL_NATIVE_BOOL and self.supports_effort)
+            or self in (_ANTHROPIC_ADAPTIVE, _ANTHROPIC_ALWAYS_ON)
+        )
+
     def to_dict(self) -> dict:
         return {
             "mechanism": self.mechanism,
             "supported": list(self.supported),
             "supports_effort": self.supports_effort,
             "can_disable": self.can_disable,
+            "supports_custom_effort": self.supports_custom_effort,
         }
 
 
@@ -326,6 +337,8 @@ def resolve_reasoning_control(
 
 
 def normalize_preference(value: Any) -> str:
+    if isinstance(value, str) and _CUSTOM_EFFORT.fullmatch(value.strip()):
+        return value.strip()
     token = str(value or "").strip().lower()
     if token in ("", "default", "provider"):
         return PREF_AUTO
@@ -372,6 +385,7 @@ def apply_reasoning_control(
     """
     pref = normalize_preference(preference if preference is not None else effective_preference(model))
     control = resolve_reasoning_control(provider, model, url, endpoint_kind)
+    custom = _CUSTOM_EFFORT.fullmatch(pref)
 
     if pref == PREF_AUTO or not control.mechanism:
         _apply_auto_defaults(
@@ -387,16 +401,16 @@ def apply_reasoning_control(
     # Never send a value outside this model's actual control surface. For
     # example, GPT-5 predates `none`, Gemini Pro cannot turn thinking off, and
     # boolean-only models cannot honour low/medium/high.
-    if pref not in control.supported:
+    if pref not in control.supported and not (custom and control.supports_custom_effort):
         return PREF_AUTO
 
     mech = control.mechanism
     if mech == REASONING_CONTROL_EFFORT:
-        payload["reasoning_effort"] = "none" if pref == PREF_OFF else pref
+        payload["reasoning_effort"] = "none" if pref == PREF_OFF else (custom.group(1) if custom else pref)
         if control.directive_fallback and pref == PREF_OFF:
             _apply_message_directive(messages, on=False)
     elif mech == REASONING_CONTROL_NATIVE_BOOL:
-        payload["think"] = pref if control.supports_effort else pref != PREF_OFF
+        payload["think"] = (custom.group(1) if custom else pref) if control.supports_effort else pref != PREF_OFF
     elif mech == REASONING_CONTROL_TEMPLATE_KWARG:
         kwargs = payload.setdefault("chat_template_kwargs", {})
         if isinstance(kwargs, dict):
@@ -413,7 +427,7 @@ def apply_reasoning_control(
                 payload["thinking"] = {"type": "disabled"}
             else:
                 payload["thinking"] = {"type": "adaptive"}
-                payload.setdefault("output_config", {})["effort"] = pref
+                payload.setdefault("output_config", {})["effort"] = custom.group(1) if custom else pref
                 payload.pop("temperature", None)
         elif pref == PREF_OFF:
             # Manual extended thinking is off when the field is absent.

@@ -842,7 +842,7 @@ async function loadEndpoints() {
             const thinkingLabels = { inherit: 'Default', auto: 'Auto', off: 'Off', low: 'Low', medium: 'Medium', high: 'High' };
             const paintThinking = (model, value) => {
               panel.querySelectorAll('[data-ep-model-thinking]').forEach(btn => {
-                if (btn.dataset.epModelThinking === model) btn.textContent = `Thinking: ${thinkingLabels[value] || 'Default'}`;
+                if (btn.dataset.epModelThinking === model) btn.textContent = `Thinking: ${typeof value === 'string' && value.startsWith('custom:') ? value.slice(7) : (thinkingLabels[value] || 'Default')}`;
               });
             };
             fetch('/api/auth/settings', { credentials: 'same-origin' }).then(async res => {
@@ -876,13 +876,15 @@ async function loadEndpoints() {
                   const stored = settings.reasoning_effort_by_model;
                   const overrides = stored && typeof stored === 'object' && !Array.isArray(stored) ? { ...stored } : {};
                   const previousKey = Object.keys(overrides).find(key => key.toLowerCase() === model.toLowerCase());
-                  const current = previousKey ? overrides[previousKey] : 'inherit';
+                  const current = previousKey && typeof overrides[previousKey] === 'string' ? overrides[previousKey] : 'inherit';
                   const choices = [['inherit', 'Use default'], ['auto', 'Auto (provider default)'], ['off', 'Off'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High']];
+                  if (current.startsWith('custom:')) choices.push([current, `Current: ${current.slice(7)}`]);
+                  if (control.supports_custom_effort) choices.push(['custom', 'Custom…']);
                   const supported = Array.isArray(control.supported) ? control.supported : [];
                   const select = document.createElement('select');
                   select.className = 'admin-btn-sm';
                   select.setAttribute('aria-label', `Thinking effort for ${model}`);
-                  choices.filter(([value]) => value === 'inherit' || supported.includes(value)).forEach(([value, label]) => {
+                  choices.filter(([value]) => value === 'inherit' || value === 'custom' || (value === current && current.startsWith('custom:')) || supported.includes(value)).forEach(([value, label]) => {
                     const option = document.createElement('option');
                     option.value = value;
                     option.textContent = label;
@@ -898,7 +900,21 @@ async function loadEndpoints() {
                   });
                   select.addEventListener('change', async () => {
                     select.disabled = true;
-                    const value = select.value;
+                    let value = select.value;
+                    if (value === 'custom') {
+                      const entered = await uiModule.styledPrompt('Enter a provider-specific effort value. The provider must support it.', {
+                        title: `Custom thinking effort — ${model}`,
+                        defaultValue: current.startsWith('custom:') ? current.slice(7) : '',
+                        placeholder: 'e.g. xhigh', maxLength: 32,
+                      });
+                      if (entered === null) { close(); return; }
+                      const trimmed = entered.trim();
+                      if (!/^[A-Za-z][A-Za-z0-9_-]{0,31}$/.test(trimmed)) {
+                        uiModule.showToast?.('Use 1–32 letters, numbers, underscores, or hyphens; start with a letter');
+                        close(); return;
+                      }
+                      value = `custom:${trimmed}`;
+                    }
                     try {
                       const latestRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
                       if (!latestRes.ok) throw new Error(`HTTP ${latestRes.status}`);
