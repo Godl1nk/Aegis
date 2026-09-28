@@ -616,6 +616,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         || /<!--\s*pdf_source\s+upload_id="[^"]+"/.test(c);
   }
 
+  function _isWordBackedDoc(content) {
+    return /^<!-- word_source upload_id="[^"]+" -->/.test(content || '');
+  }
+
   // Force the on-screen keyboard down on touch. Firefox mobile ignores a plain
   // blur, so use the readonly trick (a readonly field shows no keyboard), then
   // drop readonly so the user can type again.
@@ -2078,7 +2082,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const wordPane = document.getElementById('doc-word-view');
     const wordButton = document.getElementById('doc-word-view-btn');
     const wordDoc = docs.get(activeDocId);
-    const isWord = wordDoc?.language === 'docx' && /^<!-- word_source upload_id="[^"]+" -->/.test(wordDoc.content || '');
+    const isWord = _isWordBackedDoc(wordDoc?.content);
     if (wordButton) {
       wordButton.style.display = isWord ? '' : 'none';
       wordButton.textContent = wordDoc?._wordSourceVisible ? 'View pages' : 'Edit text';
@@ -4552,7 +4556,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (titleInput) titleInput.value = doc.title || '';
     // For email docs, _showEmailFields will set textarea to body only (not raw header)
     if (textarea && doc.language !== 'email') textarea.value = doc.content || '';
-    if (langSelect) langSelect.value = doc.language || 'markdown';
+    if (langSelect) langSelect.value = _isWordBackedDoc(doc.content) ? 'docx' : (doc.language || 'markdown');
     if (badge) { const _v = doc.version || 1; badge.textContent = `v${_v}`; badge.style.display = _v > 1 ? '' : 'none'; }
     { const _v = doc.version || 1; const _dbtn = document.getElementById('doc-diff-toggle-btn'); if (_dbtn) _dbtn.style.display = _v > 1 ? '' : 'none'; }
     syncHighlighting();
@@ -5832,7 +5836,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     });
     document.getElementById('doc-word-view-btn')?.addEventListener('click', async () => {
       const doc = docs.get(activeDocId);
-      if (!doc || doc.language !== 'docx') return;
+      if (!doc || !_isWordBackedDoc(doc.content)) return;
       if (doc._wordSourceVisible) {
         await saveDocument({ silent: true });
         const frame = document.querySelector('#doc-word-view iframe');
@@ -9670,7 +9674,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     options.push({ label: 'Import from library', fn: () => openLibrary() });
     options.push({ label: 'Import from device', fn: () => _importFromDevice(), _divider: true });
     if (isForm) options.push({ label: 'Filled PDF (.pdf)', fn: _downloadFilledPdf });
-    if (docs.get(activeDocId)?.language === 'docx') {
+    if (_isWordBackedDoc(liveContent)) {
       options.push({ label: 'Preserved Word (.docx)', fn: exportAsDocx });
     } else {
       options.push(
@@ -9769,7 +9773,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (!activeDocId) return;
     const textarea = document.getElementById('doc-editor-textarea');
     if (!textarea) return;
-    if (docs.get(activeDocId)?.language === 'docx') {
+    if (_isWordBackedDoc(docs.get(activeDocId)?.content)) {
       try {
         const current = await fetch(`${API_BASE}/api/document/${activeDocId}`, { credentials: 'same-origin' });
         if (!current.ok) throw new Error('Could not read the Word document');

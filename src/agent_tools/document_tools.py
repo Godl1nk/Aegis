@@ -49,7 +49,8 @@ def clear_active_document(doc_id: Optional[str] = None) -> bool:
 
 
 def _validate_word_tool_edit(db, doc, edited_content: str, owner: Optional[str]) -> Optional[str]:
-    if doc.language != "docx":
+    from src.word_document import source_upload_id
+    if doc.language != "docx" and not source_upload_id(doc.current_content or ""):
         return None
     from src.constants import UPLOAD_DIR
     from src.upload_handler import UploadHandler

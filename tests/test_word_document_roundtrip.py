@@ -87,6 +87,13 @@ def test_word_import_edit_and_export_route_keeps_original_layout(tmp_path, monke
         assert initial_preview.headers['cache-control'] == 'private, no-store'
         assert previewed[-1] == original
 
+        # A changed type label must not make the preserved Word source render
+        # as raw text or bypass its safe-edit checks.
+        relabeled = client.patch(f'/api/document/{doc_id}', json={"language": "pdf"})
+        assert relabeled.status_code == 200
+        assert client.get(f'/api/document/{doc_id}/render-docx').status_code == 200
+        assert client.get(f'/api/document/{doc_id}/export-docx').content == original
+
         edited = document['current_content'].replace('Revenue increased', 'Sales increased')
         saved = client.put(f'/api/document/{doc_id}', json={"content": edited})
         assert saved.status_code == 200, saved.text

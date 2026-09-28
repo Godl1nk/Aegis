@@ -48,9 +48,12 @@ def _library_language_for_document(doc: Document) -> str:
     identify them as PDFs instead of exposing that internal wrapper format.
     """
     from src.pdf_form_doc import find_source_upload_id
+    from src.word_document import source_upload_id as word_source_upload_id
 
     if find_source_upload_id(doc.current_content or ""):
         return "pdf"
+    if word_source_upload_id(doc.current_content or ""):
+        return "docx"
     return doc.language or "text"
 
 
@@ -370,7 +373,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
     @router.get("/api/document/{doc_id}/export-docx")
     async def export_docx(doc_id: str, request: Request):
         from fastapi.responses import Response
-        from src.word_document import UnsafeWordEdit, render_document_edit
+        from src.word_document import UnsafeWordEdit, render_document_edit, source_upload_id
 
         user = get_current_user(request)
         db = SessionLocal()
@@ -379,7 +382,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             if not doc:
                 raise HTTPException(404, "Document not found")
             _verify_doc_owner(db, doc, user)
-            if doc.language != "docx" or upload_handler is None:
+            if not source_upload_id(doc.current_content or "") or upload_handler is None:
                 raise HTTPException(400, "Document is not an imported Word file")
             try:
                 data = render_document_edit(db, doc, doc.current_content, upload_handler, user,
@@ -399,7 +402,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         """Render the current, safely edited Word file as an inline PDF."""
         import asyncio
         from fastapi.responses import Response
-        from src.word_document import UnsafeWordEdit, render_document_edit
+        from src.word_document import UnsafeWordEdit, render_document_edit, source_upload_id
         from src.word_preview import WordPreviewUnavailable, render_word_pdf
 
         user = get_current_user(request)
@@ -409,7 +412,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             if not doc:
                 raise HTTPException(404, "Document not found")
             _verify_doc_owner(db, doc, user)
-            if doc.language != "docx" or upload_handler is None:
+            if not source_upload_id(doc.current_content or "") or upload_handler is None:
                 raise HTTPException(400, "Document is not an imported Word file")
             try:
                 word_bytes = render_document_edit(
@@ -704,8 +707,10 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                         _verify_doc_owner(db, doc, user)
                     except HTTPException:
                         continue   # skip docs the user doesn't own
+                    from src.word_document import source_upload_id
+                    is_word = bool(source_upload_id(doc.current_content or ""))
                     ext = _ext.get(doc.language or "text", ".txt")
-                    if doc.language == "docx":
+                    if is_word:
                         ext = ".docx"
                     base = (doc.title or "document").strip() or "document"
                     base = re.sub(r"[^\w\-. ]+", "", base)[:60].strip() or doc.id
@@ -715,7 +720,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                         name = f"{base}-{i}{ext}"
                         i += 1
                     used.add(name)
-                    if doc.language == "docx":
+                    if is_word:
                         from src.word_document import UnsafeWordEdit, render_document_edit
                         try:
                             data = render_document_edit(db, doc, doc.current_content, upload_handler, user,
@@ -769,8 +774,8 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 return _doc_to_dict(doc)
 
             _assert_pdf_marker_upload_owned(request, incoming_content, user, upload_handler)
-            if doc.language == "docx":
-                from src.word_document import UnsafeWordEdit, render_document_edit
+            from src.word_document import UnsafeWordEdit, render_document_edit, source_upload_id
+            if doc.language == "docx" or source_upload_id(doc.current_content or ""):
                 try:
                     render_document_edit(db, doc, incoming_content, upload_handler, user,
                                          getattr(request.app.state, "auth_manager", None))

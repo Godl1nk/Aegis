@@ -726,7 +726,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
           setTimeout(() => URL.revokeObjectURL(url), 1000);
           return;
         }
-        if (full.language === 'docx') {
+        if (/^<!-- word_source upload_id="[^"]+" -->/.test(full.current_content || '')) {
           const word = await fetch(`${API_BASE}/api/document/${doc.id}/export-docx`);
           if (!word.ok) {
             const detail = await word.json().catch(() => ({}));
@@ -960,7 +960,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
       // PDF-backed docs have a marker comment in their markdown — show the
       // rendered PDF in an iframe instead of dumping markdown source.
       const isPdfDoc = /<!--\s*pdf_(?:form_)?source\s+upload_id="[^"]+"/.test(content);
-      const isWordDoc = lang === 'docx' && /<!--\s*word_source\s+upload_id="[^"]+"/.test(content);
+      const isWordDoc = /^<!-- word_source upload_id="[^"]+" -->/.test(content);
       const existingFrame = preview.querySelector('.doclib-card-pdf-frame');
 
       if (isPdfDoc || isWordDoc) {
@@ -1389,7 +1389,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
         setTimeout(() => URL.revokeObjectURL(url), 1000);
         continue;
       }
-      if (doc.language === 'docx') {
+      if (/^<!-- word_source upload_id="[^"]+" -->/.test(doc.current_content || '')) {
         const response = await fetch(`${API_BASE}/api/document/${doc.id}/export-docx`);
         if (!response.ok) {
           if (uiModule) uiModule.showError(`Could not export ${doc.title || 'Word document'}`);
