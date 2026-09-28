@@ -8,6 +8,7 @@
 //
 // Timers are injected, so this runs with no DOM and no real clock.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -16,6 +17,13 @@ import {
   createThinkingAnalysisGate,
   stripLiveThinkingTags,
 } from '../static/js/liveThinkingThrottle.js';
+
+test('chat stream uses the throttle for live thinking updates', () => {
+  const chat = readFileSync(new URL('../static/js/chat.js', import.meta.url), 'utf8');
+  assert.match(chat, /createLiveThinkingThrottle\(/);
+  assert.match(chat, /_liveThinkThrottle\.update\(roundText\)/);
+  assert.match(chat, /_liveThinkThrottle\.flush\(\)/);
+});
 
 function fakeTimers() {
   let nextId = 1;

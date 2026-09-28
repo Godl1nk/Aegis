@@ -23,6 +23,7 @@ import codeRunnerModule from './codeRunner.js';
 import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handleSetupInput, handleSetupWizard, typewriterInto } from './slashCommands.js';
 import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
+import { createLiveThinkingThrottle } from './liveThinkingThrottle.js';
 import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composerArrowUpRecall.js';
 import workspaceModule from './workspace.js';
 import { createAgentTurn, mergeAgentTurnActivity } from './agentTurn.js';
@@ -1886,6 +1887,33 @@ import { createAgentTurn, mergeAgentTurnActivity } from './agentTurn.js';
       let _liveThinkTokenCount = 0;
       let _liveThinkToggle = null;
       let _liveThinkDomId = null;
+      const _liveThinkThrottle = createLiveThinkingThrottle((text) => {
+        if (!_liveThinkInner || !_liveThinkInner.isConnected) return;
+        const box = _liveThinkContent;
+        const follow = box?.classList.contains('expanded') && box.scrollHeight - box.clientHeight - box.scrollTop < 80;
+        _liveThinkTokenCount = _estimateThinkingTokens(text);
+        // Replacing the full Markdown tree on every token freezes long streams.
+        _liveThinkInner.style.whiteSpace = 'pre-wrap';
+        _liveThinkInner.textContent = text;
+        if (follow) { box.scrollTop = box.scrollHeight; uiModule.scrollHistory(); }
+      }, {
+        prepare: (raw) => markdownModule.normalizeThinkingMarkup(_streamDisplayText(raw))
+          .replace(/<\/?(?:think(?:ing)?|thought)(?:\s+[^>]*)?>/gi, '')
+          .replace(/<\|channel>thought\s*\n?/gi, '')
+          .replace(/<\|channel>response\s*\n?/gi, '')
+          .replace(/<channel\|>/gi, '')
+          .replace(/^\s*Thinking(?:\s+Process)?:\s*/i, ''),
+      });
+
+      function _finishLiveThinking(raw) {
+        if (raw !== undefined) _liveThinkThrottle.update(raw);
+        _liveThinkThrottle.flush();
+        if (_liveThinkInner?.isConnected) {
+          const text = _liveThinkInner.textContent;
+          _liveThinkInner.style.whiteSpace = '';
+          _liveThinkInner.innerHTML = markdownModule.mdToHtml(text);
+        }
+      }
 
       function _estimateThinkingTokens(text) {
         const clean = (text || '').trim();
@@ -2098,6 +2126,7 @@ import { createAgentTurn, mergeAgentTurnActivity } from './agentTurn.js';
               // Force-close thinking if still open (model never output boundary)
               if (isThinking) {
                 isThinking = false;
+                _finishLiveThinking();
                 cancelAnimationFrame(_thinkTimerRAF);
                 var _elapsedDone = thinkingStartTime ? ((Date.now() - thinkingStartTime) / 1000).toFixed(1) : null;
                 if (_elapsedDone) {
@@ -2317,6 +2346,8 @@ import { createAgentTurn, mergeAgentTurnActivity } from './agentTurn.js';
                   _liveThinkSection = thinkContent.querySelector('.thinking-section');
                   _liveThinkContent = thinkContent.querySelector('.thinking-content');
                   _liveThinkInner = thinkContent.querySelector('.live-think-inner');
+                  _liveThinkThrottle.cancel();
+                  _liveThinkThrottle.update(roundText);
                   _liveThinkHeader = thinkContent.querySelector('.live-think-header-text');
                   _liveThinkSpinnerSlot = thinkContent.querySelector('.live-think-spinner-slot');
                   _liveThinkTimerEl = thinkContent.querySelector('.live-think-timer');
@@ -2342,32 +2373,14 @@ import { createAgentTurn, mergeAgentTurnActivity } from './agentTurn.js';
                   }
                 } else if (hasUnclosedThink && isThinking) {
                   if (_liveThinkInner) {
-                    // Extract raw thinking text (strip known thinking wrappers and prefixes)
-                    var thinkText = markdownModule.normalizeThinkingMarkup(_streamDisplayText(roundText))
-                      .replace(/<\/?(?:think(?:ing)?|thought)(?:\s+[^>]*)?>/gi, '')
-                      .replace(/<\|channel>thought\s*\n?/gi, '')
-                      .replace(/<\|channel>response\s*\n?/gi, '')
-                      .replace(/<channel\|>/gi, '');
-                    thinkText = thinkText.replace(/^\s*Thinking(?:\s+Process)?:\s*/i, '');
-                    _liveThinkTokenCount = _estimateThinkingTokens(thinkText);
-                    _liveThinkInner.innerHTML = markdownModule.mdToHtml(thinkText);
-                    if (_liveThinkTimerEl) {
-                      var _elapsedLive = thinkingStartTime ? ((Date.now() - thinkingStartTime) / 1000).toFixed(1) : '';
-                      _liveThinkTimerEl.textContent = _formatThinkStats(_elapsedLive, _liveThinkTokenCount);
-                    }
-                    // Keep thinking box scrolled to bottom, but let user scroll up
-                    var _followThinking = true;
-                    var thinkBox = _liveThinkInner.closest('.thinking-content');
-                    if (thinkBox) {
-                      var nearBottom = thinkBox.scrollHeight - thinkBox.clientHeight - thinkBox.scrollTop < 80;
-                      if (nearBottom) thinkBox.scrollTop = thinkBox.scrollHeight;
-                      _followThinking = nearBottom;
-                    }
+                    _liveThinkThrottle.update(roundText);
                   }
-                  if (_followThinking) uiModule.scrollHistory();
                   continue;
                 } else if (!hasUnclosedThink && isThinking) {
                   isThinking = false;
+                  const _thinkClose = Array.from(normalizedRoundText.matchAll(/<\/(?:think(?:ing)?|thought)>/gi)).pop();
+                  if (_thinkClose) _finishLiveThinking(normalizedRoundText.slice(0, _thinkClose.index));
+                  else _finishLiveThinking();
                   var _thinkTextLen = _liveThinkInner ? _liveThinkInner.textContent.trim().length : 0;
 
                   // If thinking was trivially short (< 20 chars), remove the section entirely
@@ -2828,6 +2841,7 @@ import { createAgentTurn, mergeAgentTurnActivity } from './agentTurn.js';
                 // Force-close thinking if still open — tools are real content, not thinking
                 if (isThinking) {
                   isThinking = false;
+                  _finishLiveThinking();
                   cancelAnimationFrame(_thinkTimerRAF);
                   var _elapsed2 = thinkingStartTime ? ((Date.now() - thinkingStartTime) / 1000).toFixed(1) : null;
                   if (_liveThinkHeader) _liveThinkHeader.textContent = 'View thinking process';

@@ -10,7 +10,7 @@ import modelsModule from './js/models.js';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js';
+import chatModule from './js/chat.js?v=20260928thinkingperf';
 import compareModule from './js/compare/index.js';
 import documentModule from './js/document.js?v=20260928word';
 import searchChatModule from './js/search-chat.js';
