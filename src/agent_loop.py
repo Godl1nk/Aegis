@@ -2161,8 +2161,9 @@ def _build_system_prompt(
                     f'A "[Doc edit: L25]" prefix means the user is pointing at that line — use the '
                     f'numbers above to find the text they mean.\n'
                     f'To edit: use edit_document with <<<FIND>>>...<<<REPLACE>>>...<<<END>>>. The FIND '
-                    f'text must match the document EXACTLY and must NOT include the leading line-number '
-                    f'or tab (those are reference-only). To rewrite more than half of it: update_document.\n'
+                    f'text should copy the document exactly. For repeated template text, copy its '
+                    f'line-number and TAB into FIND to select that specific occurrence; do not put '
+                    f'line numbers in REPLACE. To rewrite more than half of it: update_document.\n'
                     f'BATCH your changes: put ALL the edits for this turn in ONE edit_document call as '
                     f'multiple <<<FIND>>>...<<<REPLACE>>>...<<<END>>> blocks. Do NOT make many separate '
                     f'edit_document calls — one call with several blocks is faster and avoids flooding the UI.'
@@ -3945,6 +3946,7 @@ async def stream_agent_loop(
     # never applied).
     _doc_write_succeeded = False
     _doc_write_nudged = False
+    _doc_edit_failed = False
     # Set when a document was manufactured from a chat code block (the model
     # answered in prose instead of calling a doc tool). One per turn, and the
     # turn ends after that round — see the fallback block for why.
@@ -5538,6 +5540,8 @@ async def stream_agent_loop(
                         "version": result.get("version", 1),
                     }) + '\n\n'
                 )
+            if block.tool_type == "edit_document" and result.get("error"):
+                _doc_edit_failed = True
 
             # The "Open document" button is rendered by the frontend from the
             # persisted doc tool_event (which carries doc_id + doc_title) — both
@@ -5703,6 +5707,18 @@ async def stream_agent_loop(
         _append_tool_results(messages, round_response, converted_calls,
                              tool_results, tool_result_texts, used_native, round_num,
                              round_reasoning=round_reasoning)
+
+        if _doc_edit_failed and not _doc_write_succeeded:
+            _doc_edit_failed = False
+            messages.append({
+                "role": "system",
+                "content": (
+                    "The document edit failed and no change was saved. Retry with a smaller "
+                    "FIND copied from the active document. For repeated Word template fields, "
+                    "include the displayed line-number and TAB in FIND. Do not tell the user "
+                    "the document was changed unless a document tool succeeds."
+                ),
+            })
 
         # Anti-loop nudge: a document write just succeeded. The doc context
         # injected at the top of the turn is the PRE-edit version and does not

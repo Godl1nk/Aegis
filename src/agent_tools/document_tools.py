@@ -237,6 +237,36 @@ def parse_edit_blocks(content: str) -> list:
         edits.append({"find": m.group(1), "replace": m.group(2)})
     return edits
 
+
+def _find_edit_span(document: str, find: str) -> Optional[tuple[int, int]]:
+    """Locate a FIND block without guessing between repeated template fields."""
+    numbered = [re.match(r"^(\d+)\t(.*)$", line) for line in find.split("\n")]
+    if numbered and all(numbered):
+        lines = document.split("\n")
+        positions = [int(match.group(1)) - 1 for match in numbered]
+        if (positions == list(range(positions[0], positions[0] + len(positions)))
+                and all(0 <= pos < len(lines) and lines[pos] == match.group(2)
+                        for pos, match in zip(positions, numbered))):
+            start = sum(len(line) + 1 for line in lines[:positions[0]])
+            return start, start + len("\n".join(lines[positions[0]:positions[-1] + 1]))
+        find = "\n".join(match.group(2) for match in numbered)
+
+    exact = [match.span() for match in re.finditer(re.escape(find), document)]
+    if len(exact) == 1:
+        return exact[0]
+    if exact:
+        return None
+
+    # Word extraction often has extra blank lines or different spacing from
+    # the numbered context shown to the model. Permit whitespace differences
+    # only when they identify exactly one location; preserve the actual text.
+    words = re.findall(r"\S+", find)
+    if not words:
+        return None
+    pattern = r"\s+".join(re.escape(word) for word in words)
+    matches = [match.span() for match in re.finditer(pattern, document)]
+    return matches[0] if len(matches) == 1 else None
+
 def parse_suggest_blocks(content: str) -> list:
     """Parse <<<FIND>>>...<<<SUGGEST>>>...<<<REASON>>>...<<<END>>> blocks."""
     suggestions = []
@@ -643,27 +673,21 @@ class EditDocumentTool:
             skipped = 0
             for edit in edits:
                 _find = edit["find"]
-                if _find in updated_content:
-                    updated_content = updated_content.replace(_find, edit["replace"], 1)
+                span = _find_edit_span(updated_content, _find)
+                if span:
+                    replacement = edit["replace"]
+                    # An insertion commonly keeps FIND as its prefix. Retain
+                    # the document's original spacing instead of flattening it.
+                    if replacement.startswith(_find) and updated_content[slice(*span)] != _find:
+                        replacement = updated_content[slice(*span)] + replacement[len(_find):]
+                    updated_content = updated_content[:span[0]] + replacement + updated_content[span[1]:]
                     applied += 1
                 else:
-                    # Defensive: the active-doc context shows a "N\t" line-number
-                    # gutter for reference. Weaker models sometimes copy that prefix
-                    # into FIND. If the exact match failed, retry with a leading
-                    # "<digits><tab>" stripped from each FIND line — but only use it
-                    # when that stripped form actually matches, so we never corrupt a
-                    # legitimately tab-prefixed document.
-                    _stripped = "\n".join(re.sub(r"^\d+\t", "", _l) for _l in _find.split("\n"))
-                    if _stripped != _find and _stripped in updated_content:
-                        updated_content = updated_content.replace(_stripped, edit["replace"], 1)
-                        applied += 1
-                        logger.info("edit_document: matched after stripping line-number gutter from FIND")
-                    else:
-                        logger.warning(f"edit_document: FIND text not found, skipping: {_find[:80]!r}")
-                        skipped += 1
+                    logger.warning(f"edit_document: FIND text not found or ambiguous, skipping: {_find[:80]!r}")
+                    skipped += 1
 
             if applied == 0:
-                return {"error": f"No edits applied — none of the FIND blocks matched the document content (skipped {skipped})"}
+                return {"error": f"No edits applied — FIND text was absent or matched more than one location (skipped {skipped}). Copy exact text from the current document; for repeated template text, include its line-number and TAB from the active-document context in FIND."}
 
             if _pdf_form_source_upload_id(doc.current_content or ""):
                 pdf_error = _validate_pdf_form_edit(doc.current_content or "", updated_content)
