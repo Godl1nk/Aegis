@@ -7221,8 +7221,16 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
   export async function loadDocument(docId) {
     _closeNotesForDocumentOpen();
-    // If already in tabs, just switch
+    // A chat link can refer to a tab cached before a soft delete. Refresh its
+    // activity flag so the restore control reflects the saved row.
     if (docs.has(docId)) {
+      try {
+        const res = await fetch(`${API_BASE}/api/document/${docId}`);
+        if (res.ok) {
+          const saved = await res.json();
+          docs.get(docId).isActive = saved.is_active === true;
+        }
+      } catch (_) { /* Keep the cached tab available while offline. */ }
       _ensureDocPaneMounted();
       switchToDoc(docId);
       return;
@@ -7388,7 +7396,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       language: doc.language || '',
       content: doc.current_content || '',
       version: doc.version_count || 1,
-      isActive: doc.is_active !== false,
+      isActive: doc.is_active === undefined || doc.is_active === true || doc.is_active === 1,
       sessionId: sessionId || doc.session_id,
       userSetLanguage: !!doc.language,
       _composeAtts: existing?._composeAtts,
