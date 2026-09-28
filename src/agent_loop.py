@@ -2097,8 +2097,8 @@ def _build_system_prompt(
             # prompt; everything else gets the regular generic doc context.
             _is_form_backed = False
             try:
-                from src.pdf_form_doc import find_source_upload_id
-                _is_form_backed = bool(find_source_upload_id(active_document.current_content or ""))
+                from src.agent_tools.document_tools import _pdf_form_source_upload_id
+                _is_form_backed = bool(_pdf_form_source_upload_id(active_document.current_content or ""))
             except Exception as e:
                 logger.warning("Failed to detect if document is form-backed, assuming plain", exc_info=e)
 

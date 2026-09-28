@@ -1,4 +1,4 @@
-"""Lossless-source Word imports with deliberately limited, safe text edits."""
+"""Lossless-source Word imports with safe in-place text edits."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import io
 import re
 
 from docx import Document as WordDocument
+from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 
 from src.upload_handler import is_valid_upload_id
@@ -38,11 +39,7 @@ def import_content(data: bytes, upload_id: str) -> str:
 
 
 def render_edited_word(source: bytes, original_content: str, edited_content: str) -> bytes:
-    """Change only text within an existing run; preserve the OOXML package.
-
-    Changes to paragraph structure, fields, or text spanning styled runs are
-    rejected instead of silently replacing formatting or document objects.
-    """
+    """Change paragraph text across plain runs while preserving OOXML objects."""
     source_id = source_upload_id(original_content)
     if not source_id or source_upload_id(edited_content) != source_id:
         raise UnsafeWordEdit("The Word source reference must stay intact")
@@ -54,8 +51,8 @@ def render_edited_word(source: bytes, original_content: str, edited_content: str
     edited = edited_content.split('\n', 1)[1]
     original_lines = original.split('\n')
     edited_lines = edited.split('\n')
-    if len(original_lines) != len(paragraphs) or len(edited_lines) != len(paragraphs):
-        raise UnsafeWordEdit("Adding or removing Word paragraphs could change the layout")
+    if len(original_lines) != len(paragraphs) or len(edited_lines) < len(paragraphs):
+        raise UnsafeWordEdit("Removing Word paragraphs could change the layout")
     if [p.text for p in paragraphs] != original_lines:
         raise UnsafeWordEdit("The Word source no longer matches the imported text")
     for paragraph, before, after in zip(paragraphs, original_lines, edited_lines):
@@ -71,22 +68,60 @@ def render_edited_word(source: bytes, original_content: str, edited_content: str
         end = len(before) - suffix
         replacement_end = len(after) - suffix
         runs = paragraph.runs
+        if ''.join(run.text for run in runs) != before:
+            raise UnsafeWordEdit("This paragraph contains text outside ordinary Word runs")
+        if not runs and not before and all(
+            node.tag == qn('w:pPr') for node in paragraph._p
+        ):
+            runs = [paragraph.add_run('')]
+            runs[0]._element.add_t('')
+        spans = []
         offset = 0
-        matching_run = None
-        matching_start = 0
         for run in runs:
-            run_end = offset + len(run.text)
-            if offset <= start and end <= run_end and (start < run_end or run is runs[-1]):
-                matching_run, matching_start = run, offset
-                break
-            offset = run_end
-        if matching_run is None or matching_run._element.xpath('.//w:br | .//w:tab | .//w:drawing | .//w:fldChar'):
-            raise UnsafeWordEdit("The edit crosses formatted text or a Word object")
-        local_start, local_end = start - matching_start, end - matching_start
-        matching_run.text = matching_run.text[:local_start] + after[start:replacement_end] + matching_run.text[local_end:]
+            spans.append((run, offset, offset + len(run.text)))
+            offset += len(run.text)
+        if start == end:
+            touched = [span for span in spans if span[1] <= start <= span[2]
+                       and _plain_text_run(span[0])][:1]
+        else:
+            touched = [span for span in spans if span[1] < end and span[2] > start]
+        if not touched:
+            raise UnsafeWordEdit("The edit could not be located in Word text")
+        for run, _, _ in touched:
+            if not _plain_text_run(run):
+                raise UnsafeWordEdit("The edit touches a Word field or object")
+        first_run, first_start, _ = touched[0]
+        last_run, last_start, last_end = touched[-1]
+        replacement = after[start:replacement_end]
+        if first_run is last_run:
+            _set_run_text(first_run, before[first_start:start] + replacement + before[end:last_end])
+        else:
+            _set_run_text(first_run, before[first_start:start] + replacement)
+            for run, _, _ in touched[1:-1]:
+                _set_run_text(run, '')
+            _set_run_text(last_run, before[end:last_end])
+        if paragraph.text != after:
+            raise UnsafeWordEdit("The edited Word text could not be verified")
+    for line in edited_lines[len(paragraphs):]:
+        document.add_paragraph(line)
     result = io.BytesIO()
     document.save(result)
     return result.getvalue()
+
+
+def _set_run_text(run, value: str) -> None:
+    """Keep run properties and XML nodes; change only their text payload."""
+    text_nodes = [node for node in run._element if node.tag == qn('w:t')]
+    text_nodes[0].text = value
+    for node in text_nodes[1:]:
+        node.text = ''
+
+
+def _plain_text_run(run) -> bool:
+    children = list(run._element)
+    return any(node.tag == qn('w:t') for node in children) and all(
+        node.tag in (qn('w:rPr'), qn('w:t')) for node in children
+    )
 
 
 def render_document_edit(db, doc, edited_content: str, upload_handler, owner: str | None, auth_manager=None) -> bytes:

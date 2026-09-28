@@ -268,6 +268,48 @@ def _pdf_source_upload_id(content: str) -> Optional[str]:
         return None
 
 
+def _pdf_form_source_upload_id(content: str) -> Optional[str]:
+    from src.pdf_form_doc import _FRONT_MATTER_RE
+    from src.upload_handler import is_valid_upload_id
+
+    match = _FRONT_MATTER_RE.search(content or "")
+    upload_id = match.group("upload_id") if match else None
+    return upload_id if upload_id and is_valid_upload_id(upload_id) else None
+
+
+def _validate_pdf_form_edit(before: str, after: str) -> Optional[str]:
+    """Keep the PDF source and field anchors needed for faithful export."""
+    source_id = _pdf_form_source_upload_id(before)
+    if not source_id or _pdf_form_source_upload_id(after) != source_id:
+        return "The PDF form source reference must stay intact"
+    from src.pdf_form_doc import _FIELD_BULLET_RE
+
+    def fields(content):
+        return [(match.group("name"), match.group("type")) for line in content.splitlines()
+                if (match := _FIELD_BULLET_RE.match(line))]
+
+    if fields(before) != fields(after):
+        return "The PDF form field references must stay intact"
+    return None
+
+
+def _is_pdf_annotation_only_edit(before: str, after: str) -> bool:
+    """True when only existing PDF annotation text changed, not its placement."""
+    from src.pdf_form_doc import _ANNOTATION_RE
+
+    if _pdf_source_upload_id(before) != _pdf_source_upload_id(after):
+        return False
+    old = list(_ANNOTATION_RE.finditer(before))
+    new = list(_ANNOTATION_RE.finditer(after))
+    if not old or len(old) != len(new):
+        return False
+    def normalized(content, matches):
+        for match in reversed(matches):
+            content = content[:match.start('value')] + '<text>' + content[match.end('value'):]
+        return content.rstrip()
+    return normalized(before, old) == normalized(after, new)
+
+
 def _strip_pdf_editor_markers(content: str) -> str:
     """Turn a PDF-wrapper markdown doc into ordinary editable markdown.
 
@@ -485,7 +527,12 @@ class UpdateDocumentTool:
             if is_email_doc:
                 doc.language = "email"
 
-            if not is_email_doc and _pdf_source_upload_id(doc.current_content or ""):
+            if not is_email_doc and _pdf_form_source_upload_id(doc.current_content or ""):
+                pdf_error = _validate_pdf_form_edit(doc.current_content or "", new_content)
+                if pdf_error:
+                    return {"error": f"PDF form edit rejected: {pdf_error}"}
+            elif (not is_email_doc and _pdf_source_upload_id(doc.current_content or "")
+                  and not _is_pdf_annotation_only_edit(doc.current_content or "", new_content)):
                 return _create_pdf_text_derivative(
                     db,
                     source_doc=doc,
@@ -618,7 +665,12 @@ class EditDocumentTool:
             if applied == 0:
                 return {"error": f"No edits applied — none of the FIND blocks matched the document content (skipped {skipped})"}
 
-            if _pdf_source_upload_id(doc.current_content or ""):
+            if _pdf_form_source_upload_id(doc.current_content or ""):
+                pdf_error = _validate_pdf_form_edit(doc.current_content or "", updated_content)
+                if pdf_error:
+                    return {"error": f"PDF form edit rejected: {pdf_error}"}
+            elif (_pdf_source_upload_id(doc.current_content or "")
+                  and not _is_pdf_annotation_only_edit(doc.current_content or "", updated_content)):
                 return _create_pdf_text_derivative(
                     db,
                     source_doc=doc,

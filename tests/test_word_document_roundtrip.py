@@ -44,13 +44,51 @@ def test_safe_text_edit_keeps_styles_tables_and_header():
     assert result.sections[0].header.paragraphs[0].text == "Confidential"
 
 
-def test_cross_style_and_structure_edits_are_rejected():
+def test_cross_style_edit_preserves_other_document_objects():
     original = _sample_word()
     content = import_content(original, UPLOAD_ID)
+    result = Document(io.BytesIO(render_edited_word(
+        original, content, content.replace("Revenue increased", "Fell")
+    )))
+    assert result.paragraphs[1].text == "Fell"
+    assert result.paragraphs[1].runs[1].bold is True
+    assert result.tables[0].cell(0, 0).text == "Table value"
+    assert result.sections[0].header.paragraphs[0].text == "Confidential"
+
+
+def test_filling_empty_paragraph_preserves_document():
+    document = Document()
+    document.add_paragraph('Heading')
+    document.add_paragraph()
+    stream = io.BytesIO()
+    document.save(stream)
+    original = stream.getvalue()
+    content = import_content(original, UPLOAD_ID)
+    result = Document(io.BytesIO(render_edited_word(
+        original, content, content.replace('Heading\n', 'Heading\nCompleted')
+    )))
+    assert [p.text for p in result.paragraphs] == ['Heading', 'Completed']
+
+
+def test_edit_touching_word_tab_is_rejected():
+    document = Document()
+    run = document.add_paragraph().add_run('First')
+    run.add_tab()
+    run.add_text('Second')
+    stream = io.BytesIO()
+    document.save(stream)
+    original = stream.getvalue()
+    content = import_content(original, UPLOAD_ID)
     with pytest.raises(UnsafeWordEdit):
-        render_edited_word(original, content, content.replace("Revenue increased", "Fell"))
-    with pytest.raises(UnsafeWordEdit):
-        render_edited_word(original, content, content + "\nNew paragraph")
+        render_edited_word(original, content, content.replace('First', 'Changed'))
+
+
+def test_structure_and_source_changes_are_rejected():
+    original = _sample_word()
+    content = import_content(original, UPLOAD_ID)
+    appended = Document(io.BytesIO(render_edited_word(original, content, content + "\nNew paragraph")))
+    assert appended.paragraphs[-1].text == "New paragraph"
+    assert appended.tables[0].cell(0, 0).text == "Table value"
     with pytest.raises(UnsafeWordEdit):
         render_edited_word(original, content, content.replace(UPLOAD_ID, "b" * 32 + ".docx"))
 
@@ -106,9 +144,11 @@ def test_word_import_edit_and_export_route_keeps_original_layout(tmp_path, monke
         assert edited_preview.status_code == 200
         assert previewed[-1] == exported.content
 
-        unsafe = client.put(f'/api/document/{doc_id}', json={"content": edited + '\nNew paragraph'})
-        assert unsafe.status_code == 422
-        assert client.get(f'/api/document/{doc_id}/export-docx').content == exported.content
+        appended = client.put(f'/api/document/{doc_id}', json={"content": edited + '\nNew paragraph'})
+        assert appended.status_code == 200
+        appended_word = Document(io.BytesIO(client.get(f'/api/document/{doc_id}/export-docx').content))
+        assert appended_word.paragraphs[-1].text == 'New paragraph'
+        assert appended_word.tables[0].cell(0, 0).text == 'Table value'
 
 
 def test_upload_cleanup_preserves_document_sources(tmp_path, monkeypatch):
