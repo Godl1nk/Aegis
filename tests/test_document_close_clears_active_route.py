@@ -1,9 +1,8 @@
 """Issue #1160 — route-level regression for clearing the active-document pointer.
 
-Exercises the REAL ``PATCH /api/document/{id}`` (session_id="") and
-``DELETE /api/document/{id}`` handlers, proving that closing a document's tab
-(detach or delete) clears the in-memory active-document pointer under the actual
-owner/session routing — not just the helper in isolation.
+Exercises the REAL ``PATCH /api/document/{id}`` (session_id=""),
+``DELETE /api/document/{id}``, and restore handlers under actual owner/session
+routing, including recovery into the Library after a soft delete.
 
 Calls the route handler callables DIRECTLY (extracted from the router) instead of
 through Starlette's TestClient. The TestClient path spun up a middleware app +
@@ -16,6 +15,8 @@ import tempfile
 import uuid
 from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
@@ -95,3 +96,32 @@ async def test_unlinking_a_different_doc_leaves_pointer():
     set_active_document(active_id)
     await patch_document(_req(), other_id, DocumentPatch(session_id=""))
     assert get_active_document() == active_id
+
+
+async def test_restore_soft_deleted_document_preserves_content_and_owner():
+    delete_document = _endpoint("DELETE", "/api/document/{doc_id}")
+    restore_document = _endpoint("POST", "/api/document/{doc_id}/restore")
+    documents_library = _endpoint("GET", "/api/documents/library")
+    doc_id = _make_doc()
+    await delete_document(_req(), doc_id)
+    library_args = dict(search=None, language=None, sort="recent", offset=0, limit=20, archived=False)
+    assert doc_id not in {d["id"] for d in (await documents_library(_req(), **library_args))["documents"]}
+    restored = await restore_document(_req(), doc_id)
+    assert restored["is_active"] is True
+    assert restored["current_content"] == "hi"
+    assert doc_id in {d["id"] for d in (await documents_library(_req(), **library_args))["documents"]}
+    db = _TS()
+    try:
+        doc = db.query(Document).filter(Document.id == doc_id).one()
+        assert doc.owner == "tester"
+        assert doc.version_count == 1
+    finally:
+        db.close()
+
+
+async def test_restore_rejects_other_owner():
+    restore_document = _endpoint("POST", "/api/document/{doc_id}/restore")
+    doc_id = _make_doc()
+    with pytest.raises(HTTPException) as exc:
+        await restore_document(SimpleNamespace(state=SimpleNamespace(current_user="other")), doc_id)
+    assert exc.value.status_code == 404

@@ -4532,17 +4532,6 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (!opts.skipSave) saveCurrentToMap();
     _resetTransientDocViews();
 
-    // Auto-delete the doc we're leaving if it's completely empty
-    const prevId = activeDocId;
-    if (prevId && prevId !== docId && docs.has(prevId)) {
-      const prev = docs.get(prevId);
-      if (prev.language !== 'email' && !(prev.content || '').trim() && !(prev.title || '').trim()) {
-        fetch(`${API_BASE}/api/document/${prevId}`, { method: 'DELETE' }).catch(() => {});
-        docs.delete(prevId);
-        _syncDocIndicator();
-      }
-    }
-
     activeDocId = docId;
     clearSelection();
     const doc = docs.get(docId);
@@ -4664,20 +4653,15 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
   }
 
-  // Close a doc tab without breaking its chat association. The chat transcript
-  // can contain durable document links, so detaching a non-empty doc from the
-  // session makes it look like the document vanished from that chat.
+  // Closing a tab only changes the local editor state. A stale/empty local
+  // cache must never soft-delete a saved document from the Library.
   function _detachDocFromSession(docId, { toast = false } = {}) {
-    const doc = docs.get(docId);
-    const hasContent = doc && doc.content && doc.content.trim().length > 0;
-    if (hasContent) {
+    if (activeDocId === docId) {
       saveDocument({ silent: true }).catch(() => {});
-      if (toast && uiModule) uiModule.showToast('Document closed');
-    } else {
-      fetch(`${API_BASE}/api/document/${docId}`, { method: 'DELETE' }).catch(() => {});
     }
     docs.delete(docId);
     _syncDocIndicator();
+    if (toast && uiModule) uiModule.showToast('Document closed');
   }
 
   async function closeTab(docId) {
@@ -7396,6 +7380,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       language: doc.language || '',
       content: doc.current_content || '',
       version: doc.version_count || 1,
+      isActive: doc.is_active !== false,
       sessionId: sessionId || doc.session_id,
       userSetLanguage: !!doc.language,
       _composeAtts: existing?._composeAtts,
@@ -9163,6 +9148,21 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (_docTabMenu) { _docTabMenu.style.display = 'none'; }
   }
 
+  async function restoreDocumentToLibrary(docId) {
+    try {
+      const res = await fetch(`${API_BASE}/api/document/${encodeURIComponent(docId)}/restore`, {
+        method: 'POST', credentials: 'same-origin',
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const restored = await res.json();
+      const doc = docs.get(docId);
+      if (doc) doc.isActive = restored.is_active === true;
+      if (uiModule) uiModule.showToast('Document restored to Library');
+    } catch (e) {
+      if (uiModule) uiModule.showError(`Could not restore document: ${e.message || e}`);
+    }
+  }
+
   function showDocTabMenu(btnEl, docId) {
     // Toggle off if already open for this doc
     if (_docTabMenu && _docTabMenu.style.display === 'block' && _docTabMenu._docId === docId) {
@@ -9232,6 +9232,9 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     }
     const _downloadIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
     items += `<div class="dropdown-item-compact doc-tab-action" data-action="download">${_di(_downloadIco)}<span>Download</span></div>`;
+    if (!doc.isActive) {
+      items += `<div class="dropdown-item-compact doc-tab-action" data-action="restore"><span class="dropdown-icon">↩</span><span>Restore to Library</span></div>`;
+    }
     // "Send signed reply" — only if this doc was opened from an email attachment
     if (doc.sourceEmailUid && doc.sourceEmailFolder) {
       const _sendBackIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>';
@@ -9290,6 +9293,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
             break;
           }
           case 'signed-reply': _sendSignedReply(docId); break;
+          case 'restore': restoreDocumentToLibrary(docId); break;
           case 'close': closeTab(docId); break;
           case 'delete': deleteActiveDocument(); break;
         }

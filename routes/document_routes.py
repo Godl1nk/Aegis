@@ -894,6 +894,27 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         finally:
             db.close()
 
+    @router.post("/api/document/{doc_id}/restore")
+    async def restore_document(request: Request, doc_id: str) -> Dict[str, Any]:
+        user = get_current_user(request)
+        db = SessionLocal()
+        try:
+            doc = db.query(Document).filter(Document.id == doc_id).first()
+            if not doc:
+                raise HTTPException(404, "Document not found")
+            _verify_doc_owner(db, doc, user)
+            doc.is_active = True
+            db.commit()
+            db.refresh(doc)
+            return _doc_to_dict(doc)
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(500, str(e))
+        finally:
+            db.close()
+
     # ---- GET /api/document/{doc_id}/versions ----
     @router.get("/api/document/{doc_id}/versions")
     async def list_versions(request: Request, doc_id: str) -> List[Dict[str, Any]]:
