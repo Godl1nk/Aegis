@@ -323,8 +323,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         ? langIcon(doc.language, 12, { style: 'opacity:0.65;flex-shrink:0;color:currentColor;margin-right:4px;' })
         : '';
       const langChip = `<span class="doc-tab-lang">${lic}</span>`;
+      const restoreBtn = doc.isActive ? '' : `<button class="doc-tab-restore" data-doc-id="${id}" title="Restore to Library" aria-label="Restore to Library">↩</button>`;
       html += `<div class="doc-tab${isActive ? ' active' : ''}" draggable="true" data-doc-id="${id}" title="${_esc(title)}">
         ${verChip}${langChip}<span class="doc-tab-title">${_esc(shortTitle)}</span>
+        ${restoreBtn}
         <button class="doc-tab-close" data-doc-id="${id}" title="Unlink from chat (kept in the Library)">&times;</button>
       </div>`;
     }
@@ -375,7 +377,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     tabBar.querySelectorAll('.doc-tab').forEach(tab => {
       tab.addEventListener('click', (e) => {
         // Check if click was on or inside the close/play button
-        if (e.target.closest('.doc-tab-close') || e.target.closest('.doc-tab-play') || e.target.closest('.doc-tab-menu-btn') || e.target.closest('.doc-tab-version')) return;
+        if (e.target.closest('.doc-tab-close') || e.target.closest('.doc-tab-play') || e.target.closest('.doc-tab-menu-btn') || e.target.closest('.doc-tab-restore') || e.target.closest('.doc-tab-version')) return;
         if (_isEditingTabTitle) return;
         // If clicking the title span, delay to allow dblclick
         if (e.target.classList.contains('doc-tab-title')) {
@@ -424,6 +426,12 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         e.stopPropagation();
         const docId = menuBtnEl.dataset.docId;
         if (docId) showDocTabMenu(menuBtnEl, docId);
+        return;
+      }
+      const restoreBtn = e.target.closest('.doc-tab-restore');
+      if (restoreBtn) {
+        e.stopPropagation();
+        restoreDocumentToLibrary(restoreBtn.dataset.docId);
         return;
       }
       const closeBtn = e.target.closest('.doc-tab-close');
@@ -9157,6 +9165,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       const restored = await res.json();
       const doc = docs.get(docId);
       if (doc) doc.isActive = restored.is_active === true;
+      renderTabs();
       if (uiModule) uiModule.showToast('Document restored to Library');
     } catch (e) {
       if (uiModule) uiModule.showError(`Could not restore document: ${e.message || e}`);
@@ -9232,9 +9241,6 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     }
     const _downloadIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
     items += `<div class="dropdown-item-compact doc-tab-action" data-action="download">${_di(_downloadIco)}<span>Download</span></div>`;
-    if (!doc.isActive) {
-      items += `<div class="dropdown-item-compact doc-tab-action" data-action="restore"><span class="dropdown-icon">↩</span><span>Restore to Library</span></div>`;
-    }
     // "Send signed reply" — only if this doc was opened from an email attachment
     if (doc.sourceEmailUid && doc.sourceEmailFolder) {
       const _sendBackIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>';
@@ -9293,7 +9299,6 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
             break;
           }
           case 'signed-reply': _sendSignedReply(docId); break;
-          case 'restore': restoreDocumentToLibrary(docId); break;
           case 'close': closeTab(docId); break;
           case 'delete': deleteActiveDocument(); break;
         }

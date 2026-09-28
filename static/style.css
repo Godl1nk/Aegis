@@ -13133,7 +13133,7 @@ textarea.memory-add-input {
   font-size: 9px;
   opacity: 0.5;
 }
-.doc-tab-close {
+.doc-tab-close, .doc-tab-restore {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -13150,7 +13150,8 @@ textarea.memory-add-input {
   align-self: center;
   transition: opacity 0.12s;
 }
-.doc-tab-close:hover { opacity: 1; }
+.doc-tab-restore { color: var(--accent); opacity: 0.9; font-size: 16px; }
+.doc-tab-close:hover, .doc-tab-restore:hover { opacity: 1; }
 /* Mobile-only footer (Close + Copy); hidden on desktop and in email mode. */
 .doc-mobile-footer { display: none; }
 /* Mobile-only back-to-chat. Desktop keeps the hamburger and icon rail, so it
