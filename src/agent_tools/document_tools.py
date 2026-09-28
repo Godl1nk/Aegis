@@ -238,8 +238,8 @@ def parse_edit_blocks(content: str) -> list:
     return edits
 
 
-def _find_edit_span(document: str, find: str) -> Optional[tuple[int, int]]:
-    """Locate a FIND block without guessing between repeated template fields."""
+def _candidate_edit_spans(document: str, find: str) -> list[tuple[int, int]]:
+    """Find exact or whitespace-equivalent spans in the current document."""
     numbered = [re.match(r"^(\d+)\t(.*)$", line) for line in find.split("\n")]
     if numbered and all(numbered):
         lines = document.split("\n")
@@ -248,24 +248,55 @@ def _find_edit_span(document: str, find: str) -> Optional[tuple[int, int]]:
                 and all(0 <= pos < len(lines) and lines[pos] == match.group(2)
                         for pos, match in zip(positions, numbered))):
             start = sum(len(line) + 1 for line in lines[:positions[0]])
-            return start, start + len("\n".join(lines[positions[0]:positions[-1] + 1]))
+            return [(start, start + len("\n".join(lines[positions[0]:positions[-1] + 1])))]
         find = "\n".join(match.group(2) for match in numbered)
 
     exact = [match.span() for match in re.finditer(re.escape(find), document)]
-    if len(exact) == 1:
-        return exact[0]
     if exact:
-        return None
+        return exact
 
     # Word extraction often has extra blank lines or different spacing from
     # the numbered context shown to the model. Permit whitespace differences
     # only when they identify exactly one location; preserve the actual text.
     words = re.findall(r"\S+", find)
     if not words:
-        return None
+        return []
     pattern = r"\s+".join(re.escape(word) for word in words)
-    matches = [match.span() for match in re.finditer(pattern, document)]
+    return [match.span() for match in re.finditer(pattern, document)]
+
+
+def _find_edit_span(document: str, find: str) -> Optional[tuple[int, int]]:
+    """Locate one unambiguous FIND block."""
+    matches = _candidate_edit_spans(document, find)
     return matches[0] if len(matches) == 1 else None
+
+
+def _plan_edit_spans(document: str, edits: list[dict]) -> tuple[list, int]:
+    groups = {}
+    for index, edit in enumerate(edits):
+        groups.setdefault(tuple(re.findall(r"\S+", edit["find"])), []).append(index)
+    planned = []
+    skipped = 0
+    for index, edit in enumerate(edits):
+        find = edit["find"]
+        matches = _candidate_edit_spans(document, find)
+        group = groups[tuple(re.findall(r"\S+", find))]
+        if len(matches) == 1:
+            span = matches[0]
+        elif len(group) > 1 and len(matches) == len(group):
+            # Pair repeated template fields and edit blocks in document order
+            # only when their counts agree; no occurrence is guessed or reused.
+            span = matches[group.index(index)]
+        else:
+            logger.warning(f"edit_document: FIND text not found or ambiguous, skipping: {find[:80]!r}")
+            skipped += 1
+            continue
+        if any(span[0] < other[1] and other[0] < span[1] for other, _ in planned):
+            logger.warning("edit_document: overlapping FIND blocks, skipping")
+            skipped += 1
+            continue
+        planned.append((span, edit))
+    return planned, skipped
 
 def parse_suggest_blocks(content: str) -> list:
     """Parse <<<FIND>>>...<<<SUGGEST>>>...<<<REASON>>>...<<<END>>> blocks."""
@@ -670,24 +701,20 @@ class EditDocumentTool:
 
             updated_content = doc.current_content
             applied = 0
-            skipped = 0
-            for edit in edits:
+            planned, skipped = _plan_edit_spans(doc.current_content, edits)
+
+            for span, edit in sorted(planned, key=lambda item: item[0][0], reverse=True):
+                replacement = edit["replace"]
                 _find = edit["find"]
-                span = _find_edit_span(updated_content, _find)
-                if span:
-                    replacement = edit["replace"]
-                    # An insertion commonly keeps FIND as its prefix. Retain
-                    # the document's original spacing instead of flattening it.
-                    if replacement.startswith(_find) and updated_content[slice(*span)] != _find:
-                        replacement = updated_content[slice(*span)] + replacement[len(_find):]
-                    updated_content = updated_content[:span[0]] + replacement + updated_content[span[1]:]
-                    applied += 1
-                else:
-                    logger.warning(f"edit_document: FIND text not found or ambiguous, skipping: {_find[:80]!r}")
-                    skipped += 1
+                # An insertion commonly keeps FIND as its prefix. Retain
+                # the document's original spacing instead of flattening it.
+                if replacement.startswith(_find) and doc.current_content[slice(*span)] != _find:
+                    replacement = doc.current_content[slice(*span)] + replacement[len(_find):]
+                updated_content = updated_content[:span[0]] + replacement + updated_content[span[1]:]
+                applied += 1
 
             if applied == 0:
-                return {"error": f"No edits applied — FIND text was absent or matched more than one location (skipped {skipped}). Copy exact text from the current document; for repeated template text, include its line-number and TAB from the active-document context in FIND."}
+                return {"error": f"No edits applied — FIND text was absent or matched more than one location (skipped {skipped}). Copy text from the current document. For repeated fields, use line-numbered FIND or provide one block per occurrence in document order."}
 
             if _pdf_form_source_upload_id(doc.current_content or ""):
                 pdf_error = _validate_pdf_form_edit(doc.current_content or "", updated_content)

@@ -9,7 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from src.word_document import UnsafeWordEdit, import_content, render_edited_word
-from src.agent_tools.document_tools import _find_edit_span
+from src.agent_tools.document_tools import _find_edit_span, _plan_edit_spans
 
 
 UPLOAD_ID = "a" * 32 + ".docx"
@@ -139,6 +139,28 @@ def test_numbered_find_inserts_into_selected_repeated_word_cell():
     result = Document(io.BytesIO(render_edited_word(original, content, edited)))
     assert result.tables[0].cell(0, 0).text == 'Contents :'
     assert [p.text for p in result.tables[0].cell(1, 0).paragraphs] == ['Contents :', 'Day 2 note']
+
+
+def test_batched_repeated_find_inserts_into_each_word_cell():
+    document = Document()
+    table = document.add_table(rows=3, cols=1)
+    for row in table.rows:
+        row.cells[0].text = 'Contents :'
+    document.add_paragraph('End')
+    stream = io.BytesIO()
+    document.save(stream)
+    original = stream.getvalue()
+    content = import_content(original, UPLOAD_ID)
+    edits = [{'find': 'Contents :', 'replace': f'Contents :\nDay {i} note'} for i in range(1, 4)]
+    planned, skipped = _plan_edit_spans(content, edits)
+    assert skipped == 0
+    updated = content
+    for span, edit in sorted(planned, key=lambda item: item[0][0], reverse=True):
+        updated = updated[:span[0]] + edit['replace'] + updated[span[1]:]
+    result = Document(io.BytesIO(render_edited_word(original, content, updated)))
+    assert [[p.text for p in row.cells[0].paragraphs] for row in result.tables[0].rows] == [
+        ['Contents :', f'Day {i} note'] for i in range(1, 4)
+    ]
 
 
 def test_edit_and_insert_lines_in_same_word_paragraph_position():
