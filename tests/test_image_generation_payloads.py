@@ -15,7 +15,8 @@ def _png_b64(size=(8, 8)):
 
 
 @pytest.mark.asyncio
-async def test_local_gpt_named_image_endpoint_gets_minimal_generation_payload(monkeypatch, tmp_path):
+@pytest.mark.parametrize("chat_path", ["/chat/completions", "/responses"])
+async def test_local_gpt_named_image_endpoint_gets_minimal_generation_payload(monkeypatch, tmp_path, chat_path):
     captured = {}
     img_b64 = _png_b64((1200, 600))
 
@@ -43,7 +44,7 @@ async def test_local_gpt_named_image_endpoint_gets_minimal_generation_payload(mo
 
     monkeypatch.setattr(ai, "GENERATED_IMAGES_DIR", tmp_path)
     monkeypatch.setattr(ai, "_resolve_model", lambda *a, **k: (
-        "http://127.0.0.1:8100/v1/chat/completions",
+        "http://127.0.0.1:8100/v1" + chat_path,
         "gpt-image-1",
         {},
     ))
@@ -63,7 +64,8 @@ async def test_local_gpt_named_image_endpoint_gets_minimal_generation_payload(mo
 
 
 @pytest.mark.asyncio
-async def test_local_gpt_named_reference_image_uses_local_img2img(monkeypatch, tmp_path):
+@pytest.mark.parametrize("chat_path", ["/chat/completions", "/responses"])
+async def test_local_gpt_named_reference_image_uses_local_img2img(monkeypatch, tmp_path, chat_path):
     captured = {}
     img_b64 = _png_b64((1024, 512))
     (tmp_path / "ref.png").write_bytes(base64.b64decode(img_b64))
@@ -94,7 +96,7 @@ async def test_local_gpt_named_reference_image_uses_local_img2img(monkeypatch, t
 
     monkeypatch.setattr(ai, "GENERATED_IMAGES_DIR", tmp_path)
     monkeypatch.setattr(ai, "_resolve_model", lambda *a, **k: (
-        "http://127.0.0.1:8100/v1/chat/completions",
+        "http://127.0.0.1:8100/v1" + chat_path,
         "gpt-image-1",
         {},
     ))
@@ -117,7 +119,8 @@ async def test_local_gpt_named_reference_image_uses_local_img2img(monkeypatch, t
 
 
 @pytest.mark.asyncio
-async def test_local_reference_image_a1111_fallback_gets_target_dimensions(monkeypatch, tmp_path):
+@pytest.mark.parametrize("chat_path", ["/chat/completions", "/responses"])
+async def test_local_reference_image_a1111_fallback_gets_target_dimensions(monkeypatch, tmp_path, chat_path):
     calls = []
     img_b64 = _png_b64()
     (tmp_path / "ref.png").write_bytes(base64.b64decode(img_b64))
@@ -149,7 +152,7 @@ async def test_local_reference_image_a1111_fallback_gets_target_dimensions(monke
 
     monkeypatch.setattr(ai, "GENERATED_IMAGES_DIR", tmp_path)
     monkeypatch.setattr(ai, "_resolve_model", lambda *a, **k: (
-        "http://127.0.0.1:8100/v1/chat/completions",
+        "http://127.0.0.1:8100/v1" + chat_path,
         "ernie-image",
         {},
     ))
@@ -167,3 +170,43 @@ async def test_local_reference_image_a1111_fallback_gets_target_dimensions(monke
     assert calls[2][1]["width"] == 768
     assert calls[2][1]["height"] == 512
     assert "steps" not in calls[2][1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chat_path", ["/chat/completions", "/responses"])
+async def test_mcp_image_generation_uses_sibling_route(monkeypatch, chat_path):
+    from mcp_servers import image_gen_server
+
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"url": "https://example.com/test.png"}]}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, **kwargs):
+            captured["url"] = url
+            return FakeResponse()
+
+    monkeypatch.setattr(ai, "_resolve_model", lambda *a, **k: (
+        "http://127.0.0.1:8100/proxy/v1" + chat_path, "Qwen-Image-2.1", {},
+    ))
+    monkeypatch.setattr("src.settings.load_settings", lambda: {})
+    monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: default)
+    monkeypatch.setattr("httpx.AsyncClient", FakeAsyncClient)
+
+    result = await image_gen_server.call_tool("generate_image", {"prompt": "apple", "model": "Qwen-Image-2.1"})
+
+    assert captured["url"] == "http://127.0.0.1:8100/proxy/v1/images/generations"
+    assert "Generated image" in result[0].text

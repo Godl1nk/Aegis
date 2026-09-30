@@ -2287,16 +2287,15 @@ export function renderImageChoiceCard(payload, options) {
     return wrap;
   };
 
-  const cancelPlaceholder = (placeholderEl) => {
-    if (placeholderEl) {
-      const loadingCard = placeholderEl.querySelector('.generated-image-loading-card');
-      if (loadingCard) loadingCard.classList.add('cancelled');
-      const titleEl = placeholderEl.querySelector('.generated-image-loading-title');
-      if (titleEl) titleEl.textContent = 'Cancelled';
-    }
-  };
+  const errorEl = document.createElement('div');
+  errorEl.className = 'image-choice-error';
+  errorEl.setAttribute('role', 'alert');
+  errorEl.hidden = true;
+  card.appendChild(errorEl);
 
   goBtn.addEventListener('click', async () => {
+    errorEl.hidden = true;
+    errorEl.textContent = '';
     setBusy(true);
     const placeholder = showPlaceholder(pl.prompt || '', pl.tool || '');
     const liveCard = box.querySelector('.image-choice-card');
@@ -2359,9 +2358,13 @@ export function renderImageChoiceCard(payload, options) {
       if (uiModule.scrollHistory) uiModule.scrollHistory();
       window.dispatchEvent(new CustomEvent('gallery-refresh'));
     } catch (e) {
-      cancelPlaceholder(placeholder);
       setBusy(false);
-      if (uiModule.showToast) uiModule.showToast('Image generation failed: ' + (e.message || e));
+      errorEl.textContent = 'Image generation failed: ' + (e.message || e);
+      errorEl.hidden = false;
+      // Keep the selected model and retry controls after a failed request.
+      // A detached placeholder belongs to a chat the user has navigated away from.
+      if (placeholder.isConnected) placeholder.replaceWith(card);
+      if (uiModule.showToast) uiModule.showToast(errorEl.textContent);
     }
   });
 

@@ -61,6 +61,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         import httpx
         from src.settings import load_settings, get_setting
         from src.ai_interaction import _resolve_model
+        from src.endpoint_resolver import normalize_base
 
         if not get_setting("image_gen_enabled", True):
             return [TextContent(type="text", text="Error: Image generation is disabled by the administrator.")]
@@ -89,7 +90,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         is_openai_api = "api.openai.com" in url
         is_gpt_image = "gpt-image" in model_id.lower()
         is_dalle = "dall-e" in model_id.lower()
-        base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
+        base_url = normalize_base(url)
         images_url = base_url + "/images/generations"
 
         valid_gpt_sizes = {"1024x1024", "1024x1536", "1536x1024", "auto"}

@@ -82,7 +82,7 @@ def set_rag_manager(rag_mgr, personal_docs_mgr=None):
 # Model resolution
 # ---------------------------------------------------------------------------
 
-from src.endpoint_resolver import build_chat_url, build_headers, build_models_url, resolve_endpoint_runtime, _ep_api_method
+from src.endpoint_resolver import build_chat_url, build_headers, build_models_url, normalize_base, resolve_endpoint_runtime, _ep_api_method
 
 
 def _resolve_model(spec: str, owner: Optional[str] = None) -> Tuple[str, str, Dict]:
@@ -1784,8 +1784,8 @@ async def do_generate_image(
     is_gpt_image = "gpt-image" in model_id.lower()
     is_dalle = "dall-e" in model_id.lower()
 
-    # Build the images endpoint URL from the chat completions URL
-    base_url = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
+    # Image routes are siblings of chat routes, including Responses endpoints.
+    base_url = normalize_base(url)
     images_url = base_url + "/images/generations"
     edits_url = base_url + "/images/edits"
 
@@ -1892,7 +1892,7 @@ async def do_generate_image(
                         "size": f"{local_width}x{local_height}",
                         "strength": strength,
                     }
-                    base_root = url.replace("/chat/completions", "").replace("/v1/messages", "").rstrip("/")
+                    base_root = base_url
                     base_root_no_v1 = base_root[:-3] if base_root.endswith("/v1") else base_root
 
                     candidates = [
