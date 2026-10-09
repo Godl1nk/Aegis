@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.word_document import UnsafeWordEdit, import_content, render_edited_word
+from src.word_document import UnsafeWordEdit, import_content, render_document_edit, render_edited_word
 from src.agent_tools.document_tools import _find_edit_span, _plan_edit_spans
 
 
@@ -203,6 +203,108 @@ def test_adding_lines_to_empty_word_document():
     assert [p.text for p in result.paragraphs] == ['First', 'Second']
 
 
+def test_editing_repeated_logbook_after_prior_insertions(tmp_path):
+    from core import database
+
+    document = Document()
+    table = document.add_table(rows=6, cols=1)
+    for row in table.rows:
+        cell = row.cells[0]
+        cell.text = 'Week 4 (Date):'
+        cell.add_paragraph('Objective(s):')
+        cell.add_paragraph('Contents :')
+        for _ in range(35):
+            cell.add_paragraph()
+        cell.add_paragraph('(make copies if necessary)')
+    document.sections[0].header.paragraphs[0].text = 'Original header'
+    stream = io.BytesIO()
+    document.save(stream)
+    source = stream.getvalue()
+    source_path = tmp_path / UPLOAD_ID
+    source_path.write_bytes(source)
+    original = import_content(source, UPLOAD_ID)
+    first = original.replace('Contents :', 'Contents :\nSafety induction\nUnit tour', 1)
+    # A later template entry is still blank after the earlier insertion.
+    lines = first.split('\n')
+    index = [i for i, line in enumerate(lines) if line == 'Week 4 (Date):'][2]
+    lines[index] = 'Week 4 (Date): 6 October 2026'
+    dated = '\n'.join(lines)
+    lines.insert(index + 3, 'Process safety campaign')
+    filled = '\n'.join(lines)
+
+    engine = create_engine('sqlite://')
+    database.Base.metadata.create_all(engine)
+
+    class Uploads:
+        def resolve_upload(self, upload_id, owner=None, auth_manager=None):
+            assert upload_id == UPLOAD_ID and owner == 'alice'
+            return {'path': str(source_path)}
+
+    with sessionmaker(bind=engine)() as db:
+        doc = database.Document(id='logbook', title='Logbook', language='docx',
+                                current_content=first, version_count=2, owner='alice')
+        db.add(doc)
+        for number, text in enumerate([original, first], 1):
+            db.add(database.DocumentVersion(id=f'v{number}', document_id=doc.id,
+                                           version_number=number, content=text))
+        db.commit()
+        for number, text in enumerate([dated, filled], 3):
+            result = render_document_edit(db, doc, text, Uploads(), 'alice')
+            assert import_content(result, UPLOAD_ID) == text
+            db.add(database.DocumentVersion(id=f'v{number}', document_id=doc.id,
+                                           version_number=number, content=text))
+            doc.current_content = text
+            doc.version_count = number
+            db.commit()
+            # Export and preview must replay the same accepted edit.
+            assert render_document_edit(db, doc, text, Uploads(), 'alice') == result
+
+        rendered = Document(io.BytesIO(result))
+        assert rendered.tables[0].cell(0, 0).paragraphs[3].text == 'Safety induction'
+        assert rendered.tables[0].cell(1, 0).paragraphs[0].text == 'Week 4 (Date):'
+        assert rendered.tables[0].cell(2, 0).paragraphs[0].text == 'Week 4 (Date): 6 October 2026'
+        assert rendered.tables[0].cell(2, 0).paragraphs[3].text == 'Process safety campaign'
+        assert rendered.sections[0].header.paragraphs[0].text == 'Original header'
+        with zipfile.ZipFile(io.BytesIO(source)) as before, zipfile.ZipFile(io.BytesIO(result)) as after:
+            for name in before.namelist():
+                if name != 'word/document.xml':
+                    assert before.read(name) == after.read(name)
+        # Reverting to a saved snapshot must not delete Word objects by diff.
+        assert render_document_edit(db, doc, original, Uploads(), 'alice') == source
+        restored = render_document_edit(db, doc, first, Uploads(), 'alice')
+        assert import_content(restored, UPLOAD_ID) == first
+        with pytest.raises(UnsafeWordEdit):
+            render_document_edit(db, doc, filled.replace('Unit tour\n', ''), Uploads(), 'alice')
+        db.add(database.DocumentVersion(id='v5', document_id=doc.id,
+                                       version_number=5, content=first))
+        doc.current_content = first
+        doc.version_count = 5
+        db.commit()
+        after_restore = first.replace('Safety induction', 'Safety orientation')
+        assert import_content(render_document_edit(db, doc, after_restore, Uploads(), 'alice'),
+                              UPLOAD_ID) == after_restore
+
+
+def test_repeated_blank_paragraphs_do_not_move_across_cells():
+    document = Document()
+    table = document.add_table(rows=2, cols=1)
+    for row in table.rows:
+        row.cells[0].text = 'Contents :'
+        for _ in range(40):
+            row.cells[0].add_paragraph()
+    stream = io.BytesIO()
+    document.save(stream)
+    source = stream.getvalue()
+    original = import_content(source, UPLOAD_ID)
+    lines = original.split('\n')
+    second = [i for i, line in enumerate(lines) if line == 'Contents :'][1]
+    lines.insert(second + 1, 'New activity')
+    result = Document(io.BytesIO(render_edited_word(source, original, '\n'.join(lines))))
+    assert len(result.tables[0].cell(0, 0).paragraphs) == 41
+    assert result.tables[0].cell(1, 0).paragraphs[1].text == 'New activity'
+    assert len(result.tables[0].cell(1, 0).paragraphs) == 42
+
+
 def test_edit_touching_word_tab_is_rejected():
     document = Document()
     run = document.add_paragraph().add_run('First')
@@ -282,6 +384,7 @@ def test_word_import_edit_and_export_route_keeps_original_layout(tmp_path, monke
         appended_word = Document(io.BytesIO(client.get(f'/api/document/{doc_id}/export-docx').content))
         assert appended_word.paragraphs[-1].text == 'New paragraph'
         assert appended_word.tables[0].cell(0, 0).text == 'Table value'
+        assert appended.json()['version_count'] == saved.json()['version_count'] + 1
 
 
 def test_upload_cleanup_preserves_document_sources(tmp_path, monkeypatch):

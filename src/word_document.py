@@ -61,10 +61,7 @@ def render_edited_word(source: bytes, original_content: str, edited_content: str
         raise UnsafeWordEdit("The imported Word paragraphs could not be mapped")
     if [p.text for p in paragraphs] != original_lines:
         raise UnsafeWordEdit("The Word source no longer matches the imported text")
-    if len(original_lines) == len(edited_lines):
-        changes = [('replace', 0, len(paragraphs), 0, len(edited_lines))]
-    else:
-        changes = SequenceMatcher(None, original_lines, edited_lines, autojunk=False).get_opcodes()
+    changes = _paragraph_changes(original_lines, edited_lines)
     for action, old_start, old_end, new_start, new_end in changes:
         old_count, new_count = old_end - old_start, new_end - new_start
         if action == 'equal':
@@ -101,6 +98,24 @@ def render_edited_word(source: bytes, original_content: str, edited_content: str
     if [p.text for p in _paragraphs(WordDocument(io.BytesIO(edited_bytes)))] != edited_lines:
         raise UnsafeWordEdit("The edited Word file could not be verified")
     return edited_bytes
+
+
+def _paragraph_changes(original: list[str], edited: list[str]):
+    # Pin unchanged boundaries before matching repeated template text. A global
+    # longest-match diff can align a later blank section with an earlier one.
+    start = 0
+    while start < min(len(original), len(edited)) and original[start] == edited[start]:
+        start += 1
+    old_end, new_end = len(original), len(edited)
+    while old_end > start and new_end > start and original[old_end - 1] == edited[new_end - 1]:
+        old_end -= 1
+        new_end -= 1
+    if len(original) == len(edited):
+        return [('replace', start, old_end, start, new_end)]
+    return [(action, start + i, start + j, start + k, start + l)
+            for action, i, j, k, l in SequenceMatcher(
+                None, original[start:old_end], edited[start:new_end], autojunk=False
+            ).get_opcodes()]
 
 
 def _edit_word_paragraph(paragraph, before: str, after: str) -> None:
@@ -193,15 +208,15 @@ def _plain_text_run(run) -> bool:
 
 
 def render_document_edit(db, doc, edited_content: str, upload_handler, owner: str | None, auth_manager=None) -> bytes:
-    """Validate an edit against the untouched first version and owned upload."""
+    """Replay saved edits in order, preserving paragraph identity between versions."""
     from core.database import DocumentVersion
 
-    original = db.query(DocumentVersion).filter(
+    versions = db.query(DocumentVersion).filter(
         DocumentVersion.document_id == doc.id,
-        DocumentVersion.version_number == 1,
-    ).first()
-    if not original:
+    ).order_by(DocumentVersion.version_number).all()
+    if not versions or versions[0].version_number != 1:
         raise UnsafeWordEdit("The original Word version is unavailable")
+    original = versions[0]
     upload_id = source_upload_id(original.content)
     if not upload_id or source_upload_id(edited_content) != upload_id:
         raise UnsafeWordEdit("The Word source reference must stay intact")
@@ -209,4 +224,24 @@ def render_document_edit(db, doc, edited_content: str, upload_handler, owner: st
     if not resolved:
         raise UnsafeWordEdit("The original Word file is unavailable")
     with open(resolved['path'], 'rb') as file:
-        return render_edited_word(file.read(), original.content, edited_content)
+        result = file.read()
+    content = original.content
+    rendered = {content: result}
+    # Restores and historical exports stop at the existing snapshot rather than
+    # interpreting a restore as deletion of subsequently inserted paragraphs.
+    target = next((version for version in versions if version.content == edited_content), None)
+    current = next((version for version in reversed(versions)
+                    if version.content == doc.current_content), None)
+    stop = target or current
+    if stop is None:
+        raise UnsafeWordEdit("The current Word version is unavailable")
+    for version in versions[1:]:
+        if version.version_number > stop.version_number:
+            break
+        if version.content in rendered:
+            result = rendered[version.content]
+        else:
+            result = render_edited_word(result, content, version.content)
+            rendered[version.content] = result
+        content = version.content
+    return render_edited_word(result, content, edited_content)

@@ -775,7 +775,8 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
 
             _assert_pdf_marker_upload_owned(request, incoming_content, user, upload_handler)
             from src.word_document import UnsafeWordEdit, render_document_edit, source_upload_id
-            if doc.language == "docx" or source_upload_id(doc.current_content or ""):
+            is_word_doc = doc.language == "docx" or source_upload_id(doc.current_content or "")
+            if is_word_doc:
                 try:
                     render_document_edit(db, doc, incoming_content, upload_handler, user,
                                          getattr(request.app.state, "auth_manager", None))
@@ -789,7 +790,9 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
 
             now = datetime.now(timezone.utc)
             coalesced = False
-            if latest_ver and latest_ver.source == "user" and not req.force_version:
+            # Word exports replay accepted snapshots; overwriting one would
+            # erase the paragraph mapping used to validate the following edit.
+            if latest_ver and latest_ver.source == "user" and not req.force_version and not is_word_doc:
                 ver_time = latest_ver.created_at
                 if ver_time.tzinfo is None:
                     ver_time = ver_time.replace(tzinfo=timezone.utc)
