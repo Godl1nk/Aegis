@@ -36,12 +36,13 @@ function harness(content = 'Week 6:\nBlank', language = 'text') {
   const timers = new Map();
   let timerId = 0;
   const ctx = {
-    document: { getElementById: id => elements.get(id) || null, querySelectorAll: () => [] },
+    document: { getElementById: id => elements.get(id) || null, querySelectorAll: () => [], removeEventListener() {} },
     docs: new Map([['doc-a', { id: 'doc-a', content, language, title: 'Logbook', version: 3 }]]),
     activeDocId: 'doc-a', API_BASE: '', uiModule: { showToast() {}, showError() {} },
     sessionModule: { getCurrentSessionId: () => '' },
     _diffModeActive: false, _diffOldContent: null, _diffNewContent: null,
     _diffChunks: [], _diffUnresolvedCount: 0, _lastAutoSaveErrorAt: 0,
+    _versionSavedContent: null, _versionClickOutside: null, _versionPreviewRequest: 0,
     _coalesceDiffBaseline: null, _coalesceDiffDocId: null, _coalesceDiffTimer: null,
     _pdfViewState: new Map(), DIFF_MODE_THRESHOLD: 1,
     streamDocFinalize: () => null, _isHtmlPreviewVisible: () => false,
@@ -67,7 +68,8 @@ function harness(content = 'Week 6:\nBlank', language = 'text') {
     '_isFormBackedDoc', '_isWordBackedDoc', '_computeLineDiff', '_buildDiffChunks',
     'enterDiffMode', '_getReviewedContent', '_applyResolvedChunksToTextarea',
     '_resolveAllChunks', 'exitDiffMode', 'saveCurrentToMap', 'saveDocument',
-    '_syncHeaderActions', 'handleDocUpdate', '_detachDocFromSession', 'closeTab',
+    '_syncHeaderActions', 'handleDocUpdate', '_detachDocFromSession', 'closeTab', '_closeVersionPanel',
+    'previewVersion', 'exportAsDocx', '_getExportBaseName',
   ];
   for (const name of functions) vm.runInContext(functionSource(name), ctx);
   return { ctx, textarea, frame, elements, requests, frameLoads: () => frameLoads,
@@ -177,4 +179,73 @@ test('late save responses cannot overwrite a newer AI version', async () => {
   assert.equal(h.ctx.docs.get('doc-a').content, 'Week 6:\nNewer AI fill');
   assert.equal(h.ctx.docs.get('doc-a').version, 5);
   assert.equal(h.elements.get('doc-version-badge').textContent, 'v5');
+});
+
+test('an AI fill invalidates an open historical preview before the next outside click', () => {
+  const marker = '<!-- word_source upload_id="logbook.docx" -->\n';
+  const h = harness(marker + 'Week 6:\nBlank', 'docx');
+  h.ctx._versionSavedContent = h.textarea.value;
+  h.textarea.value = marker + 'Earlier version being previewed';
+  const filled = marker + 'Week 6:\nFilled';
+  h.update(filled);
+  h.ctx._closeVersionPanel(); // Outside click after the AI update.
+  h.ctx.saveCurrentToMap();
+  assert.equal(h.textarea.value, filled);
+  assert.equal(h.ctx.docs.get('doc-a').content, filled);
+  assert.equal(h.ctx._versionSavedContent, null);
+  assert.equal(h.requests.length, 0);
+});
+
+test('saving while previewing history preserves the current saved content', async () => {
+  const h = harness('Week 6:\nFilled');
+  h.ctx._versionSavedContent = h.textarea.value;
+  h.textarea.value = 'Week 6:\nBlank';
+  await h.ctx.saveDocument({ silent: true });
+  assert.equal(h.requests[0].content, 'Week 6:\nFilled');
+  assert.equal(h.ctx.docs.get('doc-a').content, 'Week 6:\nFilled');
+});
+
+test('a slow historical preview cannot replace a newer AI fill', async () => {
+  const h = harness();
+  h.ctx._versionSavedContent = h.textarea.value;
+  let finishPreview;
+  h.ctx.fetch = () => new Promise(resolve => { finishPreview = resolve; });
+  const pending = h.ctx.previewVersion(1);
+  h.update('Week 6:\nFilled');
+  finishPreview({ json: async () => ({ content: 'Old blank version' }) });
+  await pending;
+  assert.equal(h.textarea.value, 'Week 6:\nFilled');
+});
+
+test('Word export during a historical preview does not save the historical text', async () => {
+  const filled = '<!-- word_source upload_id="logbook.docx" -->\nWeek 6:\nFilled';
+  const h = harness(filled, 'docx');
+  h.ctx._versionSavedContent = filled;
+  h.textarea.value = filled.replace('Filled', 'Blank');
+  const calls = [];
+  let downloads = 0;
+  h.ctx.document.createElement = () => ({ click() { downloads++; } });
+  h.ctx.URL = { createObjectURL: () => 'blob:export', revokeObjectURL() {} };
+  h.ctx.fetch = async (url, options) => {
+    calls.push({ url, method: options.method || 'GET' });
+    return { ok: true, json: async () => ({ current_content: filled, version_count: 3 }), blob: async () => ({}) };
+  };
+  await h.ctx.exportAsDocx();
+  assert.equal(downloads, 1);
+  assert.deepEqual(calls.map(call => call.method), ['GET', 'GET']);
+  assert.equal(calls[1].url, '/api/document/doc-a/export-docx');
+});
+
+test('Word export refuses to overwrite a newer saved version with stale local text', async () => {
+  const marker = '<!-- word_source upload_id="logbook.docx" -->\n';
+  const h = harness(marker + 'Blank', 'docx');
+  const calls = [], errors = [];
+  h.ctx.uiModule.showError = message => errors.push(message);
+  h.ctx.fetch = async (url, options) => {
+    calls.push({ url, method: options.method || 'GET' });
+    return { ok: true, json: async () => ({ current_content: marker + 'Filled', version_count: 4 }) };
+  };
+  await h.ctx.exportAsDocx();
+  assert.equal(calls.length, 1);
+  assert.match(errors[0], /changed.*Reopen/);
 });

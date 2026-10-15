@@ -4533,6 +4533,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   function switchToDoc(docId, opts = {}) {
     if (!docs.has(docId)) return;
     _hideLoadingOverlay();
+    _closeVersionPanel();
     if (_diffModeActive) exitDiffMode(true);
 
     // Save current doc state before switching. Skipped when the pane was JUST
@@ -4779,7 +4780,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     } else if (textarea) {
       // The diff textarea contains interleaved old/new lines for display only.
       // Saving or closing the document must use the reviewed content instead.
-      const content = _diffModeActive ? _getReviewedContent() : textarea.value;
+      const content = _versionSavedContent !== null ? _versionSavedContent
+        : (_diffModeActive ? _getReviewedContent() : textarea.value);
       // Don't clobber a PDF/form-backed doc's source when the textarea is empty
       // (it's hidden behind the rendered PDF view, so its value isn't the source
       // of truth). Overwriting here dropped the pdf_form_source marker, so after
@@ -6978,6 +6980,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   }
 
   export function closePanel(direction) {
+    _closeVersionPanel();
     if (_diffModeActive) exitDiffMode(true);
     if (!isOpen) {
       if (direction !== 'down' && Modals.isRegistered('doc-panel')) {
@@ -9772,20 +9775,27 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (!textarea) return;
     if (_isWordBackedDoc(docs.get(activeDocId)?.content)) {
       try {
-        const current = await fetch(`${API_BASE}/api/document/${activeDocId}`, { credentials: 'same-origin' });
+        saveCurrentToMap();
+        const exportingDocId = activeDocId;
+        const content = docs.get(exportingDocId).content;
+        const baseName = _getExportBaseName();
+        const current = await fetch(`${API_BASE}/api/document/${exportingDocId}`, { credentials: 'same-origin' });
         if (!current.ok) throw new Error('Could not read the Word document');
         const saved = await current.json();
-        if (textarea.value !== saved.current_content) {
-          const save = await fetch(`${API_BASE}/api/document/${activeDocId}`, {
+        if (content !== saved.current_content) {
+          if (saved.version_count !== docs.get(exportingDocId)?.version) {
+            throw new Error('The Word document changed. Reopen it before exporting so newer edits are preserved.');
+          }
+          const save = await fetch(`${API_BASE}/api/document/${exportingDocId}`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
-            body: JSON.stringify({ content: textarea.value }),
+            body: JSON.stringify({ content }),
           });
           if (!save.ok) {
             const detail = await save.json().catch(() => ({}));
             throw new Error(detail.detail || `Word save failed (HTTP ${save.status})`);
           }
         }
-        const response = await fetch(`${API_BASE}/api/document/${activeDocId}/export-docx`, { credentials: 'same-origin' });
+        const response = await fetch(`${API_BASE}/api/document/${exportingDocId}/export-docx`, { credentials: 'same-origin' });
         if (!response.ok) {
           const detail = await response.json().catch(() => ({}));
           throw new Error(detail.detail || `Word export failed (HTTP ${response.status})`);
@@ -9793,7 +9803,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         const url = URL.createObjectURL(await response.blob());
         const a = document.createElement('a');
         a.href = url;
-        a.download = _getExportBaseName() + '.docx';
+        a.download = baseName + '.docx';
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
         if (uiModule) uiModule.showToast('Exported original Word document with edits');
@@ -10392,6 +10402,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
   /** Open the editor panel and stream a document into it live. */
   export function streamDocOpen(title, language) {
+    _closeVersionPanel();
     // Discard any pending AI-edit diff before this stream changes the active
     // document. When the AI streams a NEW document while an unapproved diff is
     // open on the current one, streamDocOpen reassigns activeDocId below; if the
@@ -10711,6 +10722,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
   /** Handle SSE doc_update event from AI */
   export function handleDocUpdate(data) {
+    _closeVersionPanel();
     const streamingId = streamDocFinalize();
     const previousActiveDocId = activeDocId;
     const htmlPreviewWasVisible = _isHtmlPreviewVisible();
@@ -11029,11 +11041,13 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   /** Toggle version history panel */
   let _versionClickOutside = null;
   let _versionSavedContent = null;  // stash current content for preview/revert
+  let _versionPreviewRequest = 0;
   async function toggleVersionHistory() {
     const panel = document.getElementById('doc-version-panel');
     if (!panel || !activeDocId) return;
 
     if (panel.classList.contains('hidden')) {
+      if (_diffModeActive) exitDiffMode(true);
       // Stash current content so we can restore on close
       const ta = document.getElementById('doc-editor-textarea');
       _versionSavedContent = ta ? ta.value : null;
@@ -11081,6 +11095,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   }
 
   function _closeVersionPanel() {
+    _versionPreviewRequest++;
     const panel = document.getElementById('doc-version-panel');
     if (panel) panel.classList.add('hidden');
     // Restore to latest (stashed) content
@@ -11184,9 +11199,12 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   /** Preview a specific version in the editor (without saving) */
   async function previewVersion(num) {
     if (!activeDocId) return;
+    const docId = activeDocId;
+    const requestId = ++_versionPreviewRequest;
     try {
-      const res = await fetch(`${API_BASE}/api/document/${activeDocId}/version/${num}`);
+      const res = await fetch(`${API_BASE}/api/document/${docId}/version/${num}`);
       const ver = await res.json();
+      if (requestId !== _versionPreviewRequest || docId !== activeDocId || _versionSavedContent === null) return;
       const textarea = document.getElementById('doc-editor-textarea');
       if (textarea) textarea.value = ver.content || '';
       syncHighlighting();
