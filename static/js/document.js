@@ -2102,9 +2102,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       if (showWord) {
         if (wrap) wrap.style.display = 'none';
         const frame = wordPane.querySelector('iframe');
-        if (frame && frame.dataset.docId !== activeDocId) {
+        const version = String(wordDoc.version || 1);
+        if (frame && (frame.dataset.docId !== activeDocId || frame.dataset.version !== version)) {
           frame.src = `${API_BASE}/api/document/${activeDocId}/render-docx?t=${Date.now()}`;
           frame.dataset.docId = activeDocId;
+          frame.dataset.version = version;
         }
       } else if (isWord && wrap) {
         wrap.style.display = '';
@@ -4665,6 +4667,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   // cache must never soft-delete a saved document from the Library.
   function _detachDocFromSession(docId, { toast = false } = {}) {
     if (activeDocId === docId) {
+      if (_diffModeActive) exitDiffMode(true);
       saveDocument({ silent: true }).catch(() => {});
     }
     docs.delete(docId);
@@ -4774,12 +4777,15 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       doc.content = _buildEmailContent(to, subject, inReplyTo, references, _emailBody, sourceUid, sourceFolder, cc, bcc);
       _persistEmailLocalDraftSoon();
     } else if (textarea) {
+      // The diff textarea contains interleaved old/new lines for display only.
+      // Saving or closing the document must use the reviewed content instead.
+      const content = _diffModeActive ? _getReviewedContent() : textarea.value;
       // Don't clobber a PDF/form-backed doc's source when the textarea is empty
       // (it's hidden behind the rendered PDF view, so its value isn't the source
       // of truth). Overwriting here dropped the pdf_form_source marker, so after
       // minimize→restore the doc came back blank.
-      if (!(textarea.value === '' && _isFormBackedDoc(doc.content))) {
-        doc.content = textarea.value;
+      if (!(content === '' && _isFormBackedDoc(doc.content))) {
+        doc.content = content;
       }
     }
   }
@@ -6972,6 +6978,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   }
 
   export function closePanel(direction) {
+    if (_diffModeActive) exitDiffMode(true);
     if (!isOpen) {
       if (direction !== 'down' && Modals.isRegistered('doc-panel')) {
         _minimizedDocId = null;
@@ -8800,23 +8807,22 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
     _updateDiffStatus();
 
-    // Persist partial progress so refresh doesn't lose individually-resolved chunks
-    _applyResolvedChunksToTextarea();
-    saveDocument({ silent: true });
-
     if (_diffUnresolvedCount === 0) {
-      setTimeout(() => exitDiffMode(false), 300);
+      exitDiffMode(false);
     } else {
+      // Persist explicit decisions while retaining all other saved AI edits.
+      _applyResolvedChunksToTextarea();
+      saveDocument({ silent: true });
       const nextChunk = _diffChunks.find(c => !c.resolved);
       requestAnimationFrame(() => _scrollToDiffChunk(nextChunk?.id));
     }
   }
 
-  /** Compute current content from old + resolved chunk decisions; unresolved chunks
-   *  default to the original (rejected) until the user decides. Updates textarea. */
-  function _applyResolvedChunksToTextarea() {
-    const textarea = document.getElementById('doc-editor-textarea');
-    if (!textarea) return;
+  /** AI edits are already saved. Only an explicit rejection rolls them back. */
+  function _getReviewedContent() {
+    if (!_diffChunks.some(chunk => chunk.resolved && !chunk.accepted)) {
+      return _diffNewContent || '';
+    }
     const entries = _computeLineDiff(_diffOldContent || '', _diffNewContent || '');
     const result = [];
     let chunkIdx = 0;
@@ -8833,15 +8839,19 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
           else chunkNew.push(entries[i].line);
           i++;
         }
-        // Resolved+accepted → use new; resolved+rejected OR unresolved → keep old
-        if (chunk && chunk.resolved && chunk.accepted) {
-          result.push(...chunkNew);
-        } else {
+        if (chunk && chunk.resolved && !chunk.accepted) {
           result.push(...chunkOld);
+        } else {
+          result.push(...chunkNew);
         }
       }
     }
-    textarea.value = result.join('\n');
+    return result.join('\n');
+  }
+
+  function _applyResolvedChunksToTextarea() {
+    const textarea = document.getElementById('doc-editor-textarea');
+    if (textarea) textarea.value = _getReviewedContent();
   }
 
   /** Resolve all chunks at once */
@@ -8856,52 +8866,18 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     exitDiffMode(false);
   }
 
-  /** Exit diff mode and apply resolved changes */
-  function exitDiffMode(discard) {
+  /** Dismissing a review is read-only; explicit Accept/Reject persists decisions. */
+  function exitDiffMode(dismiss) {
     if (!_diffModeActive) return;
     _diffModeActive = false;
-    const acceptedAnyDiffChunk = !discard && _diffChunks.some(chunk => chunk && chunk.resolved && chunk.accepted);
+    const acceptedAnyDiffChunk = !dismiss && _diffChunks.some(chunk => chunk && chunk.resolved && chunk.accepted);
 
     const textarea = document.getElementById('doc-editor-textarea');
     const codeEl = document.getElementById('doc-editor-code');
     const wrap = document.getElementById('doc-editor-wrap');
     if (wrap) wrap.classList.remove('diff-mode');
 
-    if (discard) {
-      // Reject all — restore original content
-      if (textarea) textarea.value = _diffOldContent || '';
-    } else {
-      // Build final content from resolved chunks
-      const oldLines = (_diffOldContent || '').split('\n');
-      const newLines = (_diffNewContent || '').split('\n');
-      const entries = _computeLineDiff(_diffOldContent || '', _diffNewContent || '');
-
-      const result = [];
-      let chunkIdx = 0;
-      let i = 0;
-      while (i < entries.length) {
-        if (entries[i].type === 'equal') {
-          result.push(entries[i].line);
-          i++;
-        } else {
-          // Find the matching chunk
-          const chunk = _diffChunks[chunkIdx++];
-          // Skip all entries belonging to this chunk
-          const chunkOld = [], chunkNew = [];
-          while (i < entries.length && entries[i].type !== 'equal') {
-            if (entries[i].type === 'delete') chunkOld.push(entries[i].line);
-            else chunkNew.push(entries[i].line);
-            i++;
-          }
-          if (chunk && chunk.accepted) {
-            result.push(...chunkNew);
-          } else {
-            result.push(...chunkOld);
-          }
-        }
-      }
-      if (textarea) textarea.value = result.join('\n');
-    }
+    _applyResolvedChunksToTextarea();
 
     // Restore editor state
     if (textarea) textarea.readOnly = false;
@@ -8923,7 +8899,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
     syncHighlighting();
     updateLineNumbers(textarea ? textarea.value : '');
-    saveDocument({ silent: true });
+    if (!dismiss) saveDocument({ silent: true });
     if (acceptedAnyDiffChunk) {
       const lang = ((docs.get(activeDocId)?.language) || document.getElementById('doc-language-select')?.value || '').toLowerCase();
       if (lang === 'markdown') {
@@ -9464,12 +9440,16 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         throw new Error(detail.detail || `Document save failed: HTTP ${res.status}`);
       }
       const doc = await res.json();
-      const badge = document.getElementById('doc-version-badge');
-      if (badge) { const _v = doc.version_count || 1; badge.textContent = `v${_v}`; badge.style.display = _v > 1 ? '' : 'none'; }
-      // Update map
-      if (docs.has(savingDocId)) {
-        docs.get(savingDocId).version = doc.version_count || 1;
-        docs.get(savingDocId).content = contentToSave;
+      // A newer AI update or user edit may have arrived while this save was
+      // in flight. Never replace current content with the submitted snapshot.
+      const currentDoc = docs.get(savingDocId);
+      if (currentDoc) {
+        currentDoc.version = Math.max(currentDoc.version || 1, doc.version_count || 1);
+      }
+      if (activeDocId === savingDocId && currentDoc) {
+        const badge = document.getElementById('doc-version-badge');
+        if (badge) { const _v = currentDoc.version; badge.textContent = `v${_v}`; badge.style.display = _v > 1 ? '' : 'none'; }
+        _syncHeaderActions();
       }
       _syncDocIndicator();
       if (!silent && uiModule) uiModule.showToast(forceVersion ? 'New version saved' : 'Document saved');
@@ -10417,8 +10397,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // open on the current one, streamDocOpen reassigns activeDocId below; if the
     // stale diff isn't cleared first, a later exitDiffMode applies the old doc's
     // content to the new one and overwrites it (issue #2467). activeDocId still
-    // points at the previously-active doc here, so exitDiffMode(true) restores
-    // and saves THAT doc — same guard handleDocUpdate/switchToDoc use.
+    // points at the previously-active doc here. Dismiss its review without
+    // rolling back saved edits — same guard handleDocUpdate/switchToDoc use.
     if (_diffModeActive) exitDiffMode(true);
     if (!_streamDocId || activeDocId !== _streamDocId) saveCurrentToMap();
     _resetTransientDocViews();
@@ -10734,15 +10714,9 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const streamingId = streamDocFinalize();
     const previousActiveDocId = activeDocId;
     const htmlPreviewWasVisible = _isHtmlPreviewVisible();
-    // Discard any pending AI-edit diff before this update changes the active
-    // document. The diff state (_diffModeActive/_diffOldContent/...) is a
-    // module-global singleton bound to whatever doc was active when the diff
-    // opened; if we switch documents without clearing it, a later tab switch or
-    // Accept/Reject-All flushes the stale diff's content into the now-active
-    // doc and silently overwrites it (issue #2467). activeDocId still points at
-    // the previously-active doc here, so exitDiffMode(true) restores and saves
-    // THAT doc before we reassign activeDocId below — mirroring switchToDoc()
-    // and enterDiffMode().
+    // Clear the old document's review before switching (issue #2467).
+    // AI edits have already been saved: dismissing must not write the old
+    // baseline back over them, including when another AI update arrives.
     if (_diffModeActive) exitDiffMode(true);
     let docId = data.doc_id;
     let newContent = data.content || '';
@@ -10918,7 +10892,15 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       // textarea the mount just created.
       _ensureDocPaneMounted();
       const editTextarea = document.getElementById('doc-editor-textarea') || textarea;
-      if (markdownPreviewWasVisible && _refreshMarkdownPreviewIfVisible(docId, newContent)) {
+      if (_isWordBackedDoc(newContent) || _isFormBackedDoc(newContent)) {
+        // These edits are saved by the tool and displayed as document pages.
+        // A hidden source diff cannot be reviewed and must never undo a fill.
+        clearTimeout(_coalesceDiffTimer);
+        _coalesceDiffBaseline = null;
+        _coalesceDiffDocId = null;
+        if (editTextarea) editTextarea.value = newContent;
+        syncHighlighting();
+      } else if (markdownPreviewWasVisible && _refreshMarkdownPreviewIfVisible(docId, newContent)) {
         // Markdown docs shown as RENDERED preview: refresh the preview in place
         // (issue #2182) rather than dropping into a code diff.
       } else if (htmlPreviewWasVisible && _refreshHtmlPreviewIfVisible(docId, newContent)) {

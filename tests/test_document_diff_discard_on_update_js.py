@@ -8,14 +8,14 @@ diff is not discarded first, a later tab switch (``switchToDoc`` → ``exitDiffM
 or Accept/Reject-All flushes the stale diff's content into the now-active document and
 silently overwrites it.
 
-The fix discards any pending diff while ``activeDocId`` still points at the
+The fix dismisses any pending diff while ``activeDocId`` still points at the
 previously-active doc, mirroring the guard ``switchToDoc()`` and ``enterDiffMode()``
 already use. It must run in BOTH places that switch the active document for an AI
 update: ``handleDocUpdate()`` and ``streamDocOpen()``. The streamed path matters most —
 when the AI creates a NEW document (the issue's own repro), ``streamDocOpen`` reassigns
 ``activeDocId`` first, so a guard only in ``handleDocUpdate`` would fire too late and
-still overwrite the new doc. Kept as a static source check because document.js is
-browser-coupled and not importable in pytest.
+still overwrite the new doc. Dismissal must retain already-saved edits without
+saving a rollback; executable coverage is in document_saved_edits.test.mjs.
 """
 
 from pathlib import Path
@@ -54,8 +54,8 @@ def test_handle_doc_update_discards_pending_diff():
 
 def test_diff_discard_runs_before_active_doc_is_switched():
     # The discard must run while activeDocId still points at the previously
-    # active doc, so exitDiffMode(true) restores and saves THAT doc — not the new
-    # one. Any activeDocId reassignment inside handleDocUpdate must come after it.
+    # active doc, so exitDiffMode(true) clears THAT doc's review without touching
+    # the new one. Any activeDocId reassignment must come after it.
     guard_at = HANDLE_DOC_UPDATE.index(GUARD)
     reassign_at = HANDLE_DOC_UPDATE.index("activeDocId = docId;")
     assert guard_at < reassign_at
